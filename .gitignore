@@ -1,0 +1,9 @@
+*.user
+.vs/
+build/
+release/
+*.whl
+*.tar.gz
+*.7z
+*.zip
+*.rar

@@ -1,0 +1,65 @@
+cmake_minimum_required( VERSION 3.24 )
+
+project( nfs5_enhanced LANGUAGES C CXX )
+
+if ( NOT CMAKE_SIZEOF_VOID_P EQUAL 4 )
+    message( FATAL_ERROR "'Porsche.exe' is a 32 bit process, configure with -A Win32" )
+endif()
+
+set( CMAKE_CXX_STANDARD 23 )
+set( CMAKE_CXX_STANDARD_REQUIRED ON )
+set( CMAKE_CXX_EXTENSIONS OFF )
+
+add_library( Zydis STATIC external/zydis/Zydis.c )
+target_include_directories( Zydis PUBLIC external/zydis )
+target_compile_definitions( Zydis PUBLIC ZYDIS_STATIC_BUILD ZYCORE_STATIC_BUILD )
+
+add_library( safetyhook STATIC external/safetyhook/safetyhook.cpp )
+target_include_directories( safetyhook PUBLIC external/safetyhook )
+target_link_libraries( safetyhook PUBLIC Zydis )
+
+add_library( nfs5_enhanced SHARED
+    src/main.cpp
+    src/core/config.cpp
+    src/core/crash_handler.cpp
+    src/core/hook_util.cpp
+    src/core/log.cpp
+    src/game/thrash.cpp
+    src/subsystems/patch_silent_compat/affinity.cpp
+    src/subsystems/patch_silent_compat/qpc_timer.cpp
+    src/subsystems/patch_silent_compat/silent_compat.cpp
+    src/subsystems/widescreen/widescreen.cpp
+    src/subsystems/detail/detail.cpp
+    src/subsystems/framerate/framerate.cpp
+    src/subsystems/framerate/interpolation.cpp
+    src/subsystems/hud_scaling/hud_scaling.cpp
+    src/subsystems/hud_scaling/loading_screen.cpp
+    src/subsystems/text/text_quality.cpp
+    src/subsystems/io_hooks/io_hooks.cpp
+    src/resources/version.rc
+)
+
+set_target_properties( nfs5_enhanced PROPERTIES
+    PREFIX ""
+    SUFFIX ".asi"
+    OUTPUT_NAME "nfs5_enhanced"
+)
+
+target_include_directories( nfs5_enhanced PRIVATE src )
+target_compile_definitions( nfs5_enhanced PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00 )
+target_link_libraries( nfs5_enhanced PRIVATE safetyhook winmm )
+
+if ( MSVC )
+    set( CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" )
+    set_property( TARGET nfs5_enhanced Zydis safetyhook PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" )
+    target_compile_options( nfs5_enhanced PRIVATE /W4 /permissive- /Zc:__cplusplus /utf-8 )
+    target_link_options( nfs5_enhanced PRIVATE /SAFESEH:NO )
+else()
+    # The game only guarantees 4 byte stack alignment on entry to hooks.
+    target_compile_options( Zydis PRIVATE -mstackrealign )
+    target_compile_options( safetyhook PRIVATE -mstackrealign )
+    target_compile_options( nfs5_enhanced PRIVATE -mstackrealign )
+    target_compile_options( nfs5_enhanced PRIVATE -msse2 -mfpmath=sse )
+    target_compile_options( nfs5_enhanced PRIVATE -Wall -Wextra -Wno-cast-function-type -Wno-missing-field-initializers )
+    target_link_options( nfs5_enhanced PRIVATE -static -static-libgcc -static-libstdc++ -s -Wl,--enable-stdcall-fixup -Wl,--exclude-all-symbols )
+endif()

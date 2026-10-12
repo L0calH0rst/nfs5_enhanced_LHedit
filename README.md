@@ -1,0 +1,287 @@
+<p align="left">
+  <img src="images/logo.png" alt="NFS5 Enhanced" width="10%">
+</p>
+
+---
+
+# NFS5 Enhanced - Need for Speed: Porsche Unleashed Enhanced Patch
+
+[![GitHub All Releases](https://img.shields.io/github/downloads/iArtorias/nfs5_enhanced/total.svg)](https://github.com/iArtorias/nfs5_enhanced/releases)
+
+> The game you remember, running the way it always should have: wide on any screen,
+> smooth at any refresh rate, stable on current Windows, and without touching a single game file.
+
+> [!IMPORTANT]
+> Tested on the **USA** release with the **official v3.5 patch** (`Porsche.exe` with
+> MD5 `316F33A59DB48A7DB2A75CC4B3BD03DC`). Any other executable is detected at startup and nothing is hooked,
+> so the game runs untouched instead of crashing.
+
+> [!NOTE]
+> NFS5 Enhanced is an ASI plugin. `Porsche.exe` and the game data are never modified on disk, and
+> removing two files restores the original game.
+
+---
+
+## Overview
+
+**NFS5 Enhanced** is an *enhanced vanilla* patch. It does not add cars, tracks, physics changes
+or new visuals. Everything the game shows is still drawn by the game itself, with its own models,
+textures, HUD art and fonts. What changes is everything around it: the projection is widened
+instead of cropped, the HUD keeps its 640x480 proportions at FullHD, 2K, 4K, 8K, motion is
+interpolated between simulation steps, distant scenery and cars stay on screen, and a long list
+of crashes and Windows 10/11 incompatibilities is gone.
+
+It also contains a full rewrite of the NFS Porsche fixes from Silent's [SilentPatchNFS90s](https://github.com/CookiePLMonster/SilentPatchNFS90s), so
+that patch is no longer needed alongside it.
+
+Every option lives in one file, `nfs5_enhanced.ini`, and every feature can be switched off on its
+own.
+
+---
+
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center"><b>Quick Race</b><br><a href="images/screenshot-quick-race.png"><img src="images/screenshot-quick-race.png" alt="Quick Race mode" width="50%"></a></td>
+    <td align="center"><b>Evolution</b><br><a href="images/screenshot-evolution.png"><img src="images/screenshot-evolution.png" alt="Evolution mode" width="50%"></a></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Factory Driver</b><br><a href="images/screenshot-factory-driver.png"><img src="images/screenshot-factory-driver.png" alt="Factory Driver mode" width="50%"></a></td>
+    <td align="center"><b>Multiplayer</b><br><a href="images/screenshot-multiplayer.png"><img src="images/screenshot-multiplayer.png" alt="Multiplayer" width="50%"></a></td>
+  </tr>
+</table>
+
+## Features
+
+### Widescreen
+
+| Feature | What it does |
+|---|---|
+| Hor+ projection | Every 3D camera, including the rear view mirror, keeps the 4:3 vertical view and opens up to the sides. Nothing is cropped or stretched. |
+| Round light flares | Headlight and lamp flares stay round on wide screens instead of being stretched. |
+| Unlocked resolutions | Every display mode of 640x480 and up is offered. The game used to hide modes behind a video memory estimate from 2000. |
+| Race resolution | Races can use the Options resolution, the desktop resolution or any fixed size, in 16 or 32 bit color. |
+| Sharp menus | The 640x480 menus, garage and showroom are rendered at full display resolution and stay at 4:3, with crisp text instead of a blurry upscale (through the included `DDrawCompat.ini`). |
+
+### HUD
+
+| Feature | What it does |
+|---|---|
+| HUD scaling | The race HUD and the in race menus grow with the screen height, so they keep the size they had at 640x480. Each element stays anchored to its own screen edge. |
+| Text scaling | HUD text is scaled together with the rest of the HUD. |
+| Options that apply | Speedometer, tachometer and the other *Options > Display* settings now apply in races at every resolution. The game edited the layout of one resolution and raced with another. |
+| Analog or digital | A gauge set to analog shows only the gauge, a gauge set to digital shows only the number. The original drew the digital value inside the analog gauge too. |
+| Options preview | The HUD preview in the options menu is scaled to match. |
+| Sharp text | Every font is a small 4 bit glyph sheet made for 640x480. Each sheet is redrawn at 2 or 4 times its resolution with smooth edges, so menu and HUD text stays crisp at 1440p and 4K. Same typeface, same layout, same colors. |
+| Loading screen | The race loading screen and its progress bar fill the screen height instead of a small 640x480 box, optionally smoothed. |
+
+### Smoothness
+
+| Feature | What it does |
+|---|---|
+| Interpolation | The simulation runs at a fixed 64 steps per second. Car and camera positions and rotations are blended between steps, so motion is smooth at 120, 144 Hz and beyond. Teleports, resets and camera cuts are shown at once, never blended. |
+| Frame limiter | Separate frame caps for races and for menus, paced with a high resolution waitable timer. |
+| Precise game clock | The 128 Hz `timeSetEvent` game clock is replaced with a `QueryPerformanceCounter` scheduler that does not drift or stutter. |
+
+### Draw distance and detail
+
+| Feature | What it does |
+|---|---|
+| Draw distance | Track scenery is drawn up to 4 times further, on top of the *View Distance* option. |
+| Far clip | The 700 unit far plane that cut off cars and objects follows the new draw distance. |
+| Car detail | Cars keep their detailed models 4 times further. The wider Hor+ view is compensated automatically. |
+| Full car detail | The game never drew the most detailed car model in races, not even for your own car, so cars looked simpler than in the garage. Nearby cars now use the same model the garage shows. |
+| Full texture quality | The game rates any CPU above 2.1 GHz as a 1990s machine and loads every texture in 16 bit, the larger ones at half size, so car lettering, plates and decals look blurry next to the garage. Textures now load at the highest quality. |
+| Distant wheels | The two farthest car models have no wheels in the game data, cars in the distance now keep theirs. |
+
+### Stability and compatibility
+
+| Fix | What it does |
+|---|---|
+| No CD needed | A full install starts without the game disc. The game looked for its CD and asked for it in a loop when none was found, the disc check is skipped in memory. |
+| Windows 10 startup crash | Only attached keyboards and controllers are enumerated. This also makes the controller rebinding screen fast again. |
+| "DirectX 0" error | The game picks its graphics driver from the registry and claims DirectX 0 is installed when that driver cannot load, which often happens after some widescreen mods. A driver that fails to load is reported as the stock `dx7z.dll` instead. The registry itself is never written. |
+| Crash after a race | `gimme.dll` read past its buffer while converting the driver picture on the way back to the menu. |
+| Sun glare crash | The sun glare test read pixels outside the frame when the sun sat at the screen edge. |
+| Alt+Tab | All keys are released when the window loses focus, so no more stuck throttle. |
+| Alt+F4 | Closes the game again, a plain Alt still cannot stall it. |
+| Lock keys | `Caps Lock`, `Num Lock` and `Scroll Lock` are no longer forced off at startup. |
+| Clipboard | `Ctrl+V` pastes into name and chat boxes. |
+| CPU affinity | Only the game's own threads are pinned to one core. Sound, input and presentation run freely instead of sharing a core with the game. |
+| OpenGL driver leak | Memory leak fix for the Verok OpenGL Thrash drivers |
+
+### Loading
+
+| Feature | What it does |
+|---|---|
+| CPU clock check | The game measured the CPU clock for a full second on every video mode change, profile load and race start. It is now measured once and reused. |
+| Larger reads | Game archives are read in 1 MB chunks instead of 16 KB. |
+| Free space cache | The free disk space check that ran on every file open is cached for two seconds. |
+
+---
+
+## Requirements
+
+- Windows 10 or 11
+- **Need for Speed: Porsche Unleashed**, USA release plus the official **v3.5** patch applied over
+- [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) installed as
+  `dinput.dll` in the game folder
+- [DDrawCompat](https://github.com/narzoul/DDrawCompat) (`ddraw.dll`) is strongly recommended. The
+  included `DDrawCompat.ini` gives sharper menus and the wide resolution list.
+
+---
+
+## Installation
+
+### 1. Get the files
+
+Get the latest release from the [Releases](https://github.com/iArtorias/nfs5_enhanced/releases) page and unzip it anywhere.
+*The original `Porsche.exe` from the official **v3.5** patch is included.*
+
+### 2. Copy them into the game folder
+
+Copy `nfs5_enhanced.asi` and `nfs5_enhanced.ini` next to `Porsche.exe`. If you use DDrawCompat, back
+up your `DDrawCompat.ini` and copy the included one over it.
+
+### 3. Remove SilentPatchNFS90s
+
+If `SilentPatchNFS90s.asi` is in the game folder, rename it to `SilentPatchNFS90s.asi.disabled`.
+NFS5 Enhanced contains all of its NFS Porsche fixes. While both are present the fixes it shares
+with SilentPatch are skipped, so the two never patch the same code.
+
+### 4. Play
+
+Start the game as usual and pick a resolution in *Options > Graphics*. Menus stay at 4:3, races
+use the wide resolution.
+
+---
+
+## Configuration
+
+Everything is set in `nfs5_enhanced.ini`, and every setting is explained in the file. The sections:
+
+| Section | Contents |
+|---|---|
+| `[General]` | Log level, coexistence with `SilentPatchNFS90s`. |
+| `[Compat]` | The SilentPatch fixes, the crash fixes, graphics driver fallback. |
+| `[Affinity]` | Which threads are pinned and to which core. |
+| `[Timing]` | Precise game clock. |
+| `[Widescreen]` | Hor+, field of view, flares, resolution list, race resolution and color depth, car detail distance. |
+| `[Framerate]` | Frame caps, interpolation. |
+| `[IO]`, `[Loading]` | Read chunk size, free space cache, CPU clock check. |
+| `[HudScaling]` | HUD size, text, gauge style, loading screen. |
+| `[Text]` | Sharp text, enlargement factor and edge sharpness. |
+| `[Detail]` | Draw distance, far clip, distant wheels. |
+
+Common adjustments:
+
+| I want | Set |
+|---|---|
+| The original field of view on a wide screen | `HorPlus = 0` |
+| A wider view | `FovMultiplier = 1.1` |
+| Races at the desktop resolution | `RaceResolution = desktop` |
+| A smaller or larger HUD | `ScaleMultiplier = 0.8` or `1.2` |
+| Softer or crisper text edges | `Sharpness = 0.3` or `1.2` |
+| The original draw distance | `DrawDistanceScale = 1.0` |
+| A frame cap of 144 in races | `FpsLimit = 144` |
+
+> [!TIP]
+> With interpolation on, the race draws as often as it can. Cap it with `FpsLimit` or with `VSync`
+> in DDrawCompat.
+
+### DDrawCompat changes
+
+The included `DDrawCompat.ini` changes these settings, each marked with a comment in the file:
+
+| Setting | Value | Why |
+|---|---|---|
+| `CpuAffinity` | `app` | A process wide pin also trapped DirectSound, DirectInput and the presentation thread on one core. NFS5 Enhanced pins only the game's threads. |
+| `CpuAffinityRotation` | `off` | Rotation rewrites the process mask and undoes the per thread pinning. |
+| `Antialiasing` | `msaa4x` | Better antialiasing. |
+| `ResolutionScale` | `display(1)` | The 640x480 menus, garage and showroom are rendered at full display resolution. |
+| `SpriteDetection`, `SpriteFilter`, `SpriteTexCoord` | `zconst`, `point`, `round` | Menu text and HUD art stay sharp while 3D keeps normal filtering. |
+| `SupportedResolutions` | 640x480 up to 4K | The game's driver keeps only about 30 modes. This list makes sure the wide ones are among them. You can edit the list on your own. |
+
+---
+
+## Troubleshooting
+
+<details>
+<summary><b>"DirectX 0" error at startup</b></summary>
+
+Keep `ThrashDriver = auto`. If it still appears, set `ThrashDriver = dx` to always use the
+stock driver, and check that `drivers\dx7z.dll` exists in the game folder.
+
+</details>
+
+<details>
+<summary><b>The race resolution does not change</b></summary>
+
+The game's graphics driver keeps only about 30 display modes. If the requested one is not among
+them, the game's own choice is kept and the log says so. Add the resolution to
+`SupportedResolutions` in `DDrawCompat.ini`.
+
+</details>
+
+<details>
+<summary><b>The HUD is too large or too small</b></summary>
+
+Change `ScaleMultiplier`. `ReferenceHeight` sets the screen height at which the HUD
+has its original size.
+
+</details>
+
+<details>
+<summary><b>Frame rate drops on some tracks</b></summary>
+
+The longer draw distance asks a lot of an engine from 2000 on wide open tracks. Lower
+`DrawDistanceScale` to `2.0`, or `1.0` for the original distance.
+
+</details>
+
+<details>
+<summary><b>Nothing seems to change</b></summary>
+
+Check that `nfs5_enhanced.log` appears next to the ASI after starting the game. If it does not, the
+ASI loader is missing. If it does, the log names any hook that did not match the executable, which
+usually means a different game version.
+
+</details>
+
+<details>
+<summary><b>The game crashed</b></summary>
+
+`nfs5_enhanced.log` ends with the crash location and `nfs5_enhanced_crashdump.dmp` is written next to it. Include
+both in a bug report.
+
+</details>
+
+---
+
+## Building
+
+Visual Studio 2022/2026 with CMake 3.24 or newer:
+
+```bat
+cmake -S . -B build -A Win32
+cmake --build build --config Release
+```
+
+MinGW i686 works too, using the toolchain file in `cmake/`:
+
+```bat
+cmake -S . -B build-mingw -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-i686.cmake -DCMAKE_BUILD_TYPE=Release
+cmake --build build-mingw
+```
+
+[SafetyHook](https://github.com/cursey/safetyhook) and [Zydis](https://github.com/zyantific/zydis)
+are vendored as amalgamated sources under `external/`.
+
+---
+
+## Credits
+
+- [Silent](https://github.com/CookiePLMonster) for [SilentPatchNFS90s](https://github.com/CookiePLMonster/SilentPatchNFS90s), whose NFS Porsche fixes were rewritten here
+- [narzoul](https://github.com/narzoul) for [DDrawCompat](https://github.com/narzoul/DDrawCompat)
+- [ThirteenAG](https://github.com/ThirteenAG) for the [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader)
