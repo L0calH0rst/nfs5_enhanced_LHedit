@@ -17,8 +17,8 @@
 > so the game runs untouched instead of crashing.
 
 > [!NOTE]
-> NFS5 Enhanced is an ASI plugin. `Porsche.exe` and the game data are never modified on disk, and
-> removing two files restores the original game.
+> NFS5 Enhanced is an ASI plugin with its own graphics driver. `Porsche.exe` and the game data are
+> never modified on disk, and removing three files restores the original game.
 
 ---
 
@@ -30,6 +30,10 @@ textures, HUD art and fonts. What changes is everything around it: the projectio
 instead of cropped, the HUD keeps its 640x480 proportions at FullHD, 2K, 4K, 8K, motion is
 interpolated between simulation steps, distant scenery and cars stay on screen, and a long list
 of crashes and Windows 10/11 incompatibilities is gone.
+
+The game draws through a small graphics driver dynamic library of its own, the stock one is built on DirectX 7.
+NFS5 Enhanced ships a replacement driver, `dx11z.dll`, that renders the same game through
+Direct3D 11 and is used by default.
 
 It also contains a full rewrite of the NFS Porsche fixes from Silent's [SilentPatchNFS90s](https://github.com/CookiePLMonster/SilentPatchNFS90s), so
 that patch is no longer needed alongside it.
@@ -54,6 +58,24 @@ own.
 
 ## Features
 
+### Direct3D 11 renderer
+
+The game talks to its graphics driver through a fixed interface (THRASH). `dx11z.dll` implements
+that interface on Direct3D 11 and replaces the DirectX 7 `dx7z.dll`, so no DirectDraw wrapper is
+needed any more. It emulates exactly what the stock driver did, the game itself is not changed.
+
+| Feature | What it does |
+|---|---|
+| Sharp garage and showroom | The garage and showroom are rendered at the size they cover on the display and stay at 4:3, races are rendered at their own resolution. |
+| Antialiasing | Multisample antialiasing up to 8x, and optional anisotropic texture filtering. |
+| Window modes | Borderless window over the whole monitor, exclusive fullscreen at the desktop resolution, or a resizable window. The display never switches to 640x480. |
+| VSync | `On` or `Off`. `Off` presents frames at once, with tearing where the display allows it. |
+| Alt+Tab | The game minimizes when another program is activated and comes back on return. The game no longer pulls itself back in front. |
+| Movies | The intro and menu movies play through the same front buffer path as on the original driver. |
+| High DPI | The window is DPI aware, so the picture is not stretched by Windows scaling. |
+| Clean exit | The device is released before the game unloads the driver, so the process always ends. |
+| Fallback | `ThrashDriver = dx` in `nfs5_enhanced.ini` switches back to the stock `dx7z.dll` at any time. |
+
 ### Widescreen
 
 | Feature | What it does |
@@ -62,7 +84,6 @@ own.
 | Round light flares | Headlight and lamp flares stay round on wide screens instead of being stretched. |
 | Unlocked resolutions | Every display mode of 640x480 and up is offered. The game used to hide modes behind a video memory estimate from 2000. |
 | Race resolution | Races can use the Options resolution, the desktop resolution or any fixed size, in 16 or 32 bit color. |
-| Sharp menus | The 640x480 menus, garage and showroom are rendered at full display resolution and stay at 4:3, with crisp text instead of a blurry upscale (through the included `DDrawCompat.ini`). |
 
 ### HUD
 
@@ -127,8 +148,8 @@ own.
 - **Need for Speed: Porsche Unleashed**, USA release plus the official **v3.5** patch applied over
 - [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) installed as
   `dinput.dll` in the game folder
-- [DDrawCompat](https://github.com/narzoul/DDrawCompat) (`ddraw.dll`) is strongly recommended. The
-  included `DDrawCompat.ini` gives sharper menus and the wide resolution list.
+- [DDrawCompat](https://github.com/narzoul/DDrawCompat) (`ddraw.dll`) is only needed with the stock
+  DirectX 7 driver (`ThrashDriver = dx`).
 
 ---
 
@@ -141,7 +162,8 @@ Get the latest release from the [Releases](https://github.com/iArtorias/nfs5_enh
 
 ### 2. Copy them into the game folder
 
-Copy `nfs5_enhanced.asi` and `nfs5_enhanced.ini` next to `Porsche.exe`. If you use DDrawCompat, back
+Copy `nfs5_enhanced.asi` and `nfs5_enhanced.ini` next to `Porsche.exe`, and `dx11z.dll` into the
+`Drivers` folder of the game, next to `dx7z.dll`. If you use DDrawCompat with the stock driver, back
 up your `DDrawCompat.ini` and copy the included one over it.
 
 ### 3. Remove SilentPatchNFS90s
@@ -153,7 +175,8 @@ with SilentPatch are skipped, so the two never patch the same code.
 ### 4. Play
 
 Start the game as usual and pick a resolution in *Options > Graphics*. Menus stay at 4:3, races
-use the wide resolution.
+use the wide resolution. The registry value that selects the game's driver is never written, the
+choice is made in `nfs5_enhanced.ini` every time the game starts.
 
 ---
 
@@ -164,7 +187,8 @@ Everything is set in `nfs5_enhanced.ini`, and every setting is explained in the 
 | Section | Contents |
 |---|---|
 | `[General]` | Log level, coexistence with `SilentPatchNFS90s`. |
-| `[Compat]` | The SilentPatch fixes, the crash fixes, graphics driver fallback. |
+| `[Compat]` | The SilentPatch fixes, the crash fixes, graphics driver selection and fallback. |
+| `[Dx11]` | Internal resolution, antialiasing, anisotropic filtering, window mode and size, VSync, Alt+Tab behaviour. |
 | `[Affinity]` | Which threads are pinned and to which core. |
 | `[Timing]` | Precise game clock. |
 | `[Widescreen]` | Hor+, field of view, flares, resolution list, race resolution and color depth, car detail distance. |
@@ -185,14 +209,18 @@ Common adjustments:
 | Softer or crisper text edges | `Sharpness = 0.3` or `1.2` |
 | The original draw distance | `DrawDistanceScale = 1.0` |
 | A frame cap of 144 in races | `FpsLimit = 144` |
+| A window instead of fullscreen | `WindowMode = 2` |
+| No VSync | `VSync = 0` |
+| 8x antialiasing | `Antialiasing = 8` |
+| The stock DirectX 7 driver | `ThrashDriver = dx` |
 
 > [!TIP]
 > With interpolation on, the race draws as often as it can. Cap it with `FpsLimit` or with `VSync`
-> in DDrawCompat.
+> in `[Dx11]` or `DDrawCompat.ini`.
 
 ### DDrawCompat changes
 
-The included `DDrawCompat.ini` changes these settings, each marked with a comment in the file:
+Only used with the stock driver (`ThrashDriver = dx`). The included `DDrawCompat.ini` changes these settings, each marked with a comment in the file:
 
 | Setting | Value | Why |
 |---|---|---|
@@ -210,17 +238,27 @@ The included `DDrawCompat.ini` changes these settings, each marked with a commen
 <details>
 <summary><b>"DirectX 0" error at startup</b></summary>
 
-Keep `ThrashDriver = auto`. If it still appears, set `ThrashDriver = dx` to always use the
-stock driver, and check that `drivers\dx7z.dll` exists in the game folder.
+Check that `Drivers\dx11z.dll` exists in the game folder. When the selected driver cannot be
+loaded the stock `dx7z.dll` is used instead. `ThrashDriver = dx` always uses the stock driver,
+`ThrashDriver = auto` keeps whatever the registry names.
+
+</details>
+
+<details>
+<summary><b>Black screen or wrong picture with the Direct3D 11 driver</b></summary>
+
+`Drivers\dx11z.log` lists the device, the window and every video mode change. Include it in a bug
+report. `Trace = 3000` in `[Dx11]` adds a call trace to the log. Until it is fixed, `ThrashDriver = dx`
+switches back to the stock driver.
 
 </details>
 
 <details>
 <summary><b>The race resolution does not change</b></summary>
 
-The game's graphics driver keeps only about 30 display modes. If the requested one is not among
+The stock graphics driver keeps only about 30 display modes. If the requested one is not among
 them, the game's own choice is kept and the log says so. Add the resolution to
-`SupportedResolutions` in `DDrawCompat.ini`.
+`SupportedResolutions` in `DDrawCompat.ini`. The Direct3D 11 driver lists every mode of the display.
 
 </details>
 

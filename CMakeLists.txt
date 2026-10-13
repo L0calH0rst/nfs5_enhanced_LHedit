@@ -63,3 +63,5 @@ else()
     target_compile_options( nfs5_enhanced PRIVATE -Wall -Wextra -Wno-cast-function-type -Wno-missing-field-initializers )
     target_link_options( nfs5_enhanced PRIVATE -static -static-libgcc -static-libstdc++ -s -Wl,--enable-stdcall-fixup -Wl,--exclude-all-symbols )
 endif()
+
+add_subdirectory( drivers/dx11 )
