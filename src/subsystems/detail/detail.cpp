@@ -23,6 +23,15 @@ namespace nfs5
 
         // Depth precision with the 0.15 near plane gets poor beyond this.
         constexpr float MAX_FAR_CLIP = 20000.0f;
+
+        // Objects are kept while their nearest point is within the draw distance, the far
+        // plane leaves room for the rest of a large piece of scenery behind it.
+        constexpr float FAR_CLIP_MARGIN = 1.5f;
+
+        // Squared fixed object limits the culling reads instead of '360000' and '490000', updated
+        // with every draw distance change.
+        float s_ObjectLimit400000 = 360000.0f;
+        float s_ObjectLimit20 = 490000.0f;
     }
 
     Detail & Detail::GetInstance()
@@ -38,7 +47,19 @@ namespace nfs5
         Detail & self = GetInstance();
 
         // The original multiplies by the view distance option and keeps at least 50.
-        return self.m_DrawDistanceHook->ccall< double >( distance * self.m_Settings.m_DrawDistanceScale );
+        const float scale = self.m_Settings.m_DrawDistanceScale;
+        const float scaled = std::max( distance * scale, self.m_Settings.m_MinDrawDistance );
+        const double result = self.m_DrawDistanceHook->ccall< double >( scaled );
+
+        // The two object classes with fixed limits scale along and never end before the rest,
+        // otherwise ground and walls go missing under buildings that are still drawn.
+        const float drawn = static_cast<float>(result);
+        const float limit_400000 = std::max( game::detail::OBJECT_LIMIT_400000_STOCK * scale, drawn );
+        const float limit_20 = std::max( game::detail::OBJECT_LIMIT_20_STOCK * scale, drawn );
+        s_ObjectLimit400000 = limit_400000 * limit_400000;
+        s_ObjectLimit20 = limit_20 * limit_20;
+
+        return result;
     }
 
 
@@ -123,17 +144,32 @@ namespace nfs5
         namespace site = game::detail;
         bool ok = true;
 
-        if (settings.m_DrawDistanceScale > 1.0f)
+        const bool extend = settings.m_DrawDistanceScale > 1.0f || settings.m_MinDrawDistance > 0.0f;
+
+        if (extend)
         {
             m_DrawDistanceHook = hook::CreateInline( "DrawDistance", site::DRAW_DISTANCE.m_Address, site::DRAW_DISTANCE.m_Signature,
                 reinterpret_cast<void *>(&DrawDistanceHook) );
             ok &= m_DrawDistanceHook != nullptr;
         }
 
-        // The far plane has to cover the longer draw distance, otherwise cars and objects
-        // past 700 are cut by the frustum test even though the track is drawn.
-        const float far_clip = std::clamp( STOCK_FAR_CLIP * std::max( 1.0f, settings.m_DrawDistanceScale ) * settings.m_FarClipMultiplier,
-            STOCK_FAR_CLIP, MAX_FAR_CLIP );
+        // Both fixed object limits read the values the draw distance hook keeps up to date.
+        if (m_DrawDistanceHook)
+        {
+            const auto limit_400000 = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(&s_ObjectLimit400000));
+            const auto limit_20 = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(&s_ObjectLimit20));
+
+            ok &= m_ObjectLimitPatch400000.Apply( "ObjectLimit400000", site::OBJECT_LIMIT_400000.m_Address, site::OBJECT_LIMIT_400000.m_Signature,
+                site::OBJECT_LIMIT_OPERAND, limit_400000 );
+            ok &= m_ObjectLimitPatch20.Apply( "ObjectLimit20", site::OBJECT_LIMIT_20.m_Address, site::OBJECT_LIMIT_20.m_Signature,
+                site::OBJECT_LIMIT_OPERAND, limit_20 );
+        }
+
+        // The far plane has to cover the longest distance anything is drawn at, with room for
+        // large pieces that start inside it. Track data stays within the stock '700' plane.
+        const float longest = std::max( STOCK_FAR_CLIP * std::max( 1.0f, settings.m_DrawDistanceScale ), settings.m_MinDrawDistance );
+        const float far_clip = extend ? std::clamp( longest * FAR_CLIP_MARGIN * settings.m_FarClipMultiplier, STOCK_FAR_CLIP, MAX_FAR_CLIP ) :
+            STOCK_FAR_CLIP;
 
         if (far_clip > STOCK_FAR_CLIP)
         {
@@ -166,8 +202,8 @@ namespace nfs5
 
         m_Installed = true;
 
-        LOG_INFO( "Detail installed, draw distance x{:.2f} far clip {:.0f} distant wheels {} all ok {}", settings.m_DrawDistanceScale, far_clip,
-            m_WheelTablePatched, ok );
+        LOG_INFO( "Detail installed, draw distance x{:.2f} at least {:.0f} far clip {:.0f} distant wheels {} all ok {}", settings.m_DrawDistanceScale,
+            settings.m_MinDrawDistance, far_clip, m_WheelTablePatched, ok );
         return ok;
     }
 
@@ -178,6 +214,8 @@ namespace nfs5
 
         m_CarLodOffsetHook.reset();
         m_TextureDetailHook.reset();
+        m_ObjectLimitPatch20.Restore();
+        m_ObjectLimitPatch400000.Restore();
         m_FarClipResetPatch.Restore();
         m_FarClipPatch.Restore();
         m_DrawDistanceHook.reset();

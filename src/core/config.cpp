@@ -180,7 +180,7 @@ namespace nfs5
         s.m_Compat.m_FixScreenReadback = ReadBool( L"Compat", L"FixScreenReadback", true );
         s.m_Compat.m_SkipCdCheck = ReadBool( L"Compat", L"SkipCdCheck", true );
         s.m_Compat.m_FallbackDriver = Narrow( ReadString( L"Compat", L"FallbackDriver", L"dx7z" ) );
-        s.m_Compat.m_ThrashDriver = Narrow( ReadString( L"Compat", L"ThrashDriver", L"auto" ) );
+        s.m_Compat.m_ThrashDriver = Narrow( ReadString( L"Compat", L"ThrashDriver", L"dx11" ) );
 
         s.m_Affinity.m_Mode = static_cast<AffinityMode>(std::clamp( ReadInt( L"Affinity", L"Mode", 1 ), 0, 2 ));
         s.m_Affinity.m_GameCore = ReadInt( L"Affinity", L"GameCore", -1 );
@@ -251,11 +251,21 @@ namespace nfs5
 
         s.m_Text.m_Sharpness = std::clamp( ReadFloat( L"Text", L"Sharpness", 1.0f ), 0.25f, 4.0f );
         s.m_Detail.m_Enabled = ReadBool( L"Detail", L"Enabled", true );
-        s.m_Detail.m_DrawDistanceScale = std::clamp( ReadFloat( L"Detail", L"DrawDistanceScale", 4.0f ), 1.0f, 32.0f );
+        s.m_Detail.m_DrawDistanceScale = std::clamp( ReadFloat( L"Detail", L"DrawDistanceScale", 2.0f ), 1.0f, 32.0f );
+        s.m_Detail.m_MinDrawDistance = std::clamp( ReadFloat( L"Detail", L"MinDrawDistance", 20000.0f ), 0.0f, 30000.0f );
         s.m_Detail.m_FarClipMultiplier = std::clamp( ReadFloat( L"Detail", L"FarClipMultiplier", 1.0f ), 1.0f, 32.0f );
         s.m_Detail.m_KeepDistantWheels = ReadBool( L"Detail", L"KeepDistantWheels", true );
         s.m_Detail.m_FullCarDetail = ReadBool( L"Detail", L"FullCarDetail", true );
         s.m_Detail.m_TextureDetail = std::clamp( ReadInt( L"Detail", L"TextureDetail", 3 ), -1, 3 );
+
+        s.m_Controller.m_Enabled = ReadBool( L"Controller", L"Enabled", true );
+        s.m_Controller.m_HideHandledDevices = ReadBool( L"Controller", L"HideHandledDevices", true );
+        s.m_Controller.m_Rumble = ReadBool( L"Controller", L"Rumble", true );
+        s.m_Controller.m_RumbleStrength = std::clamp( ReadFloat( L"Controller", L"RumbleStrength", 1.0f ), 0.0f, 2.0f );
+        s.m_Controller.m_StickDeadzone = std::clamp( ReadFloat( L"Controller", L"StickDeadzone", 0.10f ), 0.0f, 0.9f );
+        s.m_Controller.m_TriggerDeadzone = std::clamp( ReadFloat( L"Controller", L"TriggerDeadzone", 0.05f ), 0.0f, 0.9f );
+        s.m_Controller.m_BackgroundInput = ReadBool( L"Controller", L"BackgroundInput", false );
+        s.m_Controller.m_TriggerBindings = ReadBool( L"Controller", L"TriggerBindings", true );
     }
 
     void Config::Dump() const
@@ -263,9 +273,13 @@ namespace nfs5
         const Settings & s = m_Settings;
 
         LOG_INFO( "Config path {}", Narrow( m_Path ) );
+        LOG_INFO( "  General LogLevel={} SkipCompatIfSilentPatchLoaded={}", static_cast<int>(s.m_General.m_LogLevel), s.m_General.m_SkipOnSilentPatch );
         LOG_INFO( "  Compat Enabled={} AltF4={} KeepLockKeys={} FixDeviceEnumeration={} ClearKeysOnFocusLoss={} ClipboardPaste={} ThrashDriverLeakFix={}",
             s.m_Compat.m_Enabled, s.m_Compat.m_AltF4, s.m_Compat.m_KeepLockKeys, s.m_Compat.m_FixDeviceEnumeration,
             s.m_Compat.m_ClearKeysOnFocusLoss, s.m_Compat.m_ClipboardPaste, s.m_Compat.m_ThrashDriverLeakFix );
+        LOG_INFO( "  Compat FixPictureConversion={} FixScreenReadback={} SkipCdCheck={} FallbackDriver={} ThrashDriver={}",
+            s.m_Compat.m_FixPictureConversion, s.m_Compat.m_FixScreenReadback, s.m_Compat.m_SkipCdCheck,
+            s.m_Compat.m_FallbackDriver, s.m_Compat.m_ThrashDriver );
         LOG_INFO( "  Affinity Mode={} GameCore={} PreferPerformanceCores={}",
             static_cast<int>(s.m_Affinity.m_Mode), s.m_Affinity.m_GameCore, s.m_Affinity.m_PreferPerformanceCores );
         LOG_INFO( "  Timing QpcTimer={} HighResolutionWaitableTimer={} MaxCatchUpTicks={}",
@@ -277,16 +291,20 @@ namespace nfs5
         LOG_INFO( "  Framerate Enabled={} FpsLimit={} FrontendFpsLimit={} Interpolation={} InterpolateCamera={} SnapDistance={:.1f}",
             s.m_Framerate.m_Enabled, s.m_Framerate.m_FpsLimit, s.m_Framerate.m_FrontendFpsLimit,
             s.m_Framerate.m_Interpolation, s.m_Framerate.m_InterpolateCamera, s.m_Framerate.m_SnapDistance );
-        LOG_INFO( "  HudScaling Enabled={} ReferenceHeight={} ScaleMultiplier={:.2f} MinimumScale={:.2f} ScaleText={} ScaleLoadingScreen={} SmoothLoadingScreen={}",
+        LOG_INFO( "  HudScaling Enabled={} ReferenceHeight={} ScaleMultiplier={:.2f} MinimumScale={:.2f} ScaleText={} ExclusiveGaugeStyle={} ScaleLoadingScreen={} SmoothLoadingScreen={}",
             s.m_Hud.m_Enabled, s.m_Hud.m_ReferenceHeight, s.m_Hud.m_ScaleMultiplier, s.m_Hud.m_MinimumScale, s.m_Hud.m_ScaleText,
-            s.m_Hud.m_ScaleLoadingScreen, s.m_Hud.m_SmoothLoadingScreen );
+            s.m_Hud.m_ExclusiveGaugeStyle, s.m_Hud.m_ScaleLoadingScreen, s.m_Hud.m_SmoothLoadingScreen );
         LOG_INFO( "  IO Enabled={} ReadChunkKB={} CacheDiskFreeSpace={} FastCpuSpeedCheck={}",
             s.m_Io.m_Enabled, s.m_Io.m_ReadChunkKB, s.m_Io.m_CacheDiskFreeSpace,
             s.m_Io.m_FastCpuSpeedCheck );
-        LOG_INFO( "  Detail Enabled={} DrawDistanceScale={:.2f} FarClipMultiplier={:.2f} KeepDistantWheels={} FullCarDetail={} TextureDetail={} LodDistanceScale={:.2f}",
-            s.m_Detail.m_Enabled, s.m_Detail.m_DrawDistanceScale, s.m_Detail.m_FarClipMultiplier, s.m_Detail.m_KeepDistantWheels,
+        LOG_INFO( "  Detail Enabled={} DrawDistanceScale={:.2f} MinDrawDistance={:.0f} FarClipMultiplier={:.2f} KeepDistantWheels={} FullCarDetail={} TextureDetail={} LodDistanceScale={:.2f}",
+            s.m_Detail.m_Enabled, s.m_Detail.m_DrawDistanceScale, s.m_Detail.m_MinDrawDistance, s.m_Detail.m_FarClipMultiplier, s.m_Detail.m_KeepDistantWheels,
             s.m_Detail.m_FullCarDetail, s.m_Detail.m_TextureDetail,
             s.m_Widescreen.m_LodDistanceScale );
         LOG_INFO( "  Text Enabled={} Upscale={} Sharpness={:.2f}", s.m_Text.m_Enabled, s.m_Text.m_Upscale, s.m_Text.m_Sharpness );
+        LOG_INFO( "  Controller Enabled={} HideHandledDevices={} Rumble={} RumbleStrength={:.2f} StickDeadzone={:.2f} TriggerDeadzone={:.2f} BackgroundInput={} TriggerBindings={}",
+            s.m_Controller.m_Enabled, s.m_Controller.m_HideHandledDevices, s.m_Controller.m_Rumble, s.m_Controller.m_RumbleStrength,
+            s.m_Controller.m_StickDeadzone, s.m_Controller.m_TriggerDeadzone, s.m_Controller.m_BackgroundInput,
+            s.m_Controller.m_TriggerBindings );
     }
 }

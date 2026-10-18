@@ -14,6 +14,10 @@ a shader that emulates the fixed function pipeline.
 * All D3D objects are released in `THRASH_restore`, so the process can exit.
 * Brightness (internal state `2E`) is applied on present instead of through the display gamma ramp.
 * Lock and read back go through a staging copy of the frame, the lock is 32 bit BGRA.
+* Small reads, the sun glare probe, copy only the pixels they need from the render sized frame
+  instead of scaling the whole frame down first.
+* Repeated render states keep the batch going, geometry is appended to ring buffers with
+  `NO_OVERWRITE`, and states, constants and resources are only bound when they change.
 
 ## Use
 

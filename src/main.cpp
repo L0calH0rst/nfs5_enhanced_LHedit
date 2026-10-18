@@ -17,6 +17,7 @@
 #include "game/thrash.h"
 
 #include "subsystems/framerate/framerate.h"
+#include "subsystems/gamepad/gamepad.h"
 #include "subsystems/io_hooks/io_hooks.h"
 #include "subsystems/framerate/interpolation.h"
 #include "subsystems/hud_scaling/hud_scaling.h"
@@ -31,7 +32,7 @@ namespace nfs5
 {
     namespace
     {
-        constexpr std::string_view VERSION = "1.0.0";
+        constexpr std::string_view VERSION = "1.2.0";
 
         HMODULE s_SelfModule = nullptr;
         hook::IatPatch s_CommandLinePatch;
@@ -200,6 +201,7 @@ namespace nfs5
             HudScaling::GetInstance().Install( settings.m_Hud );
             TextQuality::GetInstance().Install( settings.m_Text );
             IoHooks::GetInstance().Install( settings.m_Io );
+            Gamepad::GetInstance().Install( settings.m_Controller, directory );
 
             LOG_INFO( "Initialization finished" );
         }
@@ -234,6 +236,7 @@ extern "C" BOOL WINAPI DllMain(
     {
         if (reserved == nullptr && nfs5::s_Initialized.load())
         {
+            nfs5::Gamepad::GetInstance().Uninstall();
             nfs5::IoHooks::GetInstance().Uninstall();
             nfs5::TextQuality::GetInstance().Uninstall();
             nfs5::HudScaling::GetInstance().Uninstall();

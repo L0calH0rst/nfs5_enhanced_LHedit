@@ -74,6 +74,39 @@ namespace nfs5::game
             0x0044E780, "A1 30 81 62 00 8A 48 60 84 C9 74 0C"
         };
 
+        // A call to resolution list count.
+        inline constexpr Site RESOLUTION_LIST_COUNT_CALL =
+        {
+            0x004BC735, "E8 C6 1F F9 FF 8B E8 8D 3C AD 00 00 00 00"
+        };
+
+        // 'FEScreenResolutionAccessor' constructor, thiscall with the accessor name. The selection
+        // starts at '0', the first mode of the driver, 640x480x16.
+        inline constexpr Site RESOLUTION_ACCESSOR_CTOR =
+        {
+            0x004BC710, "83 EC 5C 8B 44 24 60 53 55 56 57 6A 00 6A 00 6A 00 6A 00 6A 01"
+        };
+
+        // 'FEPositionableAccessor' save and load of the selected position, thiscall with a pointer
+        // to the stream cursor. Shared by every list accessor of the front end.
+        inline constexpr Site POSITION_SAVE =
+        {
+            0x004BC460, "8B 44 24 04 8B 49 18 8B 10 89 0A 8B 08 83 C1 04 89 08 C2 04 00"
+        };
+
+        inline constexpr Site POSITION_LOAD =
+        {
+            0x004BC480, "8B 44 24 04 8B 10 8B 12 89 51 18 8B 10 83 C2 04 89 10 8B 51 18"
+        };
+
+        // 'FEScreenResolutionAccessor' layout. The mode arrays hold one entry per listed mode.
+        inline constexpr std::uintptr_t RESOLUTION_ACCESSOR_VTABLE = 0x005B5354;
+        inline constexpr std::size_t ACCESSOR_COUNT = 0x14;
+        inline constexpr std::size_t ACCESSOR_POSITION = 0x18;
+        inline constexpr std::size_t RESOLUTION_WIDTHS = 0x38;
+        inline constexpr std::size_t RESOLUTION_HEIGHTS = 0x3C;
+        inline constexpr std::size_t RESOLUTION_DEPTHS = 0x40;
+
         // Render context 'SetVideoMode'.
         // The closest mode of the THRASH mode list is picked by 'sub_572A00'.
         inline constexpr Site SET_VIDEO_MODE =
@@ -110,13 +143,8 @@ namespace nfs5::game
             0x005560B0, "55 8B EC 83 EC 14 53 56 33 F6 57 89 75 F8"
         };
 
-        // The enhanced patch replaced the result of the RDTSC variant with a constant,
-        // the measurement still runs but its value is thrown away.
-        inline constexpr Site CPU_SPEED_RDTSC_CONSTANT =
-        {
-            0x005560A5, "B8 00 00 00 7F"
-        };
-
+        // Value reported instead of the measurement, the constant the executable returns from the RDTSC variant.
+        // The largest clock that stays positive.
         inline constexpr std::uint32_t CPU_SPEED_CONSTANT = 0x7F000000;
 
         // One simulation step, advances 'SIM_STEP_COUNT' by one.
@@ -183,7 +211,8 @@ namespace nfs5::game
         inline constexpr std::uintptr_t SCREEN_WIDTH = 0x00619784;
         inline constexpr std::uintptr_t SCREEN_HEIGHT = 0x00619788;
 
-        // DirectInput style key state buffer, 128 bytes.
+        // Key state buffer, one byte per scan code without the extended bit, 128 bytes. The
+        // window procedure writes 'scan & 7Fh' and clears the same 128 bytes itself.
         inline constexpr std::uintptr_t KEY_STATE = 0x005DE028;
         inline constexpr std::size_t KEY_STATE_SIZE = 128;
 
@@ -252,6 +281,60 @@ namespace nfs5::game
         // EA file layer handle table, 32 byte entries, count at 'FILE_TABLE_COUNT'.
         inline constexpr std::uintptr_t FILE_TABLE = 0x006AF084;
         inline constexpr std::uintptr_t FILE_TABLE_COUNT = 0x006AF080;
+    }
+
+    // DirectInput controller layer, 'input.c' of the game.
+    namespace input
+    {
+        // 'INPUT_init', creates DirectInput and fills the controller table through 'EnumDevices'.
+        inline constexpr Site INIT =
+        {
+            0x00532B80, "51 8B 0D 08 CB 69 00 56 33 F6 B8 01 00 00 00 3B CE"
+        };
+
+        // 'EnumDevices' callback, stdcall instance and pointer to the running count.
+        inline constexpr Site ENUM_CALLBACK =
+        {
+            0x00532C40, "51 8B 44 24 0C 53 55 56 57 8B 38 8B CF A1 08 CB"
+        };
+
+        // 'INPUT_restore', unacquires and releases every controller and DirectInput.
+        inline constexpr Site SHUTDOWN =
+        {
+            0x00532D30, "57 E8 1A 03 00 00 A1 0C CB 69 00 33 FF"
+        };
+
+        // Default bindings for a controller, cdecl with the table index. Runs when the default
+        // controller is picked in the options, when the controller screen is built and when
+        // a saved controller is missing. Joysticks get accelerate and brake on Y.
+        inline constexpr Site DEFAULT_BINDINGS =
+        {
+            0x0051D1D0, "83 EC 78 53 55 56 33 DB 57 53 68 88 D4 5D 00"
+        };
+
+        // Front end accessor by name, cdecl, '0' when there is none.
+        inline constexpr Site FIND_ACCESSOR =
+        {
+            0x004B7AB0, "83 EC 0C 8B 54 24 10 56 57 8B FA 83 C9 FF"
+        };
+
+        // Unbinds every action that uses the given input, cdecl with the six binding fields.
+        inline constexpr Site CLEAR_BINDING =
+        {
+            0x0051DCC0, "83 EC 50 53 55 56 57 6A 00 68 88 D4 5D 00"
+        };
+
+        // 'FEControllerInputAccessor', one per action, its 24 byte binding sits at +0x14.
+        inline constexpr std::uintptr_t INPUT_ACCESSOR_VTABLE = 0x005BACF4;
+        inline constexpr std::size_t ACCESSOR_BINDING = 0x14;
+
+        // 'IDirectInputA' pointer and controller table, 32 entries of 268 bytes. An entry holds
+        // the device, flags, the device type and a 256 byte state buffer.
+        inline constexpr std::uintptr_t DIRECT_INPUT = 0x0069CB08;
+        inline constexpr std::uintptr_t DEVICE_COUNT = 0x0069CB0C;
+        inline constexpr std::uintptr_t DEVICE_TABLE = 0x006BE040;
+        inline constexpr std::size_t DEVICE_STRIDE = 268;
+        inline constexpr int MAX_DEVICES = 32;
     }
 
     // Race HUD scaling.
@@ -457,6 +540,25 @@ namespace nfs5::game
         };
 
         inline constexpr std::size_t FAR_CLIP_RESET_OPERAND = 1;
+
+        // Scene object culling in 'sub_47F890'. Objects are drawn while their distance minus their
+        // radius is within the draw distance, except two classes with fixed limits that ignore it.
+        // Instance flag 400000h up to 600 [360000 squared] and flag 20h up to 700 [490000].
+        // Below 700 those were drawn further than the rest, a longer draw distance turned that
+        // around and left them missing under everything else.
+        inline constexpr Site OBJECT_LIMIT_400000 =
+        {
+            0x0047FA08, "D8 1D A8 47 5B 00 DF E0 F6 C4 01"
+        };
+
+        inline constexpr Site OBJECT_LIMIT_20 =
+        {
+            0x0047FA3D, "D8 1D AC 47 5B 00 DF E0 F6 C4 01"
+        };
+
+        inline constexpr std::size_t OBJECT_LIMIT_OPERAND = 2;
+        inline constexpr float OBJECT_LIMIT_400000_STOCK = 600.0f;
+        inline constexpr float OBJECT_LIMIT_20_STOCK = 700.0f;
 
         // Wheel LOD per detail level and body LOD, int32 [3][7].
         inline constexpr std::uintptr_t WHEEL_LOD_TABLE = 0x005CDB44;

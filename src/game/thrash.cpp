@@ -1,5 +1,6 @@
 #include "thrash.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "../core/hook_util.h"
@@ -148,6 +149,9 @@ namespace nfs5::game
         ThrashDriver & self = GetInstance();
 
         const auto original = self.m_RegQueryPatch.GetOriginal< decltype(&::RegQueryValueExA) >();
+
+        // Capacity of the caller buffer, the call below overwrites '*size' with the stored length.
+        const DWORD capacity = size != nullptr ? *size : 0;
         LSTATUS result = original( key, value_name, reserved, type, data, size );
 
         if (value_name == nullptr || _stricmp( value_name, "Thrash Driver" ) != 0 || data == nullptr || size == nullptr)
@@ -155,7 +159,7 @@ namespace nfs5::game
 
         std::string stored;
         if (result == ERROR_SUCCESS && *size > 0)
-            stored.assign( reinterpret_cast<const char *>(data), strnlen( reinterpret_cast<const char *>(data), *size ) );
+            stored.assign( reinterpret_cast<const char *>(data), strnlen( reinterpret_cast<const char *>(data), std::min( *size, capacity ) ) );
 
         // Absent values are left alone, the game then writes its default dx and reads it back.
         std::string reported = stored;
@@ -172,7 +176,7 @@ namespace nfs5::game
             reported = self.m_DriverOverride;
         }
 
-        if (reported != stored && reported.size() + 1 <= 255)
+        if (reported != stored && reported.size() + 1 <= capacity)
         {
             std::memcpy( data, reported.c_str(), reported.size() + 1 );
             *size = static_cast<DWORD>(reported.size() + 1);

@@ -3,9 +3,10 @@
 // Draw distance and level of detail.
 // The race draw distance is the per track position visibility from 'sub_44FCB0' times the
 // view distance option [0.5 to 1.0], computed in 'sub_44F1A0' and stored at 6197CC. The
-// track renderer [sub_47F550] draws sections up to that distance and objects use it for
-// culling. Every view is created with a far clip plane of 700 from the render context,
-// cars beyond it are frustum culled. Both are raised together here.
+// scene renderer [sub_47F550, sub_47F890] gathers the grid cells up to that distance and
+// culls objects by it, apart from two object classes with fixed limits of 600 and 700.
+// Every view is created with a far clip plane of 700 from the render context, anything
+// beyond it is frustum culled or cut. All of them are raised together here.
 // Distant cars switch to LOD 5 and 6 which have no wheel parts, the wheel LOD table
 // 5CDB44 can point those at the LOD 1 wheels instead.
 
@@ -30,6 +31,8 @@ namespace nfs5
         std::unique_ptr<safetyhook::InlineHook> m_DrawDistanceHook;
         hook::OperandPatch m_FarClipPatch;
         hook::OperandPatch m_FarClipResetPatch;
+        hook::OperandPatch m_ObjectLimitPatch400000;
+        hook::OperandPatch m_ObjectLimitPatch20;
         std::unique_ptr<safetyhook::MidHook> m_CarLodOffsetHook;
         std::unique_ptr<safetyhook::InlineHook> m_TextureDetailHook;
         std::array<std::int32_t, WHEEL_TABLE_SIZE> m_OriginalWheelTable = {};

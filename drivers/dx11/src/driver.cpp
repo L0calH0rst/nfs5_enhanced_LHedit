@@ -33,18 +33,6 @@ namespace dx11z
 
         const char AUTHOR[] = "NFS5 Enhanced D3D11 THRASH driver by iArtorias";
 
-        struct DrawConstants
-        {
-            float m_Target[4];
-            std::int32_t m_ColorOp[2][4];
-            std::int32_t m_AlphaOp[2][4];
-            float m_Factor[4];
-            float m_FogColor[4];
-            float m_FogParams[4];
-            std::int32_t m_Flags[4];
-            float m_AlphaRef[4];
-        };
-
         struct PresentConstants
         {
             float m_Rect[4];
@@ -175,13 +163,6 @@ namespace dx11z
             }
 
             return static_cast<D3D11_STENCIL_OP>(op);
-        }
-
-        [[nodiscard]] bool ValidHandle(
-            std::uintptr_t handle
-        )
-        {
-            return handle >= 0x10000 && reinterpret_cast<const Texture *>(handle)->m_Magic == 0x58544433;
         }
     }
 
@@ -410,6 +391,9 @@ namespace dx11z
         D3D11_BLEND_DESC blend = {};
         blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
         m_Device->CreateBlendState( &blend, m_OpaqueBlend.Put() );
+        m_Device->CreateBlendState( &blend, m_ClearColorBlend.Put() );
+        blend.RenderTarget[0].RenderTargetWriteMask = 0;
+        m_Device->CreateBlendState( &blend, m_ClearDepthOnlyBlend.Put() );
 
         D3D11_RASTERIZER_DESC raster = {};
         raster.FillMode = D3D11_FILL_SOLID;
@@ -436,6 +420,11 @@ namespace dx11z
 
         m_BatchVertices.reserve( BATCH_VERTICES );
         m_BatchIndices.reserve( BATCH_INDICES );
+
+        // Full, so the first batch maps the new buffers with a discard.
+        m_VertexCursor = RAW_VERTICES;
+        m_IndexCursor = RAW_INDICES;
+        InvalidatePipeline();
         return true;
     }
 
@@ -786,6 +775,7 @@ namespace dx11z
         {
             m_BackBufferView.Reset();
             m_Context->OMSetRenderTargets( 0, nullptr, nullptr );
+            InvalidatePipeline();
             m_SwapChain->ResizeBuffers( 0, static_cast<UINT>(m_BackBufferWidth), static_cast<UINT>(m_BackBufferHeight), DXGI_FORMAT_UNKNOWN, m_SwapChainFlags );
         }
         else
@@ -993,6 +983,9 @@ namespace dx11z
         m_Upload.Reset();
         m_UploadView.Reset();
         m_Staging.Reset();
+
+        ResetProbes();
+        InvalidatePipeline();
     }
 
 
@@ -1078,6 +1071,9 @@ namespace dx11z
         ID3D11SamplerState * sampler
     )
     {
+        // The blit binds its own targets, shaders and states.
+        InvalidatePipeline();
+
         PresentConstants constants = {};
         std::memcpy( constants.m_Rect, destination_rect, sizeof( constants.m_Rect ) );
         std::memcpy( constants.m_Source, source_rect, sizeof( constants.m_Source ) );
@@ -1179,6 +1175,19 @@ namespace dx11z
             add( fixed_mode[0], fixed_mode[1] );
         }
 
+        // The display reports its modes in no particular order and the options list shows them
+        // as they come, so everything after the fixed slots is sorted by size and depth.
+        std::sort( m_Modes.begin() + 6, m_Modes.end(), [] ( const ModeRecord & left, const ModeRecord & right )
+        {
+            if (left.m_Width != right.m_Width)
+                return left.m_Width < right.m_Width;
+
+            if (left.m_Height != right.m_Height)
+                return left.m_Height < right.m_Height;
+
+            return left.m_Bpp < right.m_Bpp;
+        } );
+
         Log( "%d display modes", static_cast<int>(m_Modes.size()) - 1 );
     }
 
@@ -1239,6 +1248,7 @@ namespace dx11z
 
         BuildModeList();
         m_D3D.Reset();
+        ResetStateCache();
         m_StateStore.clear();
         return 1;
     }
@@ -1369,6 +1379,7 @@ namespace dx11z
 
         // Defaults as dx7z applies them in 6000A630.
         m_D3D.Reset();
+        ResetStateCache();
         SetState( 0x130, 0 );
         SetState( 1, 0 );
         SetState( 2, 1 );
@@ -1494,6 +1505,9 @@ namespace dx11z
         m_PlainRaster.Reset();
         m_ClearDepth.Reset();
         m_ClearColorOnly.Reset();
+        m_ClearColorBlend.Reset();
+        m_ClearDepthOnlyBlend.Reset();
+        InvalidatePipeline();
         m_Context.Reset();
         m_Device.Reset();
 
@@ -1571,12 +1585,10 @@ namespace dx11z
         m_Context->RSSetViewports( 1, &viewport );
         m_Context->RSSetState( m_PlainRaster.Get() );
 
+        InvalidatePipeline();
+
         const float factor[4] = {};
-        D3D11_BLEND_DESC mask_desc = {};
-        mask_desc.RenderTarget[0].RenderTargetWriteMask = depth_only ? 0 : D3D11_COLOR_WRITE_ENABLE_ALL;
-        ComPtr<ID3D11BlendState> mask;
-        m_Device->CreateBlendState( &mask_desc, mask.Put() );
-        m_Context->OMSetBlendState( mask.Get(), factor, 0xFFFFFFFF );
+        m_Context->OMSetBlendState( depth_only ? m_ClearDepthOnlyBlend.Get() : m_ClearColorBlend.Get(), factor, 0xFFFFFFFF );
         m_Context->OMSetDepthStencilState( m_ClearDepth.Get(), 0 );
         m_Context->IASetInputLayout( nullptr );
         m_Context->IASetPrimitiveTopology( D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP );
@@ -1869,6 +1881,15 @@ namespace dx11z
             return 1;
         }
 
+        // Small probes skip the downscale of the whole frame, the 4x4 sun probe may take the
+        // pixels of its previous request.
+        const bool sun_probe = width == 4 && height == 4;
+
+        if ((x1 - x0) * (y1 - y0) <= 32 * 32 && ReadRectProbe( x0, y0, x1, y1, x, y, width, sun_probe, static_cast<std::uint8_t *>(out) ))
+        {
+            return 1;
+        }
+
         ID3D11Texture2D * source_texture = m_Frame.Get();
 
         if (!IsDirect())
@@ -1906,6 +1927,159 @@ namespace dx11z
 
         m_Context->Unmap( m_Staging.Get(), 0 );
         return 1;
+    }
+
+
+    bool Driver::ReadRectProbe(
+        int x0,
+        int y0,
+        int x1,
+        int y1,
+        int x,
+        int y,
+        int width,
+        bool allow_previous,
+        std::uint8_t * out
+    )
+    {
+        if (IsFrontSelected() || !m_Resolved)
+            return false;
+
+        // Render pixels covered by the game pixels, the source of every game pixel is the render
+        // pixel under its center like the linear downscale would pick it for small factors.
+        ProbeRead request = {};
+        request.m_X0 = x0;
+        request.m_Y0 = y0;
+        request.m_X1 = x1;
+        request.m_Y1 = y1;
+        request.m_X = x;
+        request.m_Y = y;
+        request.m_Width = width;
+        request.m_ScaleX = m_ScaleX;
+        request.m_ScaleY = m_ScaleY;
+        request.m_FrameBits = m_FrameBits;
+        request.m_RenderX0 = std::clamp( static_cast<int>(std::floor( static_cast<float>(x0) * m_ScaleX )), 0, m_RenderWidth - 1 );
+        request.m_RenderY0 = std::clamp( static_cast<int>(std::floor( static_cast<float>(y0) * m_ScaleY )), 0, m_RenderHeight - 1 );
+        request.m_RenderX1 = std::clamp( static_cast<int>(std::ceil( static_cast<float>(x1) * m_ScaleX )), request.m_RenderX0 + 1, m_RenderWidth );
+        request.m_RenderY1 = std::clamp( static_cast<int>(std::ceil( static_cast<float>(y1) * m_ScaleY )), request.m_RenderY0 + 1, m_RenderHeight );
+
+        if (request.m_RenderX1 - request.m_RenderX0 > PROBE_SIZE || request.m_RenderY1 - request.m_RenderY0 > PROBE_SIZE)
+            return false;
+
+        for (ComPtr<ID3D11Texture2D> & probe : m_Probes)
+        {
+            if (probe)
+                continue;
+
+            D3D11_TEXTURE2D_DESC desc = {};
+            desc.Width = PROBE_SIZE;
+            desc.Height = PROBE_SIZE;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+            if (FAILED( m_Device->CreateTexture2D( &desc, nullptr, probe.Put() ) ))
+                return false;
+        }
+
+        // The current request is copied in any case, it serves the next sun read.
+        const std::size_t slot = m_ProbeNext;
+        const std::size_t previous = slot ^ 1;
+        m_ProbeNext = previous;
+
+        ResolveFrame();
+
+        const D3D11_BOX box = { static_cast<UINT>(request.m_RenderX0), static_cast<UINT>(request.m_RenderY0), 0,
+            static_cast<UINT>(request.m_RenderX1), static_cast<UINT>(request.m_RenderY1), 1 };
+        m_Context->CopySubresourceRegion( m_Probes[slot].Get(), 0, 0, 0, 0, m_Resolved.Get(), 0, &box );
+
+        request.m_Time = std::chrono::steady_clock::now();
+        request.m_Valid = true;
+        m_ProbeReads[slot] = request;
+
+        // A recent read of the same size and frame layout is answered from the previous copy.
+        std::size_t source = slot;
+        const ProbeRead & last = m_ProbeReads[previous];
+
+        if (allow_previous && last.m_Valid && request.m_Time - last.m_Time < PROBE_REUSE_WINDOW && last.m_Width == width &&
+            last.m_X1 - last.m_X0 == x1 - x0 && last.m_Y1 - last.m_Y0 == y1 - y0 && last.m_ScaleX == m_ScaleX && last.m_ScaleY == m_ScaleY &&
+            last.m_FrameBits == m_FrameBits)
+        {
+            source = previous;
+        }
+
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+
+        if (FAILED( m_Context->Map( m_Probes[source].Get(), 0, D3D11_MAP_READ, 0, &mapped ) ))
+        {
+            m_ProbeReads[slot].m_Valid = false;
+            return false;
+        }
+
+        // The game gives up on the lens flare when reads average more than 5 ms.
+        const auto waited = std::chrono::duration_cast<std::chrono::microseconds>( std::chrono::steady_clock::now() - request.m_Time );
+
+        if (waited.count() > 5000 && m_SlowProbeLogs < 10)
+        {
+            ++m_SlowProbeLogs;
+            Log( "readrect %dx%d waited %.1f ms for the GPU, %s copy", x1 - x0, y1 - y0, static_cast<double>(waited.count()) / 1000.0,
+                source == slot ? "current" : "previous" );
+        }
+
+        // A copy that answered is not used twice, the one just made answers the next read.
+        const ProbeRead read = m_ProbeReads[source];
+
+        if (source == previous)
+        {
+            m_ProbeReads[previous].m_Valid = false;
+        }
+
+        const std::size_t pixel = read.m_FrameBits == 16 ? 2 : 4;
+
+        // The caller cleared the whole output, only the part inside the frame is written.
+        for (int row = read.m_Y0; row < read.m_Y1; ++row)
+        {
+            const int render_row = std::clamp( static_cast<int>( (static_cast<float>(row) + 0.5f) * read.m_ScaleY ), read.m_RenderY0, read.m_RenderY1 - 1 ) -
+                read.m_RenderY0;
+            const auto * line_in = static_cast<const std::uint8_t *>( mapped.pData ) + static_cast<std::size_t>( render_row ) * mapped.RowPitch;
+            auto * line_out = out + (static_cast<std::size_t>( row - read.m_Y ) * static_cast<std::size_t>( read.m_Width ) +
+                static_cast<std::size_t>( read.m_X0 - read.m_X )) * pixel;
+
+            for (int column = read.m_X0; column < read.m_X1; ++column)
+            {
+                const int render_column = std::clamp( static_cast<int>( (static_cast<float>(column) + 0.5f) * read.m_ScaleX ), read.m_RenderX0,
+                    read.m_RenderX1 - 1 ) - read.m_RenderX0;
+                const auto * source_pixel = line_in + static_cast<std::size_t>( render_column ) * 4;
+                auto * destination = line_out + static_cast<std::size_t>( column - read.m_X0 ) * pixel;
+
+                if (pixel == 2)
+                {
+                    ToRgb565( source_pixel, 0, destination, 0, 1, 1 );
+                }
+                else
+                {
+                    std::memcpy( destination, source_pixel, 4 );
+                }
+            }
+        }
+
+        m_Context->Unmap( m_Probes[source].Get(), 0 );
+        return true;
+    }
+
+
+    void Driver::ResetProbes()
+    {
+        for (ComPtr<ID3D11Texture2D> & probe : m_Probes)
+        {
+            probe.Reset();
+        }
+
+        m_ProbeReads = {};
+        m_ProbeNext = 0;
     }
 
 
@@ -2021,8 +2195,16 @@ namespace dx11z
         m_Device->CreateShaderResourceView( texture->m_Texture.Get(), nullptr, texture->m_View.Put() );
 
         Texture * raw = texture.get();
-        m_Textures.push_back( std::move( texture ) );
+        m_Textures.emplace( raw, std::move( texture ) );
         return raw;
+    }
+
+
+    bool Driver::IsTextureHandle(
+        std::uintptr_t handle
+    ) const
+    {
+        return handle >= 0x10000 && m_Textures.find( reinterpret_cast<Texture *>(handle) ) != m_Textures.end();
     }
 
 
@@ -2032,6 +2214,11 @@ namespace dx11z
         const std::uint32_t * palette
     )
     {
+        if (texture != nullptr && !IsTextureHandle( reinterpret_cast<std::uintptr_t>(texture) ))
+        {
+            return 0;
+        }
+
         if (texture == nullptr || pixels == nullptr || !texture->m_Texture)
         {
             return texture != nullptr;
@@ -2075,10 +2262,7 @@ namespace dx11z
         Texture * texture
     )
     {
-        const auto it = std::find_if( m_Textures.begin(), m_Textures.end(), [texture] ( const auto & entry )
-        {
-            return entry.get() == texture;
-        } );
+        const auto it = m_Textures.find( texture );
 
         if (it == m_Textures.end())
             return 0;
@@ -2093,7 +2277,7 @@ namespace dx11z
             }
         }
 
-        (*it)->m_Magic = 0;
+        it->second->m_Magic = 0;
         m_Textures.erase( it );
         return 1;
     }
@@ -2104,9 +2288,9 @@ namespace dx11z
         Flush();
         m_Bound.fill( nullptr );
 
-        for (auto & texture : m_Textures)
+        for (auto & entry : m_Textures)
         {
-            texture->m_Magic = 0;
+            entry.second->m_Magic = 0;
         }
 
         m_Textures.clear();
@@ -2143,7 +2327,7 @@ namespace dx11z
             return 1;
         }
 
-        if (!ValidHandle( handle ))
+        if (!IsTextureHandle( handle ))
             return 0;
 
         auto * texture = reinterpret_cast<Texture *>(handle);
@@ -2291,6 +2475,18 @@ namespace dx11z
         auto & tex_stage = m_D3D.m_Stage[static_cast<std::size_t>(stage)];
 
         std::intptr_t result = 1;
+        const bool cached = state < STATE_CACHE_STATES && IsCachedState( state );
+
+        // Render states ignore the stage bits, texture stage states use the clamped stage, so two
+        // ids that write the same value share one cache entry.
+        const std::size_t cache_slot = static_cast<std::size_t>(state) * 8 + (IsStageState( state ) ? static_cast<std::size_t>(stage) : 0);
+
+        // The game sets the same states again for every mesh. A value that is already in effect
+        // changes nothing, so the batch goes on instead of ending in a separate draw.
+        if (cached && m_StateCacheGeneration[cache_slot] == m_StateGeneration && m_StateCacheValue[cache_slot] == v)
+        {
+            return 1;
+        }
 
         // State changes end the current batch, as dx7z does before every render state call.
         Flush();
@@ -2711,7 +2907,156 @@ namespace dx11z
         }
 
         StoreState( id, v );
+
+        // States that write the same values as this one no longer know what is in effect.
+        ForgetRelatedStates( state );
+
+        if (cached)
+        {
+            m_StateCacheValue[cache_slot] = v;
+            m_StateCacheGeneration[cache_slot] = m_StateGeneration;
+        }
+
         return result;
+    }
+
+
+    void Driver::ForgetRelatedStates(
+        std::uint32_t state
+    )
+    {
+        // Groups of states that write the same pipeline values.
+        static constexpr std::uint32_t BLEND[] = { 0x38, 0x68, 0x194, 0x195 };
+        static constexpr std::uint32_t DEPTH[] = { 0x04, 0x28, 0x39, 0x6A };
+        static constexpr std::uint32_t BIAS[] = { 0x18, 0x66 };
+        static constexpr std::uint32_t ADDRESS[] = { 0x0D, 0x41, 0x42 };
+        static constexpr std::uint32_t ALPHA[] = { 0x24, 0x40 };
+        static constexpr std::uint32_t FOG[] = { 0x14, 0x15, 0x69 };
+
+        const auto forget = [&] ( const auto & group )
+        {
+            if (std::find( std::begin( group ), std::end( group ), state ) == std::end( group ))
+                return;
+
+            for (const std::uint32_t other : group)
+            {
+                if (other == state)
+                    continue;
+
+                for (std::size_t stage = 0; stage < 8; ++stage)
+                {
+                    m_StateCacheGeneration[static_cast<std::size_t>(other) * 8 + stage] = 0;
+                }
+            }
+        };
+
+        forget( BLEND );
+        forget( DEPTH );
+        forget( BIAS );
+        forget( ADDRESS );
+        forget( ALPHA );
+        forget( FOG );
+    }
+
+
+    bool Driver::IsCachedState(
+        std::uint32_t state
+    )
+    {
+        // Only states that do nothing but set pipeline values from their own argument.
+        switch (state)
+        {
+            case 0x02:
+            case 0x04:
+            case 0x05:
+            case 0x06:
+            case 0x07:
+            case 0x08:
+            case 0x09:
+            case 0x0A:
+            case 0x0B:
+            case 0x0D:
+            case 0x0E:
+            case 0x0F:
+            case 0x15:
+            case 0x18:
+            case 0x24:
+            case 0x28:
+            case 0x29:
+            case 0x2A:
+            case 0x2F:
+            case 0x30:
+            case 0x34:
+            case 0x35:
+            case 0x36:
+            case 0x38:
+            case 0x39:
+            case 0x40:
+            case 0x41:
+            case 0x42:
+            case 0x66:
+            case 0x68:
+            case 0x6A:
+            case 0x194:
+            case 0x195:
+            case 0x19A:
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+
+    bool Driver::IsStageState(
+        std::uint32_t state
+    )
+    {
+        switch (state)
+        {
+            case 0x07:
+            case 0x08:
+            case 0x0B:
+            case 0x0D:
+            case 0x29:
+            case 0x41:
+            case 0x42:
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+
+    void Driver::ResetStateCache()
+    {
+        if (++m_StateGeneration == 0)
+        {
+            m_StateCacheGeneration.fill( 0 );
+            m_StateGeneration = 1;
+        }
+    }
+
+
+    void Driver::InvalidatePipeline()
+    {
+        m_SceneBound = false;
+        m_ConstantsValid = false;
+        m_BoundBlend = nullptr;
+        m_BoundDepth = nullptr;
+        m_BoundStencilRef = 0;
+        m_BoundRaster = nullptr;
+        m_ScissorValid = false;
+        m_BoundTopology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+        m_BoundViews.fill( nullptr );
+        m_BoundSamplers.fill( nullptr );
+
+        // The cached objects may have been released together with their maps.
+        m_SamplerCache.fill( nullptr );
+        m_BlendCache = nullptr;
+        m_DepthCache = nullptr;
+        m_RasterCache = nullptr;
     }
 
     // Drawing.
@@ -3112,57 +3457,65 @@ namespace dx11z
             (static_cast<std::uint64_t>(s[tss::MIPFILTER] & 3) << 6) | (static_cast<std::uint64_t>(s[tss::ADDRESSU] & 7) << 8) |
             (static_cast<std::uint64_t>(s[tss::ADDRESSV] & 7) << 11) | (static_cast<std::uint64_t>(s[tss::MIPMAPLODBIAS]) << 32);
 
+        const std::size_t index = static_cast<std::size_t>(stage);
+
+        if (m_SamplerCache[index] != nullptr && m_SamplerKeys[index] == key)
+        {
+            return m_SamplerCache[index];
+        }
+
         auto & cached = m_Samplers[key];
 
-        if (cached)
+        if (!cached)
         {
-            return cached.Get();
-        }
+            const bool anisotropic = s[tss::MAGFILTER] == 5 || s[tss::MINFILTER] == 3 || (m_ConfigAnisotropy > 1 && s[tss::MINFILTER] >= 2);
+            const bool mag_linear = s[tss::MAGFILTER] >= 2;
+            const bool min_linear = s[tss::MINFILTER] >= 2;
+            const std::uint32_t mip = s[tss::MIPFILTER];
 
-        const bool anisotropic = s[tss::MAGFILTER] == 5 || s[tss::MINFILTER] == 3 || (m_ConfigAnisotropy > 1 && s[tss::MINFILTER] >= 2);
-        const bool mag_linear = s[tss::MAGFILTER] >= 2;
-        const bool min_linear = s[tss::MINFILTER] >= 2;
-        const std::uint32_t mip = s[tss::MIPFILTER];
-
-        D3D11_SAMPLER_DESC desc = {};
-        if (anisotropic)
-        {
-            desc.Filter = D3D11_FILTER_ANISOTROPIC;
-            desc.MaxAnisotropy = m_ConfigAnisotropy > 1 ? static_cast<UINT>(std::min( m_ConfigAnisotropy, 16 )) : 16u;
-        }
-        else
-        {
-            int filter = 0;
-
-            if (mip == 3)
+            D3D11_SAMPLER_DESC desc = {};
+            if (anisotropic)
             {
-                filter |= 0x1;
+                desc.Filter = D3D11_FILTER_ANISOTROPIC;
+                desc.MaxAnisotropy = m_ConfigAnisotropy > 1 ? static_cast<UINT>(std::min( m_ConfigAnisotropy, 16 )) : 16u;
+            }
+            else
+            {
+                int filter = 0;
+
+                if (mip == 3)
+                {
+                    filter |= 0x1;
+                }
+
+                if (mag_linear)
+                {
+                    filter |= 0x4;
+                }
+
+                if (min_linear)
+                {
+                    filter |= 0x10;
+                }
+
+                desc.Filter = static_cast<D3D11_FILTER>(filter);
+                desc.MaxAnisotropy = 1;
             }
 
-            if (mag_linear)
-            {
-                filter |= 0x4;
-            }
+            desc.AddressU = ToAddress( s[tss::ADDRESSU] );
+            desc.AddressV = ToAddress( s[tss::ADDRESSV] );
+            desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+            desc.MipLODBias = AsFloat( s[tss::MIPMAPLODBIAS] );
+            desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+            desc.MinLOD = 0.0f;
 
-            if (min_linear)
-            {
-                filter |= 0x10;
-            }
-
-            desc.Filter = static_cast<D3D11_FILTER>(filter);
-            desc.MaxAnisotropy = 1;
+            // Mip filter none samples the top level only.
+            desc.MaxLOD = mip <= 1 ? 0.0f : D3D11_FLOAT32_MAX;
+            m_Device->CreateSamplerState( &desc, cached.Put() );
         }
 
-        desc.AddressU = ToAddress( s[tss::ADDRESSU] );
-        desc.AddressV = ToAddress( s[tss::ADDRESSV] );
-        desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-        desc.MipLODBias = AsFloat( s[tss::MIPMAPLODBIAS] );
-        desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
-        desc.MinLOD = 0.0f;
-
-        // Mip filter none samples the top level only.
-        desc.MaxLOD = mip <= 1 ? 0.0f : D3D11_FLOAT32_MAX;
-        m_Device->CreateSamplerState( &desc, cached.Put() );
+        m_SamplerKeys[index] = key;
+        m_SamplerCache[index] = cached.Get();
         return cached.Get();
     }
 
@@ -3170,7 +3523,7 @@ namespace dx11z
     {
         const auto & render = m_D3D.m_Render;
 
-        // Constants.
+        // Constants, uploaded only when they differ from the last upload.
         DrawConstants constants = {};
         constants.m_Target[0] = static_cast<float>(m_Width);
         constants.m_Target[1] = static_cast<float>(m_Height);
@@ -3202,11 +3555,16 @@ namespace dx11z
         constants.m_Flags[3] = (m_Bound[0] != nullptr ? 1 : 0) | (m_Bound[1] != nullptr ? 2 : 0);
         constants.m_AlphaRef[0] = static_cast<float>(render[rs::ALPHAREF] & 0xFF) / 255.0f;
 
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-        if (SUCCEEDED( m_Context->Map( m_DrawConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
+        if (!m_ConstantsValid || std::memcmp( &constants, &m_LastConstants, sizeof( constants ) ) != 0)
         {
-            std::memcpy( mapped.pData, &constants, sizeof( constants ) );
-            m_Context->Unmap( m_DrawConstants.Get(), 0 );
+            D3D11_MAPPED_SUBRESOURCE mapped = {};
+            if (SUCCEEDED( m_Context->Map( m_DrawConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
+            {
+                std::memcpy( mapped.pData, &constants, sizeof( constants ) );
+                m_Context->Unmap( m_DrawConstants.Get(), 0 );
+                m_LastConstants = constants;
+                m_ConstantsValid = true;
+            }
         }
 
         // Blend.
@@ -3214,40 +3572,50 @@ namespace dx11z
             (static_cast<std::uint64_t>(render[rs::SRCBLEND] & 0xFF) << 8) |
             (static_cast<std::uint64_t>(render[rs::DESTBLEND] & 0xFF) << 16);
 
-        auto & blend = m_Blends[blend_key];
-
-        if (!blend)
+        if (m_BlendCache == nullptr || m_BlendKey != blend_key)
         {
-            D3D11_BLEND_DESC desc = {};
-            auto & target = desc.RenderTarget[0];
-            std::uint32_t source_blend = render[rs::SRCBLEND];
-            std::uint32_t destination_blend = render[rs::DESTBLEND];
+            auto & blend = m_Blends[blend_key];
 
-            // BOTHSRCALPHA and BOTHINVSRCALPHA set both factors
-            if (source_blend == 12)
+            if (!blend)
             {
-                source_blend = 5;
-                destination_blend = 6;
-            }
-            else if (source_blend == 13)
-            {
-                source_blend = 6;
-                destination_blend = 5;
+                D3D11_BLEND_DESC desc = {};
+                auto & target = desc.RenderTarget[0];
+                std::uint32_t source_blend = render[rs::SRCBLEND];
+                std::uint32_t destination_blend = render[rs::DESTBLEND];
+
+                // BOTHSRCALPHA and BOTHINVSRCALPHA set both factors
+                if (source_blend == 12)
+                {
+                    source_blend = 5;
+                    destination_blend = 6;
+                }
+                else if (source_blend == 13)
+                {
+                    source_blend = 6;
+                    destination_blend = 5;
+                }
+
+                target.BlendEnable = render[rs::ALPHABLENDENABLE] != 0;
+                target.SrcBlend = ToBlend( source_blend, false );
+                target.DestBlend = ToBlend( destination_blend, false );
+                target.BlendOp = D3D11_BLEND_OP_ADD;
+                target.SrcBlendAlpha = ToBlend( source_blend, true );
+                target.DestBlendAlpha = ToBlend( destination_blend, true );
+                target.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+                target.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+                m_Device->CreateBlendState( &desc, blend.Put() );
             }
 
-            target.BlendEnable = render[rs::ALPHABLENDENABLE] != 0;
-            target.SrcBlend = ToBlend( source_blend, false );
-            target.DestBlend = ToBlend( destination_blend, false );
-            target.BlendOp = D3D11_BLEND_OP_ADD;
-            target.SrcBlendAlpha = ToBlend( source_blend, true );
-            target.DestBlendAlpha = ToBlend( destination_blend, true );
-            target.BlendOpAlpha = D3D11_BLEND_OP_ADD;
-            target.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-            m_Device->CreateBlendState( &desc, blend.Put() );
+            m_BlendKey = blend_key;
+            m_BlendCache = blend.Get();
         }
 
-        const float factor[4] = {};
-        m_Context->OMSetBlendState( blend.Get(), factor, 0xFFFFFFFF );
+        if (m_BoundBlend != m_BlendCache)
+        {
+            const float factor[4] = {};
+            m_Context->OMSetBlendState( m_BlendCache, factor, 0xFFFFFFFF );
+            m_BoundBlend = m_BlendCache;
+        }
 
         // Depth and stencil.
         const bool depth_enable = render[rs::ZENABLE] != 0;
@@ -3261,107 +3629,183 @@ namespace dx11z
             (static_cast<std::uint64_t>(render[rs::STENCILMASK] & 0xFF) << 23) |
             (static_cast<std::uint64_t>(render[rs::STENCILWRITEMASK] & 0xFF) << 31);
 
-        auto & depth = m_DepthStates[depth_key];
-
-        if (!depth)
+        if (m_DepthCache == nullptr || m_DepthKey != depth_key)
         {
-            D3D11_DEPTH_STENCIL_DESC desc = {};
-            desc.DepthEnable = depth_enable;
-            desc.DepthWriteMask = depth_enable && render[rs::ZWRITEENABLE] != 0 ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
-            desc.DepthFunc = ToCompare( render[rs::ZFUNC] );
-            desc.StencilEnable = render[rs::STENCILENABLE] != 0;
-            desc.StencilReadMask = static_cast<UINT8>(render[rs::STENCILMASK] & 0xFF);
-            desc.StencilWriteMask = static_cast<UINT8>(render[rs::STENCILWRITEMASK] & 0xFF);
-            desc.FrontFace.StencilFunc = ToCompare( render[rs::STENCILFUNC] );
-            desc.FrontFace.StencilFailOp = ToStencilOp( render[rs::STENCILFAIL] );
-            desc.FrontFace.StencilDepthFailOp = ToStencilOp( render[rs::STENCILZFAIL] );
-            desc.FrontFace.StencilPassOp = ToStencilOp( render[rs::STENCILPASS] );
-            desc.BackFace = desc.FrontFace;
-            m_Device->CreateDepthStencilState( &desc, depth.Put() );
+            auto & depth = m_DepthStates[depth_key];
+
+            if (!depth)
+            {
+                D3D11_DEPTH_STENCIL_DESC desc = {};
+                desc.DepthEnable = depth_enable;
+                desc.DepthWriteMask = depth_enable && render[rs::ZWRITEENABLE] != 0 ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
+                desc.DepthFunc = ToCompare( render[rs::ZFUNC] );
+                desc.StencilEnable = render[rs::STENCILENABLE] != 0;
+                desc.StencilReadMask = static_cast<UINT8>(render[rs::STENCILMASK] & 0xFF);
+                desc.StencilWriteMask = static_cast<UINT8>(render[rs::STENCILWRITEMASK] & 0xFF);
+                desc.FrontFace.StencilFunc = ToCompare( render[rs::STENCILFUNC] );
+                desc.FrontFace.StencilFailOp = ToStencilOp( render[rs::STENCILFAIL] );
+                desc.FrontFace.StencilDepthFailOp = ToStencilOp( render[rs::STENCILZFAIL] );
+                desc.FrontFace.StencilPassOp = ToStencilOp( render[rs::STENCILPASS] );
+                desc.BackFace = desc.FrontFace;
+                m_Device->CreateDepthStencilState( &desc, depth.Put() );
+            }
+
+            m_DepthKey = depth_key;
+            m_DepthCache = depth.Get();
         }
 
-        m_Context->OMSetDepthStencilState( depth.Get(), render[rs::STENCILREF] & 0xFF );
+        const UINT stencil_ref = render[rs::STENCILREF] & 0xFF;
+
+        if (m_BoundDepth != m_DepthCache || m_BoundStencilRef != stencil_ref)
+        {
+            m_Context->OMSetDepthStencilState( m_DepthCache, stencil_ref );
+            m_BoundDepth = m_DepthCache;
+            m_BoundStencilRef = stencil_ref;
+        }
 
         // Rasterizer, D3D7 culls by screen winding like D3D11 with clockwise front faces.
         const std::uint64_t raster_key = static_cast<std::uint64_t>(render[rs::CULLMODE] & 3) |
             (static_cast<std::uint64_t>(render[rs::FILLMODE] == 2) << 2);
 
-        auto & raster = m_Rasters[raster_key];
-
-        if (!raster)
+        if (m_RasterCache == nullptr || m_RasterKey != raster_key)
         {
-            D3D11_RASTERIZER_DESC desc = {};
-            desc.FillMode = render[rs::FILLMODE] == 2 ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
-            const std::uint32_t cull = render[rs::CULLMODE];
-            desc.CullMode = cull == 2 ? D3D11_CULL_FRONT : (cull == 3 ? D3D11_CULL_BACK : D3D11_CULL_NONE);
-            desc.FrontCounterClockwise = FALSE;
-            desc.DepthClipEnable = TRUE;
-            desc.ScissorEnable = TRUE;
-            m_Device->CreateRasterizerState( &desc, raster.Put() );
+            auto & raster = m_Rasters[raster_key];
+
+            if (!raster)
+            {
+                D3D11_RASTERIZER_DESC desc = {};
+                desc.FillMode = render[rs::FILLMODE] == 2 ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
+                const std::uint32_t cull = render[rs::CULLMODE];
+                desc.CullMode = cull == 2 ? D3D11_CULL_FRONT : (cull == 3 ? D3D11_CULL_BACK : D3D11_CULL_NONE);
+                desc.FrontCounterClockwise = FALSE;
+                desc.DepthClipEnable = TRUE;
+                desc.ScissorEnable = TRUE;
+                m_Device->CreateRasterizerState( &desc, raster.Put() );
+            }
+
+            m_RasterKey = raster_key;
+            m_RasterCache = raster.Get();
         }
 
-        m_Context->RSSetState( raster.Get() );
+        if (m_BoundRaster != m_RasterCache)
+        {
+            m_Context->RSSetState( m_RasterCache );
+            m_BoundRaster = m_RasterCache;
+        }
 
-        D3D11_VIEWPORT viewport = { 0, 0, static_cast<float>(m_RenderWidth), static_cast<float>(m_RenderHeight), 0, 1 };
-        m_Context->RSSetViewports( 1, &viewport );
+        // Targets, shaders, buffers and layout, the same for every scene draw.
+        if (!m_SceneBound)
+        {
+            D3D11_VIEWPORT viewport = { 0, 0, static_cast<float>(m_RenderWidth), static_cast<float>(m_RenderHeight), 0, 1 };
+            m_Context->RSSetViewports( 1, &viewport );
+
+            ID3D11RenderTargetView * target = m_FrameView.Get();
+            m_Context->OMSetRenderTargets( 1, &target, m_DepthView.Get() );
+
+            m_Context->IASetInputLayout( m_SceneLayout.Get() );
+            UINT stride = sizeof( TlVertex );
+            UINT offset = 0;
+            ID3D11Buffer * vertex_buffer = m_VertexBuffer.Get();
+            m_Context->IASetVertexBuffers( 0, 1, &vertex_buffer, &stride, &offset );
+            m_Context->IASetIndexBuffer( m_IndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0 );
+            m_Context->VSSetShader( m_SceneVs.Get(), nullptr, 0 );
+            m_Context->PSSetShader( m_ScenePs.Get(), nullptr, 0 );
+            ID3D11Buffer * constant_buffer = m_DrawConstants.Get();
+            m_Context->VSSetConstantBuffers( 0, 1, &constant_buffer );
+            m_Context->PSSetConstantBuffers( 0, 1, &constant_buffer );
+            m_SceneBound = true;
+        }
+
         const D3D11_RECT scissor = ScaledClip();
-        m_Context->RSSetScissorRects( 1, &scissor );
 
-        ID3D11RenderTargetView * target = m_FrameView.Get();
-        m_Context->OMSetRenderTargets( 1, &target, m_DepthView.Get() );
+        if (!m_ScissorValid || std::memcmp( &scissor, &m_BoundScissor, sizeof( scissor ) ) != 0)
+        {
+            m_Context->RSSetScissorRects( 1, &scissor );
+            m_BoundScissor = scissor;
+            m_ScissorValid = true;
+        }
 
-        m_Context->IASetInputLayout( m_SceneLayout.Get() );
-        UINT stride = sizeof( TlVertex );
-        UINT offset = 0;
-        ID3D11Buffer * vertex_buffer = m_VertexBuffer.Get();
-        m_Context->IASetVertexBuffers( 0, 1, &vertex_buffer, &stride, &offset );
-        m_Context->IASetIndexBuffer( m_IndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0 );
-        m_Context->VSSetShader( m_SceneVs.Get(), nullptr, 0 );
-        m_Context->PSSetShader( m_ScenePs.Get(), nullptr, 0 );
-        ID3D11Buffer * constant_buffer = m_DrawConstants.Get();
-        m_Context->VSSetConstantBuffers( 0, 1, &constant_buffer );
-        m_Context->PSSetConstantBuffers( 0, 1, &constant_buffer );
-
-        ID3D11ShaderResourceView * views[MAX_STAGES] = {};
-        ID3D11SamplerState * samplers[MAX_STAGES] = {};
+        std::array<ID3D11ShaderResourceView *, MAX_STAGES> views = {};
+        std::array<ID3D11SamplerState *, MAX_STAGES> samplers = {};
 
         for (int stage = 0; stage < MAX_STAGES; ++stage)
         {
-            if (m_Bound[static_cast<std::size_t>( stage )] != nullptr)
+            const auto index = static_cast<std::size_t>( stage );
+
+            if (m_Bound[index] != nullptr)
             {
-                views[stage] = m_Bound[static_cast<std::size_t>( stage )]->m_View.Get();
+                views[index] = m_Bound[index]->m_View.Get();
             }
 
-            samplers[stage] = GetSampler( stage );
+            samplers[index] = GetSampler( stage );
         }
 
-        m_Context->PSSetShaderResources( 0, MAX_STAGES, views );
-        m_Context->PSSetSamplers( 0, MAX_STAGES, samplers );
+        if (views != m_BoundViews)
+        {
+            m_Context->PSSetShaderResources( 0, MAX_STAGES, views.data() );
+            m_BoundViews = views;
+        }
+
+        if (samplers != m_BoundSamplers)
+        {
+            m_Context->PSSetSamplers( 0, MAX_STAGES, samplers.data() );
+            m_BoundSamplers = samplers;
+        }
     }
 
 
     void Driver::Flush()
     {
-        if (m_BatchIndices.empty() || m_BatchVertices.empty() || !m_FrameView)
+        if (m_BatchIndices.empty() || m_BatchVertices.empty() || !m_FrameView || !m_VertexBuffer || !m_IndexBuffer)
         {
             m_BatchVertices.clear();
             m_BatchIndices.clear();
             return;
         }
 
+        const std::size_t vertex_count = m_BatchVertices.size();
+        const std::size_t index_count = m_BatchIndices.size();
+
+        if (vertex_count > RAW_VERTICES || index_count > RAW_INDICES)
+        {
+            m_BatchVertices.clear();
+            m_BatchIndices.clear();
+            m_BatchPrimitive = Primitive::NONE;
+            return;
+        }
+
         ApplyPipeline();
 
+        // Append behind the data of earlier draws, start over with a discard once full.
+        D3D11_MAP map = D3D11_MAP_WRITE_NO_OVERWRITE;
+
+        if (m_VertexCursor + vertex_count > RAW_VERTICES || m_IndexCursor + index_count > RAW_INDICES)
+        {
+            map = D3D11_MAP_WRITE_DISCARD;
+            m_VertexCursor = 0;
+            m_IndexCursor = 0;
+        }
+
         D3D11_MAPPED_SUBRESOURCE mapped = {};
-        if (SUCCEEDED( m_Context->Map( m_VertexBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
+        if (FAILED( m_Context->Map( m_VertexBuffer.Get(), 0, map, 0, &mapped ) ))
         {
-            std::memcpy( mapped.pData, m_BatchVertices.data(), m_BatchVertices.size() * sizeof( TlVertex ) );
-            m_Context->Unmap( m_VertexBuffer.Get(), 0 );
+            m_BatchVertices.clear();
+            m_BatchIndices.clear();
+            return;
         }
-        if (SUCCEEDED( m_Context->Map( m_IndexBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
+
+        std::memcpy( static_cast<TlVertex *>(mapped.pData) + m_VertexCursor, m_BatchVertices.data(), vertex_count * sizeof( TlVertex ) );
+        m_Context->Unmap( m_VertexBuffer.Get(), 0 );
+
+        if (FAILED( m_Context->Map( m_IndexBuffer.Get(), 0, map, 0, &mapped ) ))
         {
-            std::memcpy( mapped.pData, m_BatchIndices.data(), m_BatchIndices.size() * sizeof( std::uint16_t ) );
-            m_Context->Unmap( m_IndexBuffer.Get(), 0 );
+            m_BatchVertices.clear();
+            m_BatchIndices.clear();
+            return;
         }
+
+        std::memcpy( static_cast<std::uint16_t *>(mapped.pData) + m_IndexCursor, m_BatchIndices.data(), index_count * sizeof( std::uint16_t ) );
+        m_Context->Unmap( m_IndexBuffer.Get(), 0 );
 
         D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 
@@ -3374,8 +3818,16 @@ namespace dx11z
             topology = D3D11_PRIMITIVE_TOPOLOGY_POINTLIST;
         }
 
-        m_Context->IASetPrimitiveTopology( topology );
-        m_Context->DrawIndexed( static_cast<UINT>(m_BatchIndices.size()), 0, 0 );
+        if (topology != m_BoundTopology)
+        {
+            m_Context->IASetPrimitiveTopology( topology );
+            m_BoundTopology = topology;
+        }
+
+        m_Context->DrawIndexed( static_cast<UINT>(index_count), static_cast<UINT>(m_IndexCursor), static_cast<INT>(m_VertexCursor) );
+
+        m_VertexCursor += vertex_count;
+        m_IndexCursor += index_count;
 
         m_BatchVertices.clear();
         m_BatchIndices.clear();

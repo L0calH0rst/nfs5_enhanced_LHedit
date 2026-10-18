@@ -74,7 +74,20 @@ needed any more. It emulates exactly what the stock driver did, the game itself 
 | Movies | The intro and menu movies play through the same front buffer path as on the original driver. |
 | High DPI | The window is DPI aware, so the picture is not stretched by Windows scaling. |
 | Clean exit | The device is released before the game unloads the driver, so the process always ends. |
+| Fast draw path | Repeated render states no longer split batches, geometry is streamed through ring buffers and pipeline objects are only rebound when they change. The sun glare test copies only the pixels it needs instead of scaling the whole frame down first. |
 | Fallback | `ThrashDriver = dx` in `nfs5_enhanced.ini` switches back to the stock `dx7z.dll` at any time. |
+
+### Controllers
+
+Gamepads are read through [SDL3](https://libsdl.org), the game never talks to them directly.
+
+| Feature | What it does |
+|---|---|
+| Any gamepad | DualSense, DualShock 4, Xbox, Switch Pro and every other pad SDL knows work as they are, no DS4Windows or other converter needed. |
+| Hotplug | Pads can be connected and disconnected at any time, also in the middle of a race. The pad pressed last is the one in use. |
+| Bindings that stay | The game sees one controller, always present and always at the same place in its list, so bindings made in *Options > Controller* survive restarts and pad swaps. |
+| Modern default bindings | Right trigger accelerates, left trigger brakes, left stick steers, A hand brake, B camera, X look behind, Y reset car, right and left shoulder shift up and down. Applied when the gamepad is picked as default controller in *Options > Controller*. Every stick, trigger and button can still be bound freely. |
+| Rumble | The force feedback the game plays for wheels drives the pad motors. |
 
 ### Widescreen
 
@@ -83,6 +96,7 @@ needed any more. It emulates exactly what the stock driver did, the game itself 
 | Hor+ projection | Every 3D camera, including the rear view mirror, keeps the 4:3 vertical view and opens up to the sides. Nothing is cropped or stretched. |
 | Round light flares | Headlight and lamp flares stay round on wide screens instead of being stretched. |
 | Unlocked resolutions | Every display mode of 640x480 and up is offered. The game used to hide modes behind a video memory estimate from 2000. |
+| Largest mode | The resolution list skipped the last entry of the driver mode table, usually the native resolution in 32 bit, so it was only offered in 16 bit. |
 | Race resolution | Races can use the Options resolution, the desktop resolution or any fixed size, in 16 or 32 bit color. |
 
 ### HUD
@@ -109,8 +123,9 @@ needed any more. It emulates exactly what the stock driver did, the game itself 
 
 | Feature | What it does |
 |---|---|
-| Draw distance | Track scenery is drawn up to 4 times further, on top of the *View Distance* option. |
-| Far clip | The 700 unit far plane that cut off cars and objects follows the new draw distance. |
+| Draw distance | Track scenery is drawn twice as far, on top of the *View Distance* option. `MinDrawDistance` draws at least a fixed distance everywhere. |
+| Consistent scenery | Two kinds of scenery had fixed limits of 600 and 700 m that ignored the draw distance. With a longer distance they disappeared while everything around them was still drawn, buildings floated and ground went missing. They now follow the draw distance. |
+| Far clip | The 700 unit far plane that cut off cars and objects follows the new draw distance, with room for large pieces of scenery so they are not sliced at the horizon. |
 | Car detail | Cars keep their detailed models 4 times further. The wider Hor+ view is compensated automatically. |
 | Full car detail | The game never drew the most detailed car model in races, not even for your own car, so cars looked simpler than in the garage. Nearby cars now use the same model the garage shows. |
 | Full texture quality | The game rates any CPU above 2.1 GHz as a 1990s machine and loads every texture in 16 bit, the larger ones at half size, so car lettering, plates and decals look blurry next to the garage. Textures now load at the highest quality. |
@@ -150,6 +165,8 @@ needed any more. It emulates exactly what the stock driver did, the game itself 
   `dinput.dll` in the game folder
 - [DDrawCompat](https://github.com/narzoul/DDrawCompat) (`ddraw.dll`) is only needed with the stock
   DirectX 7 driver (`ThrashDriver = dx`).
+- [SDL3](https://github.com/libsdl-org/SDL) (`SDL3.dll`) for controller support. Without it the game keeps its own
+  DirectInput controller handling.
 
 ---
 
@@ -162,7 +179,7 @@ Get the latest release from the [Releases](https://github.com/iArtorias/nfs5_enh
 
 ### 2. Copy them into the game folder
 
-Copy `nfs5_enhanced.asi` and `nfs5_enhanced.ini` next to `Porsche.exe`, and `dx11z.dll` into the
+Copy `nfs5_enhanced.asi`, `nfs5_enhanced.ini` and `SDL3.dll` next to `Porsche.exe`, and `dx11z.dll` into the
 `Drivers` folder of the game, next to `dx7z.dll`. If you use DDrawCompat with the stock driver, back
 up your `DDrawCompat.ini` and copy the included one over it.
 
@@ -197,6 +214,7 @@ Everything is set in `nfs5_enhanced.ini`, and every setting is explained in the 
 | `[HudScaling]` | HUD size, text, gauge style, loading screen. |
 | `[Text]` | Sharp text, enlargement factor and edge sharpness. |
 | `[Detail]` | Draw distance, far clip, distant wheels. |
+| `[Controller]` | SDL3 gamepads, rumble, dead zones, default bindings. |
 
 Common adjustments:
 
@@ -213,6 +231,9 @@ Common adjustments:
 | No VSync | `VSync = 0` |
 | 8x antialiasing | `Antialiasing = 8` |
 | The stock DirectX 7 driver | `ThrashDriver = dx` |
+| Scenery even further away | `DrawDistanceScale = 4.0`, or a fixed `MinDrawDistance = 2000` |
+| Stronger or weaker rumble | `RumbleStrength = 1.5` or `0.5` |
+| The game's own DirectInput controller handling | `Enabled = 0` under `[Controller]` |
 
 > [!TIP]
 > With interpolation on, the race draws as often as it can. Cap it with `FpsLimit` or with `VSync`
@@ -274,7 +295,17 @@ has its original size.
 <summary><b>Frame rate drops on some tracks</b></summary>
 
 The longer draw distance asks a lot of an engine from 2000 on wide open tracks. Lower
-`DrawDistanceScale` to `2.0`, or `1.0` for the original distance.
+`DrawDistanceScale` to `1.5`, or `1.0` for the original distance.
+
+</details>
+
+<details>
+<summary><b>The controller does nothing</b></summary>
+
+Check that `SDL3.dll` is next to the ASI and that `nfs5_enhanced.log` lists the pad under
+"Gamepad connected". Then bind the controls once in *Options > Controller*, the controller is
+named after the pad. Tools that turn a pad into a virtual Xbox pad are not needed, with them
+running the pad in use is simply the one pressed last.
 
 </details>
 
@@ -314,7 +345,9 @@ cmake --build build-mingw
 ```
 
 [SafetyHook](https://github.com/cursey/safetyhook) and [Zydis](https://github.com/zyantific/zydis)
-are vendored as amalgamated sources under `external/`.
+are vendored as amalgamated sources under `external/`. The [SDL3](https://github.com/libsdl-org/SDL)
+headers and the official 32 bit `SDL3.dll` are under `external/SDL3`, the ASI loads the library
+at run time and does not link against it. The build copies `SDL3.dll` next to the ASI.
 
 ---
 
@@ -323,3 +356,4 @@ are vendored as amalgamated sources under `external/`.
 - [Silent](https://github.com/CookiePLMonster) for [SilentPatchNFS90s](https://github.com/CookiePLMonster/SilentPatchNFS90s), whose NFS Porsche fixes were rewritten here
 - [narzoul](https://github.com/narzoul) for [DDrawCompat](https://github.com/narzoul/DDrawCompat)
 - [ThirteenAG](https://github.com/ThirteenAG) for the [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader)
+- The [SDL](https://libsdl.org) developers for SDL3

@@ -45,7 +45,7 @@ namespace nfs5
 
         // Registry value Thrash Driver as the game sees it, auto replaces a driver that does
         // not load with dx, registry passes the stored value, anything else is used as is.
-        std::string m_ThrashDriver = "auto";
+        std::string m_ThrashDriver = "dx11";
     };
 
     struct AffinitySettings
@@ -78,7 +78,7 @@ namespace nfs5
         int m_RaceColorDepth = 0;
 
         // Car detail distance factor, the Hor+ fov change is compensated on top, '0' disables.
-        float m_LodDistanceScale = 7.0f;
+        float m_LodDistanceScale = 4.0f;
     };
 
     struct FramerateSettings
@@ -144,9 +144,12 @@ namespace nfs5
         bool m_Enabled = true;
 
         // Multiplier on the track draw distance, applied on top of the view distance option.
-        float m_DrawDistanceScale = 4.0f;
+        float m_DrawDistanceScale = 2.0f;
 
-        // Extra factor on the 700 far clip plane after it follows the draw distance.
+        // Draw distance in metres every track position gets at least, '0' follows the track data.
+        float m_MinDrawDistance = 20000.0f;
+
+        // Extra factor on the far clip plane after it follows the draw distance.
         float m_FarClipMultiplier = 1.0f;
 
         // Distant cars use the LOD 1 wheels instead of none.
@@ -157,6 +160,30 @@ namespace nfs5
 
         // Texture quality tier '0' to '3', '-1' keeps the game hardware detection.
         int m_TextureDetail = 3;
+    };
+
+    struct ControllerSettings
+    {
+        // SDL3 gamepad shown to the game as one DirectInput controller that is always present.
+        bool m_Enabled = true;
+
+        // DirectInput copies of controllers SDL already reads are not listed, so a pad is not
+        // seen twice and its bindings never point at a device that went away.
+        bool m_HideHandledDevices = true;
+
+        // Force feedback of the game played as rumble.
+        bool m_Rumble = true;
+        float m_RumbleStrength = 1.0f;
+
+        // Radial dead zone of the sticks and dead zone of the triggers, '0' to '0.9'.
+        float m_StickDeadzone = 0.10f;
+        float m_TriggerDeadzone = 0.05f;
+
+        // Keep reading the pad while another program is active.
+        bool m_BackgroundInput = false;
+
+        // Default modern bindings of the gamepad.
+        bool m_TriggerBindings = true;
     };
 
     struct Settings
@@ -171,6 +198,7 @@ namespace nfs5
         HudSettings m_Hud;
         DetailSettings m_Detail;
         TextSettings m_Text;
+        ControllerSettings m_Controller;
     };
 
     class Config

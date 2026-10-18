@@ -36,6 +36,9 @@ add_library( nfs5_enhanced SHARED
     src/subsystems/hud_scaling/loading_screen.cpp
     src/subsystems/text/text_quality.cpp
     src/subsystems/io_hooks/io_hooks.cpp
+    src/subsystems/gamepad/gamepad.cpp
+    src/subsystems/gamepad/sdl3_api.cpp
+    src/subsystems/gamepad/virtual_gamepad.cpp
     src/resources/version.rc
 )
 
@@ -46,6 +49,9 @@ set_target_properties( nfs5_enhanced PROPERTIES
 )
 
 target_include_directories( nfs5_enhanced PRIVATE src )
+
+# SDL3 headers only, 'SDL3.dll' is loaded at run time and is optional.
+target_include_directories( nfs5_enhanced SYSTEM PRIVATE external/SDL3/include )
 target_compile_definitions( nfs5_enhanced PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00 )
 target_link_libraries( nfs5_enhanced PRIVATE safetyhook winmm )
 
@@ -65,3 +71,7 @@ else()
 endif()
 
 add_subdirectory( drivers/dx11 )
+
+# The 32 bit 'SDL3.dll' is copied next to the ASI so a build folder can be dropped into the game.
+add_custom_command( TARGET nfs5_enhanced POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/external/SDL3/bin/x86/SDL3.dll $<TARGET_FILE_DIR:nfs5_enhanced>/SDL3.dll )

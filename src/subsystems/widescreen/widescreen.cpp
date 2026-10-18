@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <numbers>
 
 #if defined( _MSC_VER )
@@ -29,6 +30,47 @@ namespace nfs5
 
         // Replaces the 640.0 the car LOD size is normalised with, larger keeps detail further out.
         float s_LodSizeScale = 640.0f;
+
+        // The screen size is saved as the mode itself instead of its list position, which moves
+        // whenever the list changes. Bit 30 marks it, bit 28 is 32 bit, width and height take
+        // 14 bits each. Plain positions from older saves are still read as positions.
+        constexpr std::uint32_t SAVED_MODE_MARK = 0x40000000;
+        constexpr std::uint32_t SAVED_MODE_MASK = 0xE0000000;
+        constexpr std::uint32_t SAVED_MODE_32 = 0x10000000;
+        constexpr std::uint32_t SAVED_MODE_SIZE = 0x3FFF;
+
+        [[nodiscard]] bool SameDepth(
+            int first,
+            int second
+        )
+        {
+            return (first > 16) == (second > 16);
+        }
+
+
+        // The registry mode is the real desktop, the current mode may be one emulated by
+        // DDrawCompat for the 640x480 front end.
+        bool GetDesktopSize(
+            int & width,
+            int & height
+        )
+        {
+            DEVMODEW mode = {};
+            mode.dmSize = sizeof( mode );
+
+            if (::EnumDisplaySettingsW( nullptr, ENUM_REGISTRY_SETTINGS, &mode ) != FALSE && mode.dmPelsWidth >= 640)
+            {
+                width = static_cast<int>(mode.dmPelsWidth);
+                height = static_cast<int>(mode.dmPelsHeight);
+            }
+            else
+            {
+                width = ::GetSystemMetrics( SM_CXSCREEN );
+                height = ::GetSystemMetrics( SM_CYSCREEN );
+            }
+
+            return width >= 640 && height >= 480;
+        }
 
         // 'THRASH_about' returns the driver info block, +3Ch mode count, +40h mode records.
         // Records are 40 bytes and 1 based, width height bpp first.
@@ -189,6 +231,23 @@ namespace nfs5
     }
 
 
+    int __cdecl Widescreen::ResolutionListCountHook()
+    {
+        Widescreen & self = GetInstance();
+
+        using CountFn = int( __cdecl * )();
+        const int count = reinterpret_cast<CountFn>(self.m_ResolutionCountPatch.GetOriginalTarget())();
+        const auto context = hook::Ref< std::uintptr_t >( game::var::RENDER_CONTEXT );
+
+        // In the software path the list is the single 640x480 entry, nothing to extend.
+        if (count <= 0 || context == 0 || hook::Ref< std::uint8_t >( context + 0x60 ) != 0)
+            return count;
+
+        // Indices run '0' to count, record '0' is empty and the mode filter rejects it.
+        return count + 1;
+    }
+
+
     bool __cdecl Widescreen::IsVideoModeUsableHook(
         int mode_index
     )
@@ -286,23 +345,187 @@ namespace nfs5
             return true;
         }
 
-        // The registry mode is the real desktop, the current mode may be the
-        // 640x480 front end mode DDrawCompat is emulating.
-        DEVMODEW mode = {};
-        mode.dmSize = sizeof( mode );
+        return GetDesktopSize( width, height );
+    }
 
-        if (::EnumDisplaySettingsW( nullptr, ENUM_REGISTRY_SETTINGS, &mode ) != FALSE && mode.dmPelsWidth >= 640)
+
+    bool Widescreen::IsResolutionAccessor(
+        const void * accessor
+    )
+    {
+        return accessor != nullptr && *static_cast<const std::uintptr_t *>(accessor) == game::fn::RESOLUTION_ACCESSOR_VTABLE;
+    }
+
+
+    int Widescreen::FindListedMode(
+        const void * accessor,
+        int width,
+        int height,
+        int bpp
+    )
+    {
+        namespace fn = game::fn;
+        const auto base = reinterpret_cast<std::uintptr_t>(accessor);
+        const int count = hook::Ref<int>( base + fn::ACCESSOR_COUNT );
+        const auto * widths = hook::Ref<const int *>( base + fn::RESOLUTION_WIDTHS );
+        const auto * heights = hook::Ref<const int *>( base + fn::RESOLUTION_HEIGHTS );
+        const auto * depths = hook::Ref<const int *>( base + fn::RESOLUTION_DEPTHS );
+
+        if (count <= 0 || widths == nullptr || heights == nullptr || depths == nullptr)
+            return -1;
+
+        for (int i = 0; i < count; ++i)
         {
-            width = static_cast<int>(mode.dmPelsWidth);
-            height = static_cast<int>(mode.dmPelsHeight);
-        }
-        else
-        {
-            width = ::GetSystemMetrics( SM_CXSCREEN );
-            height = ::GetSystemMetrics( SM_CYSCREEN );
+            if (widths[i] == width && heights[i] == height && SameDepth( depths[i], bpp ))
+                return i;
         }
 
-        return width >= 640 && height >= 480;
+        return -1;
+    }
+
+
+    int Widescreen::FindDefaultMode(
+        const void * accessor
+    )
+    {
+        int width = 0;
+        int height = 0;
+
+        if (GetDesktopSize( width, height ))
+        {
+            for (int bpp : { 32, 16 })
+            {
+                const int index = FindListedMode( accessor, width, height, bpp );
+
+                if (index >= 0)
+                    return index;
+            }
+        }
+
+        namespace fn = game::fn;
+        const auto base = reinterpret_cast<std::uintptr_t>(accessor);
+        const int count = hook::Ref<int>( base + fn::ACCESSOR_COUNT );
+        const auto * widths = hook::Ref<const int *>( base + fn::RESOLUTION_WIDTHS );
+        const auto * heights = hook::Ref<const int *>( base + fn::RESOLUTION_HEIGHTS );
+        const auto * depths = hook::Ref<const int *>( base + fn::RESOLUTION_DEPTHS );
+
+        if (count <= 0 || widths == nullptr || heights == nullptr || depths == nullptr)
+            return -1;
+
+        int best = -1;
+        std::int64_t best_area = 0;
+
+        for (int i = 0; i < count; ++i)
+        {
+            const std::int64_t area = static_cast<std::int64_t>(widths[i]) * heights[i];
+
+            if (depths[i] > 16 && area > best_area)
+            {
+                best = i;
+                best_area = area;
+            }
+        }
+
+        return best;
+    }
+
+
+    void * __fastcall Widescreen::ResolutionAccessorCtorHook(
+        void * accessor,
+        void *,
+        const char * name
+    )
+    {
+        Widescreen & self = GetInstance();
+        void * result = self.m_ResolutionCtorHook->thiscall<void *>( accessor, name );
+
+        // Only the first start without saved options keeps this, a saved screen size is loaded
+        // over it afterwards.
+        const int index = FindDefaultMode( accessor );
+
+        if (index >= 0)
+        {
+            const auto base = reinterpret_cast<std::uintptr_t>(accessor);
+            hook::Ref<int>( base + game::fn::ACCESSOR_POSITION ) = index;
+
+            LOG_INFO( "Default screen size {}x{}x{}", hook::Ref<const int *>( base + game::fn::RESOLUTION_WIDTHS )[index],
+                hook::Ref<const int *>( base + game::fn::RESOLUTION_HEIGHTS )[index],
+                hook::Ref<const int *>( base + game::fn::RESOLUTION_DEPTHS )[index] );
+        }
+
+        return result;
+    }
+
+
+    void * __fastcall Widescreen::PositionSaveHook(
+        void * accessor,
+        void *,
+        std::uint8_t ** cursor
+    )
+    {
+        Widescreen & self = GetInstance();
+        void * result = self.m_PositionSaveHook->thiscall<void *>( accessor, cursor );
+
+        if (!IsResolutionAccessor( accessor ) || cursor == nullptr || *cursor == nullptr)
+            return result;
+
+        namespace fn = game::fn;
+        const auto base = reinterpret_cast<std::uintptr_t>(accessor);
+        const int index = hook::Ref<int>( base + fn::ACCESSOR_POSITION );
+        const int count = hook::Ref<int>( base + fn::ACCESSOR_COUNT );
+
+        if (index < 0 || index >= count)
+            return result;
+
+        const int width = hook::Ref<const int *>( base + fn::RESOLUTION_WIDTHS )[index];
+        const int height = hook::Ref<const int *>( base + fn::RESOLUTION_HEIGHTS )[index];
+        const int bpp = hook::Ref<const int *>( base + fn::RESOLUTION_DEPTHS )[index];
+
+        if (width <= 0 || height <= 0 || static_cast<std::uint32_t>(width) > SAVED_MODE_SIZE || static_cast<std::uint32_t>(height) > SAVED_MODE_SIZE)
+            return result;
+
+        const std::uint32_t saved = SAVED_MODE_MARK | (bpp > 16 ? SAVED_MODE_32 : 0) |
+            (static_cast<std::uint32_t>(width) << 14) | static_cast<std::uint32_t>(height);
+
+        // The original wrote the position and moved the cursor past it.
+        std::memcpy( *cursor - sizeof( saved ), &saved, sizeof( saved ) );
+        return result;
+    }
+
+
+    int __fastcall Widescreen::PositionLoadHook(
+        void * accessor,
+        void *,
+        std::uint8_t ** cursor
+    )
+    {
+        Widescreen & self = GetInstance();
+
+        if (IsResolutionAccessor( accessor ) && cursor != nullptr && *cursor != nullptr)
+        {
+            std::uint32_t saved = 0;
+            std::memcpy( &saved, *cursor, sizeof( saved ) );
+
+            if ((saved & SAVED_MODE_MASK) == SAVED_MODE_MARK)
+            {
+                const int width = static_cast<int>((saved >> 14) & SAVED_MODE_SIZE);
+                const int height = static_cast<int>(saved & SAVED_MODE_SIZE);
+                const int bpp = (saved & SAVED_MODE_32) != 0 ? 32 : 16;
+                int index = FindListedMode( accessor, width, height, bpp );
+
+                if (index < 0)
+                {
+                    index = std::max( FindDefaultMode( accessor ), 0 );
+                    LOG_WARN( "Saved screen size {}x{}x{} is no longer offered, using the default", width, height, bpp );
+                }
+
+                // The game reads the position from the stream, it gets the one of the saved mode.
+                const auto position = static_cast<std::uint32_t>(index);
+                std::memcpy( *cursor, &position, sizeof( position ) );
+            }
+        }
+
+        return self.m_PositionLoadHook->thiscall<int>( accessor, cursor );
     }
 
 
@@ -347,6 +570,36 @@ namespace nfs5
             }
         }
 
+        if (hook::MatchBytes( fn::RESOLUTION_LIST_COUNT_CALL.m_Address, fn::RESOLUTION_LIST_COUNT_CALL.m_Signature ))
+        {
+            ok &= m_ResolutionCountPatch.Apply( "ResolutionListCount", fn::RESOLUTION_LIST_COUNT_CALL.m_Address,
+                reinterpret_cast<void *>(&ResolutionListCountHook) );
+        }
+        else
+        {
+            LOG_ERROR( "Resolution list count call does not match, the largest mode stays hidden" );
+            ok = false;
+        }
+
+        // Screen size default and saving, the game kept a list position and started at 640x480x16.
+        m_ResolutionCtorHook = hook::CreateInline( "ResolutionAccessorCtor", fn::RESOLUTION_ACCESSOR_CTOR.m_Address,
+            fn::RESOLUTION_ACCESSOR_CTOR.m_Signature, reinterpret_cast<void *>(&ResolutionAccessorCtorHook) );
+        m_PositionSaveHook = hook::CreateInline( "AccessorPositionSave", fn::POSITION_SAVE.m_Address, fn::POSITION_SAVE.m_Signature,
+            reinterpret_cast<void *>(&PositionSaveHook) );
+        m_PositionLoadHook = hook::CreateInline( "AccessorPositionLoad", fn::POSITION_LOAD.m_Address, fn::POSITION_LOAD.m_Signature,
+            reinterpret_cast<void *>(&PositionLoadHook) );
+
+        // Saving the mode without reading it back would leave the stock position reader with a
+        // value it clamps to the last mode.
+        if (!m_PositionSaveHook || !m_PositionLoadHook)
+        {
+            m_PositionSaveHook.reset();
+            m_PositionLoadHook.reset();
+            ok = false;
+        }
+
+        ok &= m_ResolutionCtorHook != nullptr;
+
         m_PerspectiveHook = hook::CreateInline( "CameraSetPerspective", fn::CAMERA_SET_PERSPECTIVE.m_Address, fn::CAMERA_SET_PERSPECTIVE.m_Signature,
             reinterpret_cast<void *>(&SetPerspectiveHook) );
 
@@ -375,8 +628,12 @@ namespace nfs5
     void Widescreen::Uninstall()
     {
         m_SetVideoModeHook.reset();
+        m_PositionLoadHook.reset();
+        m_PositionSaveHook.reset();
+        m_ResolutionCtorHook.reset();
         m_ModeFilterHook.reset();
         m_PerspectiveHook.reset();
+        m_ResolutionCountPatch.Restore();
         m_FlareScalePatch.Restore();
         m_LodSizePatch.Restore();
         m_Installed = false;

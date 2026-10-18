@@ -24,6 +24,10 @@ namespace nfs5
         std::unique_ptr<safetyhook::InlineHook> m_PerspectiveHook;
         std::unique_ptr<safetyhook::InlineHook> m_ModeFilterHook;
         std::unique_ptr<safetyhook::InlineHook> m_SetVideoModeHook;
+        std::unique_ptr<safetyhook::InlineHook> m_ResolutionCtorHook;
+        std::unique_ptr<safetyhook::InlineHook> m_PositionSaveHook;
+        std::unique_ptr<safetyhook::InlineHook> m_PositionLoadHook;
+        hook::CallSitePatch m_ResolutionCountPatch;
         hook::OperandPatch m_FlareScalePatch;
         hook::OperandPatch m_LodSizePatch;
         WidescreenSettings m_Settings;
@@ -40,6 +44,43 @@ namespace nfs5
             float aspect,
             float near_z,
             float far_z
+        );
+
+        static int __cdecl ResolutionListCountHook();
+
+        static void * __fastcall ResolutionAccessorCtorHook(
+            void * accessor,
+            void * unused_edx,
+            const char * name
+        );
+
+        static void * __fastcall PositionSaveHook(
+            void * accessor,
+            void * unused_edx,
+            std::uint8_t ** cursor
+        );
+
+        static int __fastcall PositionLoadHook(
+            void * accessor,
+            void * unused_edx,
+            std::uint8_t ** cursor
+        );
+
+        [[nodiscard]] static bool IsResolutionAccessor(
+            const void * accessor
+        );
+
+        // Position of a mode in the screen size list, '-1' when it is not listed.
+        [[nodiscard]] static int FindListedMode(
+            const void * accessor,
+            int width,
+            int height,
+            int bpp
+        );
+
+        // The desktop size in 32 bit, else in 16 bit, else the largest 32 bit mode.
+        [[nodiscard]] static int FindDefaultMode(
+            const void * accessor
         );
 
         static bool __cdecl IsVideoModeUsableHook(

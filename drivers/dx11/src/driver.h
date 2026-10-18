@@ -10,10 +10,12 @@
 #include <dxgi1_5.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "d3d7_state.h"
@@ -161,6 +163,19 @@ namespace dx11z
         float m_V1;
     };
 
+    // Constant buffer of the scene shader, layout matches 'shaders::SCENE'.
+    struct DrawConstants
+    {
+        float m_Target[4];
+        std::int32_t m_ColorOp[2][4];
+        std::int32_t m_AlphaOp[2][4];
+        float m_Factor[4];
+        float m_FogColor[4];
+        float m_FogParams[4];
+        std::int32_t m_Flags[4];
+        float m_AlphaRef[4];
+    };
+
     struct Texture
     {
         std::uint32_t m_Magic = 0x58544433;
@@ -291,6 +306,73 @@ namespace dx11z
         std::vector<std::uint16_t> m_BatchIndices;
         Primitive m_BatchPrimitive = Primitive::NONE;
 
+        // Write positions in the dynamic vertex and index buffers. Batches are appended with
+        // 'NO_OVERWRITE' and the buffers are only discarded when they are full, a discard per
+        // draw made the driver rename megabytes of memory thousands of times per frame.
+        std::size_t m_VertexCursor = 0;
+        std::size_t m_IndexCursor = 0;
+
+        // Pipeline objects and values bound last, nothing is set again while it is unchanged.
+        // Cleared by 'InvalidatePipeline' whenever another path rebinds the context.
+        bool m_SceneBound = false;
+        bool m_ConstantsValid = false;
+        DrawConstants m_LastConstants = {};
+        ID3D11BlendState * m_BoundBlend = nullptr;
+        ID3D11DepthStencilState * m_BoundDepth = nullptr;
+        UINT m_BoundStencilRef = 0;
+        ID3D11RasterizerState * m_BoundRaster = nullptr;
+        D3D11_RECT m_BoundScissor = {};
+        bool m_ScissorValid = false;
+        D3D11_PRIMITIVE_TOPOLOGY m_BoundTopology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+        std::array<ID3D11ShaderResourceView *, MAX_STAGES> m_BoundViews = {};
+        std::array<ID3D11SamplerState *, MAX_STAGES> m_BoundSamplers = {};
+        std::array<std::uint64_t, MAX_STAGES> m_SamplerKeys = {};
+        std::array<ID3D11SamplerState *, MAX_STAGES> m_SamplerCache = {};
+        std::uint64_t m_BlendKey = ~0ull;
+        ID3D11BlendState * m_BlendCache = nullptr;
+        std::uint64_t m_DepthKey = ~0ull;
+        ID3D11DepthStencilState * m_DepthCache = nullptr;
+        std::uint64_t m_RasterKey = ~0ull;
+        ID3D11RasterizerState * m_RasterCache = nullptr;
+        ComPtr<ID3D11BlendState> m_ClearColorBlend;
+        ComPtr<ID3D11BlendState> m_ClearDepthOnlyBlend;
+
+        // Values of pipeline states as last applied, a repeated identical call is skipped
+        // without ending the batch. The generation is advanced whenever 'm_D3D' is reset.
+        static constexpr std::size_t STATE_CACHE_STATES = 0x200;
+        std::array<std::uint32_t, STATE_CACHE_STATES * 8> m_StateCacheValue = {};
+        std::array<std::uint32_t, STATE_CACHE_STATES * 8> m_StateCacheGeneration = {};
+        std::uint32_t m_StateGeneration = 1;
+
+        // Small rectangle reads, the sun glare probe, copy only the pixels they need from the
+        // render sized frame instead of scaling the whole frame down to the game size first.
+        struct ProbeRead
+        {
+            int m_X0 = 0;
+            int m_Y0 = 0;
+            int m_X1 = 0;
+            int m_Y1 = 0;
+            int m_X = 0;
+            int m_Y = 0;
+            int m_Width = 0;
+            int m_RenderX0 = 0;
+            int m_RenderY0 = 0;
+            int m_RenderX1 = 0;
+            int m_RenderY1 = 0;
+            float m_ScaleX = 1.0f;
+            float m_ScaleY = 1.0f;
+            int m_FrameBits = 32;
+            std::chrono::steady_clock::time_point m_Time = {};
+            bool m_Valid = false;
+        };
+
+        static constexpr int PROBE_SIZE = 256;
+        static constexpr std::chrono::milliseconds PROBE_REUSE_WINDOW { 1000 };
+        std::array<ComPtr<ID3D11Texture2D>, 2> m_Probes;
+        std::array<ProbeRead, 2> m_ProbeReads = {};
+        std::size_t m_ProbeNext = 0;
+        int m_SlowProbeLogs = 0;
+
         // THRASH and D3D7 state.
         D3D7State m_D3D;
         std::array<Texture *, MAX_STAGES> m_Bound = {};
@@ -328,7 +410,9 @@ namespace dx11z
         std::array<std::uint32_t, 8> m_Callbacks = {};
         std::string m_LogPath;
 
-        std::vector<std::unique_ptr<Texture>> m_Textures;
+        // Live textures by handle, the game may hand back a freed handle, it is looked up
+        // here instead of reading the freed object.
+        std::unordered_map<Texture *, std::unique_ptr<Texture>> m_Textures;
 
         Driver() = default;
 
@@ -419,6 +503,45 @@ namespace dx11z
         );
 
         void ApplyPipeline();
+
+        // Forgets every binding cached by 'ApplyPipeline'.
+        void InvalidatePipeline();
+
+        [[nodiscard]] bool IsTextureHandle(
+            std::uintptr_t handle
+        ) const;
+
+        // Pipeline state whose repeated identical value can be skipped.
+        [[nodiscard]] static bool IsCachedState(
+            std::uint32_t state
+        );
+
+        // Texture stage state, the stage bits of the id select the stage.
+        [[nodiscard]] static bool IsStageState(
+            std::uint32_t state
+        );
+
+        void ResetStateCache();
+
+        // Drops the cached values of states that write the same values as 'state'.
+        void ForgetRelatedStates(
+            std::uint32_t state
+        );
+
+        // Reads a small rectangle straight from the render sized frame, 'false' when it cannot.
+        bool ReadRectProbe(
+            int x0,
+            int y0,
+            int x1,
+            int y1,
+            int x,
+            int y,
+            int width,
+            bool allow_previous,
+            std::uint8_t * out
+        );
+
+        void ResetProbes();
 
         ID3D11SamplerState * GetSampler(
             int stage
