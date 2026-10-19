@@ -1,6 +1,7 @@
 // THRASH entry points.
 
 #include <windows.h>
+#include <intrin.h>
 
 #include <cstdint>
 #include <cstring>
@@ -271,6 +272,7 @@ extern "C"
         const void * c
     )
     {
+        Get().NoteCaller( _ReturnAddress() );
         const std::uint8_t * corners[3] = { Bytes( a ), Bytes( b ), Bytes( c ) };
         Get().DrawPolygon( corners, 3 );
     }
@@ -282,6 +284,7 @@ extern "C"
         const int * indices
     )
     {
+        Get().NoteCaller( _ReturnAddress() );
         Get().DrawTriangles( Bytes( vertices ), indices, count, 3 );
     }
 
@@ -292,6 +295,7 @@ extern "C"
         const int * indices
     )
     {
+        Get().NoteCaller( _ReturnAddress() );
         Get().DrawStrip( Bytes( vertices ), indices, count, false );
     }
 
@@ -301,6 +305,7 @@ extern "C"
         const void * vertices
     )
     {
+        Get().NoteCaller( _ReturnAddress() );
         Get().DrawStrip( Bytes( vertices ), nullptr, count, false );
     }
 
@@ -311,6 +316,7 @@ extern "C"
         const int * indices
     )
     {
+        Get().NoteCaller( _ReturnAddress() );
         Get().DrawStrip( Bytes( vertices ), indices, count, true );
     }
 
@@ -320,6 +326,7 @@ extern "C"
         const void * vertices
     )
     {
+        Get().NoteCaller( _ReturnAddress() );
         Get().DrawStrip( Bytes( vertices ), nullptr, count, true );
     }
 
@@ -332,6 +339,7 @@ extern "C"
         const void * d
     )
     {
+        Get().NoteCaller( _ReturnAddress() );
         const std::uint8_t * corners[4] = { Bytes( a ), Bytes( b ), Bytes( c ), Bytes( d ) };
         Get().DrawPolygon( corners, 4 );
     }
@@ -343,6 +351,7 @@ extern "C"
         const int * indices
     )
     {
+        Get().NoteCaller( _ReturnAddress() );
         Get().DrawQuads( Bytes( vertices ), indices, count );
     }
 
@@ -352,6 +361,7 @@ extern "C"
         const void * second
     )
     {
+        Get().NoteCaller( _ReturnAddress() );
         DrawSprite( first, second );
     }
 
@@ -362,6 +372,7 @@ extern "C"
         const int * indices
     )
     {
+        Get().NoteCaller( _ReturnAddress() );
         if (vertices == nullptr || indices == nullptr)
             return;
 

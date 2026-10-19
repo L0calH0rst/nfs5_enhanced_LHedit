@@ -24,6 +24,8 @@ namespace nfs5
         std::unique_ptr<safetyhook::InlineHook> m_PerspectiveHook;
         std::unique_ptr<safetyhook::InlineHook> m_ModeFilterHook;
         std::unique_ptr<safetyhook::InlineHook> m_SetVideoModeHook;
+        std::unique_ptr<safetyhook::InlineHook> m_SkyCullHook;
+        std::unique_ptr<safetyhook::InlineHook> m_WorldCullHook;
         std::unique_ptr<safetyhook::InlineHook> m_ResolutionCtorHook;
         std::unique_ptr<safetyhook::InlineHook> m_PositionSaveHook;
         std::unique_ptr<safetyhook::InlineHook> m_PositionLoadHook;
@@ -46,6 +48,23 @@ namespace nfs5
             float far_z
         );
 
+        static void __fastcall SkyCullPlanesHook(
+            void * layer,
+            void * unused_edx
+        );
+
+        static void __fastcall WorldCullVolumeHook(
+            void * volume,
+            void * unused_edx,
+            float * orientation,
+            float * position,
+            float distance
+        );
+
+        // Puts the Hor+ half FOV into the view field at +130h, returns the field to restore or nullptr.
+        float * WidenViewHalfFov(
+            float & original
+        ) const;
         static int __cdecl ResolutionListCountHook();
 
         static void * __fastcall ResolutionAccessorCtorHook(

@@ -25,6 +25,22 @@ namespace nfs5::game
             0x005391B0, "56 8B F1 57 8D BE 48 01 00 00"
         };
 
+        // Sky layer cull wedge, thiscall on the layer. Builds two horizontal planes at
+        // 90 degrees plus the view half FOV (degrees at view +130h) around the view forward
+        // vector; the 9 sky patches of a layer are only drawn inside that wedge.
+        inline constexpr Site SKY_CULL_PLANES =
+        {
+            0x0045AAF0, "A1 30 81 62 00 83 EC 18 56 8B"
+        };
+
+        // World section visibility, thiscall (view, orientation, position, distance). Builds the
+        // 2D view pyramid and the two side planes the track chunks are selected with, from the
+        // view half FOV at +130h.
+        inline constexpr Site WORLD_CULL_VOLUME =
+        {
+            0x0047F550, "81 EC FC 00 00 00 53 8B 9C 24 04 01 00 00"
+        };
+
         // 'WM_KEYDOWN' and 'WM_SYSKEYDOWN' table handler stdcall 6 args.
         inline constexpr Site KEY_DOWN_HANDLER =
         {
