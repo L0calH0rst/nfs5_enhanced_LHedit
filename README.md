@@ -6,20 +6,6 @@
 
 # NFS5 Enhanced (LHedit) - Need for Speed: Porsche Unleashed Enhanced Patch
 
-[![GitHub All Releases](https://img.shields.io/github/downloads/iArtorias/nfs5_enhanced/total.svg)](https://github.com/iArtorias/nfs5_enhanced/releases)
-
-> The game you remember, running the way it always should have: wide on any screen,
-> smooth at any refresh rate, stable on current Windows, with enhanced Direct3D 11 lighting and water reflections.
-
-> [!IMPORTANT]
-> Tested on the **USA** release with the **official v3.5 patch** (`Porsche.exe` with
-> MD5 `316F33A59DB48A7DB2A75CC4B3BD03DC`). Any other executable is detected at startup and nothing is hooked,
-> so the game runs untouched instead of crashing.
-
-> [!NOTE]
-> NFS5 Enhanced (LHedit) is an ASI plugin with its own graphics driver. `Porsche.exe` and the game data are
-> never modified on disk, and removing three files restores the original game.
-
 ---
 
 ## Overview
@@ -34,6 +20,7 @@ Unlike the original mod which intentionally kept vanilla visuals unchanged, **LH
 
 > [!NOTE]
 > **Pipeline Architecture Note:** LHedit intentionally bypasses the v1.2.0 performance state-caching and ring-buffer streaming rewrite for pipeline execution (`ApplyPipeline` / `Flush`). Because LHedit's extra rendering passes (headlights, light glows, water reflections, B4 alpha edge, B8 back-face) bind state and buffers outside of the v1.2.0 state cache assumptions, LHedit uses full state rebinding and per-draw buffer discards to guarantee render state correctness and stability across all custom passes.
+> If not stated otherwise, this fork functions exactly like the original nfs5_enhanced
 
 ---
 
@@ -80,21 +67,6 @@ Unlike the original mod which intentionally kept vanilla visuals unchanged, **LH
 
 ---
 
-## Screenshots
-
-<table>
-  <tr>
-    <td align="center"><b>Quick Race</b><br><a href="images/screenshot-quick-race.png"><img src="images/screenshot-quick-race.png" alt="Quick Race mode" width="50%"></a></td>
-    <td align="center"><b>Evolution</b><br><a href="images/screenshot-evolution.png"><img src="images/screenshot-evolution.png" alt="Evolution mode" width="50%"></a></td>
-  </tr>
-  <tr>
-    <td align="center"><b>Factory Driver</b><br><a href="images/screenshot-factory-driver.png"><img src="images/screenshot-factory-driver.png" alt="Factory Driver mode" width="50%"></a></td>
-    <td align="center"><b>Multiplayer</b><br><a href="images/screenshot-multiplayer.png"><img src="images/screenshot-multiplayer.png" alt="Multiplayer" width="50%"></a></td>
-  </tr>
-</table>
-
----
-
 ## Requirements
 
 - Windows 10 or 11
@@ -135,52 +107,20 @@ Common adjustments for new LHedit settings:
 
 For general issues, fundamental errors, or core feature explanations, check the original [nfs5_enhanced repository](https://github.com/iArtorias/nfs5_enhanced) first.
 
-<details>
-<summary><b>"DirectX 0" error at startup</b></summary>
-
-Check that `Drivers\dx11z.dll` exists in the game folder. When the selected driver cannot be
-loaded the stock `dx7z.dll` is used instead. `ThrashDriver = dx` always uses the stock driver.
-
-</details>
-
-<details>
-<summary><b>Black screen or wrong picture with Direct3D 11 driver</b></summary>
-
-`Drivers\dx11z.log` lists the device, the window and every video mode change. Include it in a bug report.
-
-</details>
-
-<details>
-<summary><b>The controller does nothing</b></summary>
-
-Check that `SDL3.dll` is next to the ASI and that `nfs5_enhanced.log` lists the pad under "Gamepad connected".
-
-</details>
+If you have specific problems with features from this build, please use the included debug options.
 
 ---
 
-## Building
+## Tools used
 
-Visual Studio 2022/2026 with CMake 3.24 or newer:
-
-```bat
-cmake -S . -B build -A Win32
-cmake --build build --config Release
-```
-
-MinGW i686 using toolchain file in `cmake/`:
-
-```bat
-cmake -S . -B build-mingw -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-i686.cmake -DCMAKE_BUILD_TYPE=Release
-cmake --build build-mingw
-```
+- Ghidra
+- Claude Opus 5.5
+- Notepad++
+- Paint.NET
 
 ---
 
 ## Credits
 
-- [Silent](https://github.com/CookiePLMonster) for [SilentPatchNFS90s](https://github.com/CookiePLMonster/SilentPatchNFS90s)
-- [iArtorias](https://github.com/iArtorias/nfs5_enhanced) for original [nfs5_enhanced](https://github.com/iArtorias/nfs5_enhanced)
-- [narzoul](https://github.com/narzoul) for [DDrawCompat](https://github.com/narzoul/DDrawCompat)
-- [ThirteenAG](https://github.com/ThirteenAG) for [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader)
-- [SDL Developers](https://libsdl.org) for SDL3
+- [iArtorias](https://github.com/iArtorias/nfs5_enhanced) for original [nfs5_enhanced](https://github.com/iArtorias/nfs5_enhanced) and bringing me to dive into NFSP again
+- Sniper's Windows Down patch for the vehicle window opening intel (cant be found online anymore)
