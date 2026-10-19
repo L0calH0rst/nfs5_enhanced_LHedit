@@ -533,6 +533,13 @@ namespace dx11z
         bool m_HighKey = false;
         std::uint32_t m_HighFlip = 0xFFFFFFFFu;
         std::array<float, 4> m_HeadHigh = { 1.0f, 1.0f, 1.0f, 0.0f };
+
+        // Input controls for lights
+        int m_HighBeamKey = 0;
+        bool m_HighBeamKeyDown = false;
+        bool m_HighBeamToggle = false;
+
+        void UpdateInputControls();
         // The player's own light is off (or broken), only the other cars light the mesh.
         bool m_HeadPlayerOff = false;
         std::array<float, 16 * MAX_CAR_LIGHTS> m_HeadExtraViewToLight = {};

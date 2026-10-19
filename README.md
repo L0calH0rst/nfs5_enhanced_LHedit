@@ -77,6 +77,18 @@ needed any more. It emulates exactly what the stock driver did, the game itself 
 | Fast draw path | Repeated render states no longer split batches, geometry is streamed through ring buffers and pipeline objects are only rebound when they change. The sun glare test copies only the pixels it needs instead of scaling the whole frame down first. |
 | Fallback | `ThrashDriver = dx` in `nfs5_enhanced.ini` switches back to the stock `dx7z.dll` at any time. |
 
+### Lighting and Reflections
+
+| Feature | What it does |
+|---|---|
+| Per-pixel headlights | Headlights light track scenery and vehicles per pixel (night & day options, customizable light map). |
+| Model year headlight tinting | Headlight colors adapt automatically to the car's model year (warm yellow for pre-1970 classic cars, standard halogen for 1970–1995 models, cool xenon/litronic bluish tint for 1996+ models). |
+| High beams | Toggleable high beam (`K` key) with extended range, beam width, height, and brightness. |
+| Tail, brake & signal glows | Soft light glows rendered on ground and surfaces behind and in front of all vehicles for tail, brake, turn signal (driven by native in-game controls), and reversing lights. |
+| Dynamic water reflections | Direct3D 11 water reflections rendered directly into water surfaces, replacing static legacy baked textures. |
+| Distance probe | Crosshair probe (configurable `DistanceKey`, off by default) measuring depth under the cursor in game metres. |
+| Inline vehicle lamp detection | Lamp positions, numbers, and colors are read directly from in-memory CRP model structures for both stock Porsche cars and newly added mod vehicles. |
+
 ### Controllers
 
 Gamepads are read through [SDL3](https://libsdl.org), the game never talks to them directly.
@@ -215,6 +227,9 @@ Everything is set in `nfs5_enhanced.ini`, and every setting is explained in the 
 | `[Text]` | Sharp text, enlargement factor and edge sharpness. |
 | `[Detail]` | Draw distance, far clip, distant wheels. |
 | `[Controller]` | SDL3 gamepads, rumble, dead zones, default bindings. |
+| `[Lights]` | Headlights, model year tints, high beam, turn signals, tail & brake glows, opponent lights. |
+| `[Water]` | Direct3D 11 water reflections, texture hashes, baked reflection removal. |
+| `[World]` | GuardBand clipping, distance probe key. |
 
 Common adjustments:
 
@@ -234,6 +249,9 @@ Common adjustments:
 | Scenery even further away | `DrawDistanceScale = 4.0`, or a fixed `MinDrawDistance = 2000` |
 | Stronger or weaker rumble | `RumbleStrength = 1.5` or `0.5` |
 | The game's own DirectInput controller handling | `Enabled = 0` under `[Controller]` |
+| Toggle high beams in race | `HighBeamKey = K` under `[Lights]` |
+| Enable water reflections | `Reflections = 1` under `[Water]` |
+| Enable 3D distance probe crosshair | `DistanceKey = INSERT` under `[World]` |
 
 > [!TIP]
 > With interpolation on, the race draws as often as it can. Cap it with `FpsLimit` or with `VSync`

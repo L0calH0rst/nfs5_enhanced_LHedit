@@ -17,6 +17,9 @@ target_compile_definitions( Zydis PUBLIC ZYDIS_STATIC_BUILD ZYCORE_STATIC_BUILD 
 add_library( safetyhook STATIC external/safetyhook/safetyhook.cpp )
 target_include_directories( safetyhook PUBLIC external/safetyhook )
 target_link_libraries( safetyhook PUBLIC Zydis )
+if ( NOT MSVC )
+    target_compile_options( safetyhook PRIVATE -fno-rtti )
+endif()
 
 add_library( nfs5_enhanced SHARED
     src/main.cpp

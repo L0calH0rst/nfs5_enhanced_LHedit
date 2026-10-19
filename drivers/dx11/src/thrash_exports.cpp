@@ -3,6 +3,15 @@
 #include <windows.h>
 #include <intrin.h>
 
+#ifndef _MSC_VER
+#ifndef _ReturnAddress
+#define _ReturnAddress() __builtin_return_address(0)
+#endif
+#ifndef _AddressOfReturnAddress
+#define _AddressOfReturnAddress() __builtin_frame_address(0)
+#endif
+#endif
+
 #include <cstdint>
 #include <cstring>
 
