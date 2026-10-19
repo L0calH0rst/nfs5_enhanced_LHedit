@@ -1,12 +1,7 @@
-<p align="left">
-  <img src="images/logo.png" alt="NFS5 Enhanced LHedit" width="10%">
-</p>
 
----
 
-# NFS5 Enhanced (LHedit) - Need for Speed: Porsche Unleashed Enhanced Patch
+# NFS5 Enhanced (LHedit) - Need for Speed: Porsche Unleashed Enhanced Patch but expanded
 
----
 
 ## Overview
 
@@ -32,7 +27,7 @@ Unlike the original mod which intentionally kept vanilla visuals unchanged, **LH
 |---|---|
 | Headlight Illumination | Adds real-time headlight rendering for the player car (including high beams) and opponent cars in Direct3D 11. |
 | Tail, Brake & Signal Glows | Adds glow, lens flares, and light projection effects for tail lights, brake lights, and turn signals. |
-| Water Reflections | Real-time water reflection pass rendered directly through `dx11z.dll`. |
+| Water Reflections | Real-time water reflection pass rendered directly through `dx11z.dll`. (There are still bugs) |
 | Alpha Edge Pass (B4) | Dedicated alpha edge rendering pass (`B4`) for correct transparency edges and foliage alpha testing. |
 | Back-Face Pass (B8) | Dedicated back-face pass (`B8`) ensuring correct rendering of double-sided geometry, shadows, and reflections. |
 | Diagnostic Measure Log | Detailed performance measuring and pass timing recorded in `dx11z.log` when enabled. |
