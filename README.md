@@ -16,7 +16,7 @@
 For general errors, base setup explanations, or core troubleshooting, please refer to the original [nfs5_enhanced repository](https://github.com/iArtorias/nfs5_enhanced) first.
 
 ### LHedit Enhancements (`nfs5_enhanced_LHedit`)
-Unlike the original mod which intentionally kept vanilla visuals unchanged, **LHedit** actively expands the visual and rendering features of the game. Built on top of NFS5 Enhanced v1.2.0, LHedit enhances `dx11z.dll` with real-time player and opponent headlight illumination (including high beams), tail/brake/signal light glows, real-time water reflections, special alpha edge (`B4`) and back-face geometry (`B8`) passes, as well as extended Hor+ widescreen sky and world culling hooks.
+Unlike the original mod which intentionally kept vanilla visuals unchanged, **LHedit** actively expands the visual and features of the game. Built on top of NFS5 Enhanced v1.2.0, LHedit enhances `dx11z.dll` with real-time player and opponent headlight illumination (including high beams), tail/brake/signal light glows, real-time water reflections, special alpha edge (`B4`) and back-face geometry (`B8`) passes, as well as extended Hor+ widescreen sky and world culling hooks.
 
 > [!NOTE]
 > **Pipeline Architecture Note:** LHedit intentionally bypasses the v1.2.0 performance state-caching and ring-buffer streaming rewrite for pipeline execution (`ApplyPipeline` / `Flush`). Because LHedit's extra rendering passes (headlights, light glows, water reflections, B4 alpha edge, B8 back-face) bind state and buffers outside of the v1.2.0 state cache assumptions, LHedit uses full state rebinding and per-draw buffer discards to guarantee render state correctness and stability across all custom passes.
@@ -42,28 +42,6 @@ Unlike the original mod which intentionally kept vanilla visuals unchanged, **LH
 | Feature | What it does |
 |---|---|
 | Hor+ Sky & World Cull Hooks | Widens the half-FOV used during skybox and world geometry culling calculations so distant terrain, objects, and sky elements do not disappear or pop at screen edges on widescreen displays. |
-
----
-
-## Base NFS5 Enhanced Features
-
-### Direct3D 11 Renderer (`dx11z.dll`)
-- Modern Direct3D 11 driver replacing DirectX 7 `dx7z.dll`.
-- Multisample antialiasing (up to 8x MSAA) and forced anisotropic filtering.
-- Borderless, exclusive fullscreen, or resizable window modes without display resolution drops.
-- High-DPI support, VSync control, Alt+Tab focus handling, and crisp 640x480 UI scaling.
-
-### Gamepad & Controls
-- SDL3 gamepad support (DualSense, DualShock 4, Xbox, Switch Pro, etc.) with hotplugging and persistent bindings.
-- Modern default controller bindings and force-feedback rumble support.
-
-### Widescreen, HUD & Smoothness
-- Hor+ aspect ratio correction for 3D cameras and rear-view mirror.
-- Sharp font glyph sheet upscaling at 2x/4x resolution.
-- Fixed 64 Hz simulation interpolation for high-refresh-rate screens.
-
-### Stability & Draw Distance
-- No CD requirement, Windows 10/11 crash fixes, and increased track draw distance.
 
 ---
 
