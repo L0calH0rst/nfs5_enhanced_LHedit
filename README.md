@@ -25,10 +25,10 @@
 ## Overview
 
 ### Original Mod (`nfs5_enhanced`)
-**NFS5 Enhanced** is an *enhanced vanilla* patch for *Need for Speed: Porsche Unleashed*. It provides wide-screen projection, 640x480 HUD and text scaling for modern display resolutions up to 8K, 64 Hz simulation interpolation for high-refresh-rate displays (120Hz/144Hz+), native gamepad support via SDL3, increased draw distances, and fixes for a long list of modern Windows 10/11 stability issues. It introduced a replacement Direct3D 11 THRASH driver (`dx11z.dll`) to replace the legacy DirectX 7 driver (`dx7z.dll`).
+**NFS5 Enhanced** is an *enhanced vanilla* patch for *Need for Speed: Porsche Unleashed*. It deliberately avoids modifying or expanding the game's visuals, lighting, cars, tracks, or graphics features—focusing strictly on broad compatibility, Hor+ widescreen projection, 640x480 HUD scaling, high-refresh-rate simulation interpolation (64 Hz), native SDL3 controller support, and modern Windows 10/11 crash fixes. It introduced a modern replacement Direct3D 11 THRASH driver (`dx11z.dll`).
 
 ### LHedit Enhancements (`nfs5_enhanced_LHedit`)
-**LHedit** builds directly on top of NFS5 Enhanced v1.2.0, adding substantial Direct3D 11 rendering upgrades to `dx11z.dll` as well as extended Hor+ widescreen culling logic. It introduces real-time headlight illumination, light glows, water reflections, alpha edge pass handling, double-sided geometry passes, and Hor+ sky/world cull hooks.
+Unlike the original mod which intentionally kept vanilla visuals unchanged, **LHedit** actively expands the visual and rendering features of the game. Built on top of NFS5 Enhanced v1.2.0, LHedit enhances `dx11z.dll` with real-time player and opponent headlight illumination (including high beams), tail/brake/signal light glows, real-time water reflections, special alpha edge (`B4`) and back-face geometry (`B8`) passes, as well as extended Hor+ widescreen sky and world culling hooks.
 
 ---
 
@@ -38,7 +38,7 @@
 
 | Feature | What it does |
 |---|---|
-| Headlight Illumination | Adds headlight rendering for the player car (including high beams) and opponent cars in Direct3D 11. |
+| Headlight Illumination | Adds real-time headlight rendering for the player car (including high beams) and opponent cars in Direct3D 11. |
 | Tail, Brake & Signal Glows | Adds glow, lens flares, and light projection effects for tail lights, brake lights, and turn signals. |
 | Water Reflections | Real-time water reflection pass rendered directly through `dx11z.dll`. |
 | Alpha Edge Pass (B4) | Dedicated alpha edge rendering pass (`B4`) for correct transparency edges and foliage alpha testing. |
@@ -96,7 +96,6 @@
 - **Need for Speed: Porsche Unleashed**, USA release plus official **v3.5** patch applied over
 - [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) installed as `dinput.dll` in the game folder
 - [SDL3](https://github.com/libsdl-org/SDL) (`SDL3.dll`) for gamepad support
-- [DDrawCompat](https://github.com/narzoul/DDrawCompat) (`ddraw.dll`) only if using stock DirectX 7 driver (`ThrashDriver = dx`)
 
 ---
 
@@ -108,10 +107,7 @@ Unzip the release package into a folder.
 ### 2. Copy into game folder
 Copy `nfs5_enhanced.asi`, `nfs5_enhanced.ini`, and `SDL3.dll` next to `Porsche.exe`, and `dx11z.dll` into the `Drivers` directory of the game.
 
-### 3. Remove SilentPatchNFS90s
-If `SilentPatchNFS90s.asi` is present, disable or remove it as all relevant patches are integrated.
-
-### 4. Play
+### 3. Play
 Run `Porsche.exe`. Options are configured in `nfs5_enhanced.ini`.
 
 ---
