@@ -9,7 +9,7 @@
 For general errors, base setup explanations, or core troubleshooting, please refer to the original [nfs5_enhanced repository](https://github.com/iArtorias/nfs5_enhanced) first.
 
 ### LHedit Enhancements (`nfs5_enhanced_LHedit`)
-Unlike the original mod which intentionally kept vanilla visuals unchanged, **LHedit** actively expands the visual and features of the game. Built on top of NFS5 Enhanced v1.2.0, LHedit enhances `dx11z.dll` with real-time player and opponent headlight illumination (including high beams), tail/brake/signal light glows, real-time water reflections, special alpha edge (`B4`) and back-face geometry (`B8`) passes, as well as extended Hor+ widescreen sky and world culling hooks. All features of LFSP (L0calH0rst Light & Reflection plugin) are natively integrated directly into LHedit.
+Unlike the original mod which intentionally kept vanilla visuals unchanged, **LHedit** actively expands the visual and features of the game. Built on top of NFS5 Enhanced v1.2.0, LHedit enhances `dx11z.dll` with real-time player and opponent headlight illumination (including high beams), tail/brake/signal light glows, real-time water reflections, special alpha edge (`B4`) and back-face geometry (`B8`) passes, as well as extended Hor+ widescreen sky and world culling hooks.
 
 > [!NOTE]
 > **Pipeline Architecture Note:** LHedit intentionally bypasses the v1.2.0 performance state-caching and ring-buffer streaming rewrite for pipeline execution (`ApplyPipeline` / `Flush`). Because LHedit's extra rendering passes (headlights, light glows, water reflections, B4 alpha edge, B8 back-face) bind state and buffers outside of the v1.2.0 state cache assumptions, LHedit uses full state rebinding and per-draw buffer discards to guarantee render state correctness and stability across all custom passes.
@@ -85,19 +85,6 @@ Everything is set in `nfs5_enhanced.ini`, and every setting is explained in the 
 | `[Lights]` | Headlights, model year tints, high beam, tail & brake glows, opponent lights. |
 | `[Water]` | Direct3D 11 water reflections, texture hashes, baked reflection removal. |
 | `[World]` | GuardBand clipping, distance probe key. |
-
-Common adjustments for LHedit settings:
-
-| I want | Set |
-|---|---|
-| Diagnostic measurement and rendering pass logging in `dx11z.log` | `Measure = 1` or `2` under `[Dx11]` |
-| Alpha edge transparency fix for foliage and detailed textures | `AlphaEdgeFix = 1` under `[Dx11]` |
-| Custom alpha edge reference threshold value | `AlphaEdgeRef = 128` (1 to 255) under `[Dx11]` |
-| Force double-sided geometry rendering for back-faces | `ForceTwoSided = 1` under `[Dx11]` |
-| Extended FOV culling so sky and scenery don't pop on wide screens | `HorPlus = 1` under `[Widescreen]` |
-| Toggle high beams in race | `HighBeamKey = K` under `[Lights]` |
-| Enable water reflections | `Reflections = 1` under `[Water]` |
-| Enable 3D distance probe crosshair | `DistanceKey = INSERT` under `[World]` |
 
 ---
 
