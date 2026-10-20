@@ -1,6 +1,7 @@
 *.user
 .vs/
 build/
+build-*/
 release/
 *.whl
 *.tar.gz

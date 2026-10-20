@@ -1,5 +1,3 @@
-
-
 # NFS5 Enhanced (LHedit) - Need for Speed: Porsche Unleashed Enhanced Patch but expanded
 
 
@@ -25,11 +23,15 @@ Unlike the original mod which intentionally kept vanilla visuals unchanged, **LH
 
 | Feature | What it does |
 |---|---|
-| Headlight Illumination | Adds real-time headlight rendering for the player car (including high beams) and opponent cars in Direct3D 11. |
-| Tail, Brake & Signal Glows | Adds glow, lens flares, and light projection effects for tail lights, brake lights, and turn signals. |
-| Water Reflections | Real-time water reflection pass rendered directly through `dx11z.dll`. (There are still bugs) |
+| Per-pixel headlights | Real-time headlight rendering for player (including high beams) and opponent cars per pixel (night & day options, customizable light map). |
+| Model year headlight tinting | Headlight colors adapt automatically to the car's model year (warm yellow for pre-1970 classic cars, standard halogen for 1970–1995 models, cool xenon/litronic bluish tint for 1996+ models). |
+| High beams | Toggleable high beam (`K` key) with extended range, beam width, height, and brightness. |
+| Tail, brake & signal glows | Soft light glows rendered on ground and surfaces behind and in front of all vehicles for tail, brake, turn signal (driven by native in-game controls), and reversing lights. |
+| Dynamic water reflections | Direct3D 11 water reflections rendered directly into water surfaces, replacing static legacy baked textures. |
 | Alpha Edge Pass (B4) | Dedicated alpha edge rendering pass (`B4`) for correct transparency edges and foliage alpha testing. |
 | Back-Face Pass (B8) | Dedicated back-face pass (`B8`) ensuring correct rendering of double-sided geometry, shadows, and reflections. |
+| Distance probe | Crosshair probe (configurable `DistanceKey`, off by default) measuring depth under the cursor in game metres. |
+| Inline vehicle lamp detection | Lamp positions, numbers, and colors are read directly from in-memory CRP model structures for both stock Porsche cars and newly added mod vehicles. |
 | Diagnostic Measure Log | Detailed performance measuring and pass timing recorded in `dx11z.log` when enabled. |
 
 ### Widescreen & Culling Enhancements
@@ -62,17 +64,27 @@ Run `Porsche.exe`. Options are configured in `nfs5_enhanced.ini`.
 
 ---
 
-## New Configuration Options
+## Configuration Options
 
-Common adjustments for new LHedit settings:
+Everything is set in `nfs5_enhanced.ini`, and every setting is explained in the file. The sections:
 
-| I want | Set |
+| Section | Contents |
 |---|---|
-| Diagnostic measurement and rendering pass logging in `dx11z.log` | `Measure = 1` or `2` under `[Dx11]` |
-| Alpha edge transparency fix for foliage and detailed textures | `AlphaEdgeFix = 1` under `[Dx11]` |
-| Custom alpha edge reference threshold value | `AlphaEdgeRef = 128` (1 to 255) under `[Dx11]` |
-| Force double-sided geometry rendering for back-faces | `ForceTwoSided = 1` under `[Dx11]` |
-| Extended FOV culling so sky and scenery don't pop on wide screens | `HorPlus = 1` under `[Widescreen]` |
+| `[General]` | Log level, coexistence with `SilentPatchNFS90s`. |
+| `[Compat]` | The SilentPatch fixes, the crash fixes, graphics driver selection and fallback. |
+| `[Dx11]` | Internal resolution, antialiasing, anisotropic filtering, window mode and size, VSync, Alt+Tab behaviour. |
+| `[Affinity]` | Which threads are pinned and to which core. |
+| `[Timing]` | Precise game clock. |
+| `[Widescreen]` | Hor+, field of view, flares, resolution list, race resolution and color depth, car detail distance. |
+| `[Framerate]` | Frame caps, interpolation. |
+| `[IO]`, `[Loading]` | Read chunk size, free space cache, CPU clock check. |
+| `[HudScaling]` | HUD size, text, gauge style, loading screen. |
+| `[Text]` | Sharp text, enlargement factor and edge sharpness. |
+| `[Detail]` | Draw distance, far clip, distant wheels. |
+| `[Controller]` | SDL3 gamepads, rumble, dead zones, default bindings. |
+| `[Lights]` | Headlights, model year tints, high beam, tail & brake glows, opponent lights. |
+| `[Water]` | Direct3D 11 water reflections, texture hashes, baked reflection removal. |
+| `[World]` | GuardBand clipping, distance probe key. |
 
 ---
 
