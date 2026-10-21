@@ -14,11 +14,11 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "FileDescription", "NFS5 Enhanced, enhanced vanilla experience for NFS Porsche Unleashed"
-            VALUE "FileVersion", "1.2.0"
+            VALUE "FileVersion", "1.2.0-LH.1"
             VALUE "InternalName", "nfs5_enhanced"
             VALUE "OriginalFilename", "nfs5_enhanced.asi"
             VALUE "ProductName", "NFS5 Enhanced"
-            VALUE "ProductVersion", "1.2.0"
+            VALUE "ProductVersion", "1.2.0-LH.1"
         END
     END
     BLOCK "VarFileInfo"

@@ -33,7 +33,7 @@ namespace nfs5
 {
     namespace
     {
-        constexpr std::string_view VERSION = "1.2.0";
+        constexpr std::string_view VERSION = "1.2.0-LH.1";
 
         HMODULE s_SelfModule = nullptr;
         hook::IatPatch s_CommandLinePatch;

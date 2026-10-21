@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.2.0-LH.1 (2026-10-22)
+
+LHedit build on top of upstream 1.2.0.
+
+### Direct3D 11 renderer (dx11z)
+
+- Lighting and water reflections working together with LFSP (`lfsp.asi` / `lfsp.ini`): lamp data,
+  headlight tint by model year, high beam, tail/brake/signal/reverse glows, water reflection queue.
+  Without LFSP these features stay off.
+- The racer list is read through `LfspCarList`.
+- Distance measure log.
+
+### Widescreen
+
+- Hor+ culling: the half FOV used for sky and world culling is widened, so ground, objects and
+  sky at the screen edges are no longer culled on wide displays.
+
+### Detail
+
+- Nearby objects that the occlusion walls would hide are drawn, and the sides of distant objects
+  are tested against the occlusion walls (no more missing scenery behind walls).
+- Wheels keep their suspension at LOD 0 with `FullCarDetail`.
+
+### Menu
+
+- Menu lists (cars, paints, tracks) scroll with the mouse wheel and the arrow, page and home/end
+  keys; the wheel over a closed drop down list picks the next or previous entry (`[Menu]`).
+
+### Build
+
+- GitHub Actions workflow builds the release package (Win32, MSVC) for every `v*` tag.
+
 ## 1.2.0 (2026-10-19)
 
 ### Controllers
