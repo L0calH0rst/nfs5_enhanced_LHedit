@@ -40,6 +40,12 @@ Unlike the original mod which intentionally kept vanilla visuals unchanged, **LH
 |---|---|
 | Hor+ Sky & World Cull Hooks | Widens the half-FOV used during skybox and world geometry culling calculations so distant terrain, objects, and sky elements do not disappear or pop at screen edges on widescreen displays. |
 
+### Menu Enhancements
+
+| Feature | What it does |
+|---|---|
+| Menu list scrolling | Lists in the menus (cars, paints, tracks) scroll with the mouse wheel over the list and with the arrow, page and home/end keys. The wheel over a closed drop down list picks the next or previous entry. Settings in `[Menu]`. |
+
 ---
 
 ## Requirements
@@ -83,6 +89,7 @@ Everything is set in `nfs5_enhanced.ini`, and every setting is explained in the 
 | `[Text]` | Sharp text, enlargement factor and edge sharpness. |
 | `[Detail]` | Draw distance, far clip, distant wheels. |
 | `[Controller]` | SDL3 gamepads, rumble, dead zones, default bindings. |
+| `[Menu]` | Mouse wheel and key scrolling of the menu lists. |
 
 The LHedit lighting and water settings are in `lfsp.ini` of LFSP, sections `[Lights]`, `[Water]` and `[World]`. A `[Lights]` key missing there is still read from `[Dx11]` of `nfs5_enhanced.ini`.
 

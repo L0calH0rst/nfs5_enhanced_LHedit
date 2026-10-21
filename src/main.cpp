@@ -27,6 +27,7 @@
 #include "subsystems/widescreen/widescreen.h"
 #include "subsystems/detail/detail.h"
 #include "subsystems/text/text_quality.h"
+#include "subsystems/menu/menu_scroll.h"
 
 namespace nfs5
 {
@@ -202,6 +203,7 @@ namespace nfs5
             TextQuality::GetInstance().Install( settings.m_Text );
             IoHooks::GetInstance().Install( settings.m_Io );
             Gamepad::GetInstance().Install( settings.m_Controller, directory );
+            MenuScroll::GetInstance().Install( settings.m_Menu );
 
             LOG_INFO( "Initialization finished" );
         }
@@ -236,6 +238,7 @@ extern "C" BOOL WINAPI DllMain(
     {
         if (reserved == nullptr && nfs5::s_Initialized.load())
         {
+            nfs5::MenuScroll::GetInstance().Uninstall();
             nfs5::Gamepad::GetInstance().Uninstall();
             nfs5::IoHooks::GetInstance().Uninstall();
             nfs5::TextQuality::GetInstance().Uninstall();
