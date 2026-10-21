@@ -16,7 +16,7 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Read version
         shell: pwsh
@@ -32,6 +32,7 @@ jobs:
           $notes = $m.Groups[1].Value.Trim()
           $notes += "`n`n---`n`n### Installation`n1. ``nfs5_enhanced.asi``, ``nfs5_enhanced.ini`` and ``SDL3.dll`` next to ``Porsche.exe``.`n2. ``Drivers/dx11z.dll`` into the game's ``Drivers`` folder.`n3. Needs the USA release with the official **v3.5** patch and [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) as ``dinput.dll``. Lighting/water features additionally need **LFSP** (``lfsp.asi``/``lfsp.ini``, not included)."
           Set-Content -Path release_notes.md -Value $notes -Encoding utf8
+          $global:LASTEXITCODE = 0
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -56,7 +57,7 @@ jobs:
           Compress-Archive -Path "$pkg/*" -DestinationPath $zip
           "ZIP=$zip" | Out-File -Append $env:GITHUB_ENV
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: nfs5_enhanced_LHedit_${{ env.TAG }}
           path: ${{ env.ZIP }}
