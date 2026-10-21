@@ -1,7 +1,11 @@
 name: Release
 
+# Builds the release package (Win32, MSVC). A push to master that changes the version in
+# src/main.cpp creates the tag v<VERSION> and the GitHub release with the CHANGELOG section.
 on:
   push:
+    branches: [ master ]
+    paths: [ 'src/main.cpp', 'CHANGELOG.md', '.github/workflows/release.yml' ]
     tags: [ 'v*' ]
   workflow_dispatch:
 
@@ -14,6 +18,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Read version
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path src/main.cpp -Pattern 'VERSION = "([^"]+)"').Matches[0].Groups[1].Value
+          "VERSION=$v" | Out-File -Append $env:GITHUB_ENV
+          "TAG=v$v" | Out-File -Append $env:GITHUB_ENV
+          $exists = $false
+          gh release view "v$v" --repo $env:GITHUB_REPOSITORY 2>$null; if ($LASTEXITCODE -eq 0) { $exists = $true }
+          "RELEASE_EXISTS=$exists" | Out-File -Append $env:GITHUB_ENV
+          $log = Get-Content CHANGELOG.md -Raw
+          $m = [regex]::Match($log, "(?s)## $([regex]::Escape($v)) \([^)]*\)\s*(.*?)(?=\n## )")
+          $notes = $m.Groups[1].Value.Trim()
+          $notes += "`n`n---`n`n### Installation`n1. ``nfs5_enhanced.asi``, ``nfs5_enhanced.ini`` and ``SDL3.dll`` next to ``Porsche.exe``.`n2. ``Drivers/dx11z.dll`` into the game's ``Drivers`` folder.`n3. Needs the USA release with the official **v3.5** patch and [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) as ``dinput.dll``. Lighting/water features additionally need **LFSP** (``lfsp.asi``/``lfsp.ini``, not included)."
+          Set-Content -Path release_notes.md -Value $notes -Encoding utf8
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Configure (Win32, MSVC)
         run: cmake -S . -B build -A Win32
 
@@ -23,7 +44,6 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $name = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "build-$($env:GITHUB_SHA.Substring(0,7))" }
           $pkg = "pkg"
           New-Item -ItemType Directory -Force "$pkg/Drivers" | Out-Null
           Copy-Item build/Release/nfs5_enhanced.asi $pkg/
@@ -32,16 +52,22 @@ jobs:
           Copy-Item build/drivers/dx11/Release/dx11z.dll "$pkg/Drivers/"
           Copy-Item README.md, CHANGELOG.md, LICENSE $pkg/
           Copy-Item external/SDL3/LICENSE.txt "$pkg/SDL3-LICENSE.txt"
-          Compress-Archive -Path "$pkg/*" -DestinationPath "nfs5_enhanced_LHedit_$name.zip"
-          "ZIP=nfs5_enhanced_LHedit_$name.zip" | Out-File -Append $env:GITHUB_ENV
+          $zip = "nfs5_enhanced_LHedit_$($env:TAG).zip"
+          Compress-Archive -Path "$pkg/*" -DestinationPath $zip
+          "ZIP=$zip" | Out-File -Append $env:GITHUB_ENV
 
       - uses: actions/upload-artifact@v4
         with:
-          name: nfs5_enhanced_LHedit
+          name: nfs5_enhanced_LHedit_${{ env.TAG }}
           path: ${{ env.ZIP }}
 
-      - name: Attach to release
-        if: github.ref_type == 'tag'
+      - name: Publish release
+        if: env.RELEASE_EXISTS == 'False' || github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: nfs5_enhanced LHedit ${{ env.VERSION }}
+          body_path: release_notes.md
+          make_latest: true
           files: ${{ env.ZIP }}
