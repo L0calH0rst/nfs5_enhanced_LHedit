@@ -34,6 +34,7 @@ namespace nfs5
         hook::OperandPatch m_ObjectLimitPatch400000;
         hook::OperandPatch m_ObjectLimitPatch20;
         std::unique_ptr<safetyhook::MidHook> m_CarLodOffsetHook;
+        hook::BytePatch m_WheelSuspensionPatch;
         std::unique_ptr<safetyhook::InlineHook> m_TextureDetailHook;
         std::unique_ptr<safetyhook::MidHook> m_OcclusionHook;
         std::array<std::int32_t, WHEEL_TABLE_SIZE> m_OriginalWheelTable = {};

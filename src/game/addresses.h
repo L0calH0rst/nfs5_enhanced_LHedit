@@ -611,6 +611,17 @@ namespace nfs5::game
         {
             0x0043A0DC, "8B BE B0 00 00 00 8B 86 B4 00 00 00"
         };
+
+        // End of 'sub_439F90', the loop over the LODs below the chosen one calls 'sub_43E670',
+        // which hands the suspension travel of the four wheels to the wheel transforms.
+        // 'jle' skips it at LOD 0, the wheels then stay fixed to the rolling body.
+        inline constexpr Site WHEEL_SUSPENSION_LOOP =
+        {
+            0x0043A3C4, "85 C0 7E 32 8B 07 6A 00"
+        };
+
+        // 'jle' to 'jl', the loop runs once at LOD 0 and is unchanged otherwise.
+        inline constexpr std::uint8_t WHEEL_SUSPENSION_LOOP_JL[] = { 0x85, 0xC0, 0x7C };
     }
 
     namespace text
