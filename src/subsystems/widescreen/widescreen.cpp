@@ -231,6 +231,65 @@ namespace nfs5
     }
 
 
+    float * Widescreen::WidenViewHalfFov(
+        float & original
+    ) const
+    {
+        // Culling in the engine uses the 4:3 half FOV the view keeps at +130h, Hor+ only widens
+        // the projection in 'SetPerspective'. The field itself feeds 'SetPerspective' again, so it
+        // is only swapped for the duration of a cull call.
+        const auto context = hook::Ref< std::uintptr_t >( game::var::RENDER_CONTEXT );
+        const auto view = context != 0 ? *reinterpret_cast<std::uintptr_t *>(context + 0x10) : 0;
+        const float correction = GetAspectCorrection();
+
+        if (view == 0 || !m_Settings.m_HorPlus || correction <= 1.0f)
+            return nullptr;
+
+        float * half_fov = reinterpret_cast<float *>(view + 0x130);
+        original = *half_fov;
+        const float tan_half = std::tan( original * DEG_TO_RAD ) * correction * m_Settings.m_FovMultiplier;
+
+        // A little margin, the sky test only samples the corners and edge midpoints of a patch.
+        *half_fov = std::min( std::atan( tan_half ) * RAD_TO_DEG * 1.05f, MAX_FOV_DEGREES * 0.5f );
+        return half_fov;
+    }
+
+
+    void __fastcall Widescreen::SkyCullPlanesHook(
+        void * layer,
+        void *
+    )
+    {
+        Widescreen & self = GetInstance();
+        float original = 0.0f;
+        float * half_fov = self.WidenViewHalfFov( original );
+
+        self.m_SkyCullHook->thiscall< void >( layer );
+
+        if (half_fov != nullptr)
+            *half_fov = original;
+    }
+
+
+    void __fastcall Widescreen::WorldCullVolumeHook(
+        void * volume,
+        void *,
+        float * orientation,
+        float * position,
+        float distance
+    )
+    {
+        Widescreen & self = GetInstance();
+        float original = 0.0f;
+        float * half_fov = self.WidenViewHalfFov( original );
+
+        self.m_WorldCullHook->thiscall< void >( volume, orientation, position, distance );
+
+        if (half_fov != nullptr)
+            *half_fov = original;
+    }
+
+
     int __cdecl Widescreen::ResolutionListCountHook()
     {
         Widescreen & self = GetInstance();
@@ -605,6 +664,17 @@ namespace nfs5
 
         ok &= m_PerspectiveHook != nullptr;
 
+        if (settings.m_HorPlus)
+        {
+            m_SkyCullHook = hook::CreateInline( "SkyCullPlanes", fn::SKY_CULL_PLANES.m_Address, fn::SKY_CULL_PLANES.m_Signature,
+                reinterpret_cast<void *>(&SkyCullPlanesHook) );
+            ok &= m_SkyCullHook != nullptr;
+
+            m_WorldCullHook = hook::CreateInline( "WorldCullVolume", fn::WORLD_CULL_VOLUME.m_Address, fn::WORLD_CULL_VOLUME.m_Signature,
+                reinterpret_cast<void *>(&WorldCullVolumeHook) );
+            ok &= m_WorldCullHook != nullptr;
+        }
+
         if (settings.m_UnlockResolutions)
         {
             m_ModeFilterHook = hook::CreateInline( "IsVideoModeUsable", fn::IS_VIDEO_MODE_USABLE.m_Address, fn::IS_VIDEO_MODE_USABLE.m_Signature,
@@ -632,6 +702,8 @@ namespace nfs5
         m_PositionSaveHook.reset();
         m_ResolutionCtorHook.reset();
         m_ModeFilterHook.reset();
+        m_WorldCullHook.reset();
+        m_SkyCullHook.reset();
         m_PerspectiveHook.reset();
         m_ResolutionCountPatch.Restore();
         m_FlareScalePatch.Restore();
