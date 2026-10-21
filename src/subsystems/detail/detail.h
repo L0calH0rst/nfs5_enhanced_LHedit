@@ -35,6 +35,7 @@ namespace nfs5
         hook::OperandPatch m_ObjectLimitPatch20;
         std::unique_ptr<safetyhook::MidHook> m_CarLodOffsetHook;
         std::unique_ptr<safetyhook::InlineHook> m_TextureDetailHook;
+        std::unique_ptr<safetyhook::MidHook> m_OcclusionHook;
         std::array<std::int32_t, WHEEL_TABLE_SIZE> m_OriginalWheelTable = {};
         bool m_WheelTablePatched = false;
         bool m_Installed = false;
@@ -48,6 +49,10 @@ namespace nfs5
         static int __cdecl TextureDetailHook();
 
         static void CarLodOffsetHook(
+            safetyhook::Context & context
+        );
+
+        static void OcclusionHook(
             safetyhook::Context & context
         );
 

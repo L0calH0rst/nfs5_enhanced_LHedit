@@ -160,6 +160,10 @@ namespace nfs5
 
         // Texture quality tier '0' to '3', '-1' keeps the game hardware detection.
         int m_TextureDetail = 3;
+
+        // Objects closer than this [distance minus radius, metres] are drawn even when the
+        // occlusion test puts them behind a wall, '0' keeps the test everywhere.
+        float m_OcclusionRange = 220.0f;
     };
 
     struct ControllerSettings

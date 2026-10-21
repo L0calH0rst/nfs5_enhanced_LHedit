@@ -573,6 +573,21 @@ namespace nfs5::game
         };
 
         inline constexpr std::size_t OBJECT_LIMIT_OPERAND = 2;
+
+        // Occlusion test of the same culling. 'sub_488B50' [thiscall on the track map at 628960]
+        // tests the line from the camera to the object centre against the occlusion walls of the
+        // track in the top view, without height. An object behind a wall is dropped even where the
+        // camera looks over the wall, which leaves holes in the ground close to the car.
+        // AL holds the result, 'test al, al' then 'jnz 47FAD1' drops the object.
+        // At this point [esp+3Ch] is the object sphere [x, y, z, radius] and [esp+14h] points at
+        // the camera position.
+        inline constexpr Site OCCLUSION_RESULT =
+        {
+            0x0047F9AE, "84 C0 0F 85 1B 01 00 00"
+        };
+
+        inline constexpr std::size_t OCCLUSION_SPHERE = 0x3C;
+        inline constexpr std::size_t OCCLUSION_CAMERA = 0x14;
         inline constexpr float OBJECT_LIMIT_400000_STOCK = 600.0f;
         inline constexpr float OBJECT_LIMIT_20_STOCK = 700.0f;
 
