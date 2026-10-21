@@ -1,6 +1,7 @@
 #include "detail.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include "../../core/log.h"
@@ -79,6 +80,31 @@ namespace nfs5
     {
         // First usable LOD, the distance based choice still picks simpler models further away.
         context.ebx = 0;
+    }
+
+
+    void Detail::OcclusionHook(
+        safetyhook::Context & context
+    )
+    {
+        // Nothing to change when the wall test let the object through.
+        if ((context.eax & 0xFF) == 0)
+            return;
+
+        const auto * sphere = reinterpret_cast<const float *>(context.esp + game::detail::OCCLUSION_SPHERE);
+        const auto * camera = *reinterpret_cast<const float * const *>(context.esp + game::detail::OCCLUSION_CAMERA);
+
+        const float dx = sphere[0] - camera[0];
+        const float dy = sphere[1] - camera[1];
+        const float dz = sphere[2] - camera[2];
+        const float gap = std::sqrt( dx * dx + dy * dy + dz * dz ) - sphere[3];
+
+        // Close by the walls only hide what the depth buffer hides anyway. Far away they still
+        // drop track pieces whose surrounding ground is not drawn, those would float in the air.
+        if (gap < GetInstance().m_Settings.m_OcclusionRange)
+        {
+            context.eax &= ~0xFFu;
+        }
     }
 
 
@@ -193,6 +219,13 @@ namespace nfs5
             ok &= m_TextureDetailHook != nullptr;
         }
 
+        if (settings.m_OcclusionRange > 0.0f)
+        {
+            m_OcclusionHook = hook::CreateMid( "Occlusion", site::OCCLUSION_RESULT.m_Address, site::OCCLUSION_RESULT.m_Signature,
+                &OcclusionHook );
+            ok &= m_OcclusionHook != nullptr;
+        }
+
         if (settings.m_FullCarDetail)
         {
             m_CarLodOffsetHook = hook::CreateMid( "CarLodOffset", site::CAR_LOD_OFFSET.m_Address, site::CAR_LOD_OFFSET.m_Signature,
@@ -202,8 +235,8 @@ namespace nfs5
 
         m_Installed = true;
 
-        LOG_INFO( "Detail installed, draw distance x{:.2f} at least {:.0f} far clip {:.0f} distant wheels {} all ok {}", settings.m_DrawDistanceScale,
-            settings.m_MinDrawDistance, far_clip, m_WheelTablePatched, ok );
+        LOG_INFO( "Detail installed, draw distance x{:.2f} at least {:.0f} far clip {:.0f} distant wheels {} occlusion from {:.0f} all ok {}",
+            settings.m_DrawDistanceScale, settings.m_MinDrawDistance, far_clip, m_WheelTablePatched, settings.m_OcclusionRange, ok );
         return ok;
     }
 
@@ -212,6 +245,7 @@ namespace nfs5
     {
         RestoreWheelTable();
 
+        m_OcclusionHook.reset();
         m_CarLodOffsetHook.reset();
         m_TextureDetailHook.reset();
         m_ObjectLimitPatch20.Restore();
