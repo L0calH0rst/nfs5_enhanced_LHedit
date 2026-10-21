@@ -1381,10 +1381,13 @@ namespace dx11z
             InstallLightHook();
         }
 
+        // The light switches belong to the LFSP mod: '[Lights]' in lfsp.ini next to the game (doc/LICHT.md 8.2a).
+        // A key missing there is still read from '[Dx11]' of nfs5_enhanced.ini (installs before 9.11b).
+        const std::string lights_ini = (slash != std::string::npos ? std::string( path, slash + 1 ) : std::string()) + "lfsp.ini";
         const auto light_value = [&]( const char * key, const char * fallback ) -> std::string
         {
             char value[MAX_PATH] = {};
-            ::GetPrivateProfileStringA( "Lights", key, "\x01", value, sizeof( value ), ini.c_str() );
+            ::GetPrivateProfileStringA( "Lights", key, "\x01", value, sizeof( value ), lights_ini.c_str() );
             if (value[0] == '\x01')
                 ::GetPrivateProfileStringA( "Dx11", key, fallback, value, sizeof( value ), ini.c_str() );
             std::string text = value;
@@ -1392,33 +1395,6 @@ namespace dx11z
                 text.pop_back();
             return text;
         };
-
-        const auto parse_key = []( const std::string & str ) -> int
-        {
-            std::string name = str;
-            while (!name.empty() && (name.back() == ' ' || name.back() == '\t'))
-                name.pop_back();
-            for (char & c : name)
-                c = static_cast<char>(std::toupper( static_cast<unsigned char>(c) ));
-
-            if (name.empty())
-                return 0;
-            if (name.size() == 1)
-                return static_cast<unsigned char>(name[0]);
-            if (name.rfind( "0X", 0 ) == 0)
-                return static_cast<int>(std::strtol( name.c_str() + 2, nullptr, 16 ));
-            if (name == "INSERT" || name == "EINFG")
-                return VK_INSERT;
-            if (name == "HOME" || name == "POS1")
-                return VK_HOME;
-            if (name == "END" || name == "ENDE")
-                return VK_END;
-            if (name == "PAUSE")
-                return VK_PAUSE;
-            return 0;
-        };
-
-        m_HighBeamKey = parse_key( light_value( "HighBeamKey", "K" ) );
 
         m_ConfigHeadlights = std::clamp( std::atoi( light_value( "Headlights", "0" ).c_str() ), 0, 2 );
         m_ConfigHeadlightsDay = std::clamp( std::atoi( light_value( "HeadlightsDay", "0" ).c_str() ), 0, 2 );
@@ -1455,20 +1431,20 @@ namespace dx11z
         m_ConfigHeadlightsObjects = std::clamp( std::atoi( light_value( "HeadlightsObjects", "1" ).c_str() ), 0, 2 );
         Log( "Config HeadlightsObjects %d", m_ConfigHeadlightsObjects );
 
-        // Water reflections, '[Water]' of nfs5_enhanced.ini.
+        // Water reflections, '[Water]' of lfsp.ini (doc/BUGS.md B15 §12).
         {
             const auto water_value = [&]( const char * key, const char * fallback ) -> std::string
             {
                 char value[1024] = {};
-                ::GetPrivateProfileStringA( "Water", key, fallback, value, sizeof( value ), ini.c_str() );
+                ::GetPrivateProfileStringA( "Water", key, fallback, value, sizeof( value ), lights_ini.c_str() );
                 return value;
             };
 
             m_ConfigReflections = std::clamp( std::atoi( water_value( "Reflections", "1" ).c_str() ), 0, 1 );
             m_ConfigReflectionStrength = std::clamp( static_cast<float>(std::atof( water_value( "ReflectionStrength", "0.6" ).c_str() )), 0.0f, 1.0f );
             m_ConfigReflectionTint = static_cast<std::uint32_t>(std::strtoul( water_value( "ReflectionTint", "FFFFFF" ).c_str(), nullptr, 16 )) & 0xFFFFFFu;
-            m_ConfigGuardBand = ::GetPrivateProfileIntA( "World", "GuardBand", 1, ini.c_str() ) != 0;
-            m_ConfigReflectionDebug = std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Water", "ReflectionDebug", 0, ini.c_str() )), 0, 2 );
+            m_ConfigGuardBand = ::GetPrivateProfileIntA( "World", "GuardBand", 1, lights_ini.c_str() ) != 0;
+            m_ConfigReflectionDebug = std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Water", "ReflectionDebug", 0, lights_ini.c_str() )), 0, 2 );
             m_ConfigRemoveBaked = std::clamp( std::atoi( water_value( "RemoveBakedReflections", "1" ).c_str() ), 0, 1 );
 
             const auto parse_hashes = [&]( const char * key, const char * fallback, std::vector<std::uint32_t> & out ) {
@@ -1496,14 +1472,33 @@ namespace dx11z
 
         m_ConfigOpponents = std::clamp( std::atoi( light_value( "HeadlightsOpponents", "1" ).c_str() ), 0, 1 );
         m_ConfigOpponentsStrength = std::clamp( static_cast<float>(std::atof( light_value( "HeadlightsOpponentsStrength", "1.0" ).c_str() )), 0.0f, 4.0f );
-        Log( "Config lights: HeadlightsOpponents %d strength %.2f", m_ConfigOpponents, m_ConfigOpponentsStrength );
+        Log( "Config lights from '%s' [Lights] (missing keys from [Dx11]): HeadlightsOpponents %d strength %.2f", lights_ini.c_str(),
+            m_ConfigOpponents, m_ConfigOpponentsStrength );
 
         // Distance probe key: one character, a hex virtual key ("0x2D") or INSERT / HOME / END / PAUSE; empty = off.
         {
             char key[32] = {};
-            ::GetPrivateProfileStringA( "World", "DistanceKey", "", key, sizeof( key ), ini.c_str() );
-            m_ProbeKey = parse_key( key );
-            Log( "Config DistanceKey '%s' (0x%02X)", key, m_ProbeKey );
+            ::GetPrivateProfileStringA( "World", "DistanceKey", "INSERT", key, sizeof( key ), lights_ini.c_str() );
+            std::string name = key;
+            while (!name.empty() && (name.back() == ' ' || name.back() == '\t'))
+                name.pop_back();
+            for (char & c : name)
+                c = static_cast<char>(std::toupper( static_cast<unsigned char>(c) ));
+
+            if (name.size() == 1)
+                m_ProbeKey = static_cast<unsigned char>(name[0]);
+            else if (name.rfind( "0X", 0 ) == 0)
+                m_ProbeKey = static_cast<int>(std::strtol( name.c_str() + 2, nullptr, 16 ));
+            else if (name == "INSERT" || name == "EINFG")
+                m_ProbeKey = VK_INSERT;
+            else if (name == "HOME" || name == "POS1")
+                m_ProbeKey = VK_HOME;
+            else if (name == "END" || name == "ENDE")
+                m_ProbeKey = VK_END;
+            else if (name == "PAUSE")
+                m_ProbeKey = VK_PAUSE;
+
+            Log( "Config DistanceKey '%s' (0x%02X)", name.c_str(), m_ProbeKey );
         }
 
         Log( "Config Headlights %d HeadlightsDay %d, day strength %.2f colour %06X range %.2f, map '%s'", m_ConfigHeadlights,
@@ -5009,16 +5004,6 @@ namespace dx11z
 #endif
         }
 
-        [[maybe_unused]] bool SafeWrite(
-            void * target,
-            const void * source,
-            std::size_t size
-        )
-        {
-            SIZE_T written = 0;
-            return ::WriteProcessMemory( ::GetCurrentProcess(), target, source, size, &written ) != FALSE && written == size;
-        }
-
 
         // Hardware write watch (DR0) on the render thread, PLAN.md 9.4d. The handler only records,
         // the log is written at the next flip.
@@ -5707,117 +5692,58 @@ namespace dx11z
     }
 
 
+    // Light colour by model year from the LFSP plugin (lfsp.asi, PLAN.md 9.9): multiplies the colour, no plugin = unchanged.
+    void Driver::ApplyLfspTint()
+    {
+        using TintFn = int( __cdecl * )(float * rgb);
+        static TintFn tint_fn = nullptr;
+        static bool resolved = false;
+        if (!resolved)
+        {
+            resolved = true;
+            if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
+                tint_fn = reinterpret_cast<TintFn>(::GetProcAddress( lfsp, "LfspHeadlightTint" ));
+            Log( "Headlights: LFSP colour by year %s", tint_fn != nullptr ? "found" : "not available (lfsp.asi missing or older)" );
+        }
+
+        float tint[3] = { 1.0f, 1.0f, 1.0f };
+        const int year = tint_fn != nullptr ? tint_fn( tint ) : 0;
+        if (year != m_HeadTintYear)
+        {
+            m_HeadTintYear = year;
+            if (year > 0)
+                Log( "Headlights: LFSP tint for model year %d: %.2f %.2f %.2f", year, tint[0], tint[1], tint[2] );
+            else
+                Log( "Headlights: LFSP tint off" );
+        }
+        if (year <= 0)
+            return;
+
+        for (std::size_t c = 0; c < 3; ++c)
+        {
+            m_HeadColour[c] *= tint[c];
+        }
+    }
+
+
     namespace
     {
-        struct LfspLamp
-        {
-            int m_Number;
-            float m_Pos[3];
-            std::uint32_t m_Colour;
-        };
-
-        static int GetModelLamps( const void * model_ptr, LfspLamp * out_lamps, int max_lamps )
-        {
-            if (model_ptr == nullptr || out_lamps == nullptr || max_lamps <= 0)
-                return 0;
-
-            const std::uintptr_t model = reinterpret_cast<std::uintptr_t>(model_ptr);
-            std::int32_t count = 0;
-            std::uintptr_t entries_ptr = 0;
-
-            if (!SafeCopy( reinterpret_cast<const void *>(model + 0x2C8), &count, sizeof( count ) ) ||
-                !SafeCopy( reinterpret_cast<const void *>(model + 0x2CC), &entries_ptr, sizeof( entries_ptr ) ) ||
-                entries_ptr == 0 || count <= 0)
-            {
-                return 0;
-            }
-
-            struct RawLampEntry
-            {
-                std::int32_t number;
-                float pos[3];
-                std::uint32_t colour;
-            };
-
-            const int to_copy = std::min( static_cast<int>(count), max_lamps );
-            int valid_count = 0;
-
-            for (int k = 0; k < to_copy; ++k)
-            {
-                RawLampEntry raw = {};
-                if (SafeCopy( reinterpret_cast<const void *>(entries_ptr + k * sizeof( RawLampEntry )), &raw, sizeof( raw ) ))
-                {
-                    out_lamps[valid_count].m_Number = raw.number;
-                    out_lamps[valid_count].m_Pos[0] = raw.pos[0];
-                    out_lamps[valid_count].m_Pos[1] = raw.pos[1];
-                    out_lamps[valid_count].m_Pos[2] = raw.pos[2];
-                    out_lamps[valid_count].m_Colour = raw.colour;
-                    valid_count++;
-                }
-            }
-
-            return valid_count;
-        }
-
-        static int GetHeadlightTintForCar( std::uintptr_t car, float * out_rgb )
-        {
-            if (out_rgb != nullptr)
-            {
-                out_rgb[0] = 1.0f;
-                out_rgb[1] = 1.0f;
-                out_rgb[2] = 1.0f;
-            }
-
-            if (car == 0)
-                return 0;
-
-            std::uintptr_t model = 0;
-            std::int16_t year = 0;
-
-            if (SafeCopy( reinterpret_cast<const void *>(car + 0x74C), &model, sizeof( model ) ) && model != 0)
-            {
-                SafeCopy( reinterpret_cast<const void *>(model + 0x28), &year, sizeof( year ) );
-            }
-
-            if (year < 1900 || year > 2100)
-            {
-                SafeCopy( reinterpret_cast<const void *>(car + 0x2A), &year, sizeof( year ) );
-            }
-
-            if (year < 1900 || year > 2100)
-                return 0;
-
-            if (out_rgb != nullptr)
-            {
-                if (year < 1970)
-                {
-                    out_rgb[0] = 1.0f;
-                    out_rgb[1] = 0.90f;
-                    out_rgb[2] = 0.70f;
-                }
-                else if (year <= 1995)
-                {
-                    out_rgb[0] = 1.0f;
-                    out_rgb[1] = 0.96f;
-                    out_rgb[2] = 0.88f;
-                }
-                else
-                {
-                    out_rgb[0] = 0.88f;
-                    out_rgb[1] = 0.95f;
-                    out_rgb[2] = 1.0f;
-                }
-            }
-
-            return year;
-        }
-
+        // Tint for another racer from LFSP (lfsp.asi v6d): model year of that car. Without the export, no tint.
         int LfspTintForCar(
             std::uintptr_t car,
             float * rgb
         )
         {
-            return GetHeadlightTintForCar( car, rgb );
+            using TintFn = int( __cdecl * )(const void * car, float * rgb);
+            static TintFn tint_fn = nullptr;
+            static bool resolved = false;
+            if (!resolved)
+            {
+                resolved = true;
+                if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
+                    tint_fn = reinterpret_cast<TintFn>(::GetProcAddress( lfsp, "LfspHeadlightTintForCar" ));
+            }
+            return tint_fn != nullptr ? tint_fn( reinterpret_cast<const void *>(car), rgb ) : 0;
         }
 
         // Same test as FUN_00453110: a byte per headlight in the table at [[car+0x74C]+0x2D4]; 0 = off or broken.
@@ -5868,59 +5794,34 @@ namespace dx11z
     }
 
 
-    void Driver::ApplyLfspTint()
-    {
-        float tint[3] = { 1.0f, 1.0f, 1.0f };
-        const std::uintptr_t player_car = *reinterpret_cast<const std::uintptr_t *>(0x005E8B34);
-        const int year = GetHeadlightTintForCar( player_car, tint );
-
-        if (year != m_HeadTintYear)
-        {
-            m_HeadTintYear = year;
-            if (year > 0)
-                Log( "Headlights: tint for model year %d: %.2f %.2f %.2f", year, tint[0], tint[1], tint[2] );
-            else
-                Log( "Headlights: tint off" );
-        }
-        if (year <= 0)
-            return;
-
-        for (std::size_t c = 0; c < 3; ++c)
-        {
-            m_HeadColour[c] *= tint[c];
-        }
-    }
-
-    void Driver::UpdateInputControls()
-    {
-        // High beam toggle
-        if (m_HighBeamKey > 0)
-        {
-            const bool down = (::GetAsyncKeyState( m_HighBeamKey ) & 0x8000) != 0;
-            if (down && !m_HighBeamKeyDown)
-            {
-                m_HighBeamKeyDown = true;
-                m_HighBeamToggle = !m_HighBeamToggle;
-            }
-            else if (!down)
-            {
-                m_HighBeamKeyDown = false;
-            }
-        }
-    }
-
+    // High beam from LFSP (lfsp.asi v6e, PLAN.md 9.10), asked once per frame: longer, narrower, brighter and less
+    // height falloff for the player's light only. Without the export it stays the low beam.
     float Driver::UpdateHighBeam()
     {
         if (m_HighFlip != m_FlipCount)
         {
             m_HighFlip = m_FlipCount;
-            UpdateInputControls();
-
-            const float high = m_HighBeamToggle ? 1.0f : 0.0f;
+            using HighFn = float( __cdecl * )();
+            static HighFn high_fn = nullptr;
+            static bool resolved = false;
+            if (!resolved)
+            {
+                resolved = true;
+                if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
+                    high_fn = reinterpret_cast<HighFn>(::GetProcAddress( lfsp, "LfspHighBeam" ));
+                Log( "Headlights: LFSP high beam %s", high_fn != nullptr ? "found" : "not available (lfsp.asi missing or older)" );
+            }
+            // Like a headlight flasher it also works with the light switch off (9.10c); the bytes are only logged.
+            const std::uint32_t player = *reinterpret_cast<const std::uint32_t *>(0x0065741C);
+            const std::uintptr_t car = player < 9 ? *reinterpret_cast<const std::uintptr_t *>(0x005E8B34 + player * 4) : 0;
+            std::uint8_t lights[2] = {};
+            if (car != 0)
+                CarLightsOn( car, lights );
+            const float high = high_fn != nullptr ? std::clamp( high_fn(), 0.0f, 1.0f ) : 0.0f;
             if ((high > 0.0f) != m_HighKey)
             {
                 m_HighKey = high > 0.0f;
-                Log( "Headlights: high beam key %s", m_HighKey ? "down" : "up" );
+                Log( "Headlights: high beam key %s, light bytes %u %u", m_HighKey ? "down" : "up", lights[0], lights[1] );
             }
             m_High = high;
         }
@@ -6008,6 +5909,23 @@ namespace dx11z
         if (m_ConfigTailGlow == 0 || m_CarMatrixLayout <= 0)
             return;
 
+        struct LfspLamp
+        {
+            int m_Number;
+            float m_Pos[3];
+            std::uint32_t m_Colour;
+        };
+        using LampsFn = int( __cdecl * )(const void *, LfspLamp *, int);
+        static LampsFn lamps_fn = nullptr;
+        static bool resolved = false;
+        if (!resolved)
+        {
+            resolved = true;
+            if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
+                lamps_fn = reinterpret_cast<LampsFn>(::GetProcAddress( lfsp, "LfspModelLamps" ));
+            Log( "Tail glow: LFSP lamp data %s", lamps_fn != nullptr ? "found" : "not available (lfsp.asi missing or older), no signal glow" );
+        }
+
         float colour[4] = {};
         ColorToFloat4( 0xFF000000u | m_ConfigTailColour, colour );
         const float forward_offset = *reinterpret_cast<const float *>(0x0061BD50);
@@ -6068,8 +5986,8 @@ namespace dx11z
             bool front_lit = false;
             float front_z = 0.0f;
             LfspLamp known[16] = {};
-            const int count = (m_ConfigTailSignals > 0.0f || m_ConfigTailReverse > 0.0f)
-                ? GetModelLamps( reinterpret_cast<const void *>(model), known, 16 ) : 0;
+            const int count = lamps_fn != nullptr && (m_ConfigTailSignals > 0.0f || m_ConfigTailReverse > 0.0f)
+                ? lamps_fn( reinterpret_cast<const void *>(model), known, 16 ) : 0;
             for (int k = 0; k < count; ++k)
             {
                 const int n = known[k].m_Number;
@@ -7002,7 +6920,22 @@ namespace dx11z
 
         const std::uint32_t cull = render[rs::CULLMODE];
 
-        const int list = QueryQueueList();
+        // B15: list of the game's render queue being drawn, from LFSP (lfsp.asi v7f); -1 = not available.
+        using QueueListFn = int( * )();
+        static QueueListFn queue_list_fn = nullptr;
+        static bool queue_list_asked = false;
+
+        if (!queue_list_asked)
+        {
+            queue_list_asked = true;
+
+            if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
+                queue_list_fn = reinterpret_cast<QueueListFn>(reinterpret_cast<void *>(::GetProcAddress( lfsp, "LfspQueueList" )));
+
+            Log( "M3T queue list from LFSP %s", queue_list_fn != nullptr ? "found" : "not available" );
+        }
+
+        const int list = queue_list_fn != nullptr ? queue_list_fn() : -1;
 
         char key[64];
         std::snprintf( key, sizeof( key ), "%p %d %u %u %u %d", static_cast<const void *>(texture), blend ? 1 : 0,
@@ -7262,10 +7195,21 @@ namespace dx11z
 
     int Driver::QueryQueueList()
     {
-        std::int32_t list = -1;
-        if (SafeCopy( reinterpret_cast<const void *>(0x0061A0C0), &list, sizeof( list ) ))
-            return list;
-        return -1;
+        using QueueListFn = int( * )();
+        static QueueListFn fn = nullptr;
+        static bool asked = false;
+
+        if (!asked)
+        {
+            asked = true;
+
+            if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
+                fn = reinterpret_cast<QueueListFn>(reinterpret_cast<void *>(::GetProcAddress( lfsp, "LfspQueueList" )));
+
+            Log( "Water: queue list from LFSP %s", fn != nullptr ? "found" : "not available (lfsp.asi missing or older than v7f), no reflections" );
+        }
+
+        return fn != nullptr ? fn() : -1;
     }
 
 

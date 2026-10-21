@@ -24,14 +24,14 @@ Unlike the original mod which intentionally kept vanilla visuals unchanged, **LH
 | Feature | What it does |
 |---|---|
 | Per-pixel headlights | Real-time headlight rendering for player (including high beams) and opponent cars per pixel (night & day options, customizable light map). |
-| Model year headlight tinting | Headlight colors adapt automatically to the car's model year (warm yellow for pre-1970 classic cars, standard halogen for 1970–1995 models, cool xenon/litronic bluish tint for 1996+ models). |
-| High beams | Toggleable high beam (`K` key) with extended range, beam width, height, and brightness. |
+| Model year headlight tinting | Headlight colours follow the car's model year, using the colour table in `lfsp.ini` (needs LFSP). |
+| High beams | Hold the high beam key (default `K`, set in `lfsp.ini`) for longer, wider and brighter light with a short fade; off when the headlights are broken (needs LFSP). |
 | Tail, brake & signal glows | Soft light glows rendered on ground and surfaces behind and in front of all vehicles for tail, brake, turn signal (driven by native in-game controls), and reversing lights. |
 | Dynamic water reflections | Direct3D 11 water reflections rendered directly into water surfaces, replacing static legacy baked textures. |
 | Alpha Edge Pass (B4) | Dedicated alpha edge rendering pass (`B4`) for correct transparency edges and foliage alpha testing. |
 | Back-Face Pass (B8) | Dedicated back-face pass (`B8`) ensuring correct rendering of double-sided geometry, shadows, and reflections. |
-| Distance probe | Crosshair probe (configurable `DistanceKey`, off by default) measuring depth under the cursor in game metres. |
-| Inline vehicle lamp detection | Lamp positions, numbers, and colors are read directly from in-memory CRP model structures for both stock Porsche cars and newly added mod vehicles. |
+| Distance probe | Crosshair probe (`DistanceKey` in `lfsp.ini`, default `INSERT`) measuring depth under the cursor in game metres. |
+| Vehicle lamp detection | LFSP records lamp numbers, positions and colours as the game draws each lamp; dx11z uses them for the signal and reversing glows (needs LFSP). |
 | Diagnostic Measure Log | Detailed performance measuring and pass timing recorded in `dx11z.log` when enabled. |
 
 ### Widescreen & Culling Enhancements
@@ -48,6 +48,7 @@ Unlike the original mod which intentionally kept vanilla visuals unchanged, **LH
 - **Need for Speed: Porsche Unleashed**, USA release plus official **v3.5** patch applied over
 - [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) installed as `dinput.dll` in the game folder
 - [SDL3](https://github.com/libsdl-org/SDL) (`SDL3.dll`) for gamepad support
+- **LFSP** (`lfsp.asi` and `lfsp.ini` next to `Porsche.exe`) for the lighting and water features: dx11z reads their settings from `lfsp.ini` and asks `lfsp.asi` for the render queue list (water reflections), lamp data, model year tint and high beam. Without LFSP these features stay off or fall back to plain behaviour.
 
 ---
 
@@ -82,9 +83,9 @@ Everything is set in `nfs5_enhanced.ini`, and every setting is explained in the 
 | `[Text]` | Sharp text, enlargement factor and edge sharpness. |
 | `[Detail]` | Draw distance, far clip, distant wheels. |
 | `[Controller]` | SDL3 gamepads, rumble, dead zones, default bindings. |
-| `[Lights]` | Headlights, model year tints, high beam, tail & brake glows, opponent lights. |
-| `[Water]` | Direct3D 11 water reflections, texture hashes, baked reflection removal. |
-| `[World]` | GuardBand clipping, distance probe key. |
+
+The LHedit lighting and water settings are in `lfsp.ini` of LFSP, sections `[Lights]`, `[Water]` and `[World]`. A `[Lights]` key missing there is still read from `[Dx11]` of `nfs5_enhanced.ini`.
+
 
 ---
 
