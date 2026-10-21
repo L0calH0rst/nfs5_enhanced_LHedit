@@ -39,6 +39,7 @@ add_library( nfs5_enhanced SHARED
     src/subsystems/gamepad/gamepad.cpp
     src/subsystems/gamepad/sdl3_api.cpp
     src/subsystems/gamepad/virtual_gamepad.cpp
+    src/subsystems/menu/menu_scroll.cpp
     src/resources/version.rc
 )
 

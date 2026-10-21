@@ -648,4 +648,86 @@ namespace nfs5::game
         inline constexpr int FORMAT_ARGB8888 = 6;
         inline constexpr int FORMAT_ARGB4444 = 7;
     }
+
+    // Front end lists, scrolled by the mouse wheel and the arrow keys.
+    // Lists are 'FEComboBox' [drop down, 'NFS5.ComboBoxSlider': cars, paints, tracks] or 'FEListBox'
+    // [always open]. The game turns 'WM_MOUSEWHEEL' into events of type 9, but the control dispatcher
+    // 'sub_525F80' has no case for them, and the key slot [+10h] of both classes is 'sub_4D1B40' [not handled].
+    namespace menu
+    {
+        inline constexpr std::uintptr_t COMBOBOX_VTABLE = 0x005B5C24;
+        inline constexpr std::uintptr_t LISTBOX_VTABLE = 0x005B611C;
+
+        // 'FEEmbossedVerticalSlider_MainFunctionality', the scroll bar of a list.
+        inline constexpr std::uintptr_t LIST_SLIDER_VTABLE = 0x005B6A64;
+
+        // 'EventPump@FERT', slot 5 [+14h] polls the input, slot 9 [+24h] dispatches an event.
+        inline constexpr std::uintptr_t EVENT_PUMP_VTABLE = 0x005BB150;
+        inline constexpr std::size_t EVENT_PUMP_POLL_SLOT = 0x14;
+        inline constexpr std::size_t EVENT_PUMP_DISPATCH_SLOT = 0x24;
+        inline constexpr std::uintptr_t EVENT_PUMP_POLL = 0x00529700;
+        inline constexpr std::uintptr_t EVENT_PUMP_DISPATCH = 0x00529990;
+
+        // Slot 0 [+0h] destructor and slot 8 [+20h] mouse move, the same for both list classes.
+        inline constexpr std::size_t LIST_DTOR_SLOT = 0x00;
+        inline constexpr std::size_t LIST_MOVE_SLOT = 0x20;
+        inline constexpr std::uintptr_t LIST_DTOR = 0x004CCE70;
+        inline constexpr std::uintptr_t LIST_MOVE = 0x004C6F60;
+
+        // 'WM_MOUSEWHEEL' handler registered by 'sub_536E50', stdcall with 6 arguments.
+        inline constexpr Site WHEEL_MESSAGE =
+        {
+            0x00537020, "8B 44 24 04 85 C0"
+        };
+
+        inline constexpr std::uintptr_t GAME_WINDOW = 0x006B7BF8;
+
+        // Mouse position of the game, as carried by the mouse events.
+        inline constexpr std::uintptr_t MOUSE_X = 0x0069E07C;
+        inline constexpr std::uintptr_t MOUSE_Y = 0x0069E080;
+
+        // Non zero while the front end runs.
+        inline constexpr std::uintptr_t FRONT_END = 0x0065B928;
+
+        // Control rectangle [l, t, r, b] into '*out', thiscall.
+        inline constexpr std::uintptr_t CONTROL_RECT = 0x004C8670;
+        // Control or one of its parents hidden, fastcall.
+        inline constexpr std::uintptr_t CONTROL_HIDDEN = 0x004C7E40;
+        // Point [x, y] inside a part of a rectangle, thiscall.
+        inline constexpr std::uintptr_t PART_HIT = 0x004E2970;
+        // Mouse over the scroll bar, fastcall.
+        inline constexpr std::uintptr_t SLIDER_HOVER = 0x004DBA50;
+        // Front end sends the mouse move at the current spot again, fastcall.
+        inline constexpr std::uintptr_t REFRESH_MOUSE = 0x004D6140;
+
+        // '__RTDynamicCast' and the type descriptors of the colour list check.
+        inline constexpr std::uintptr_t DYNAMIC_CAST = 0x005A134B;
+        inline constexpr std::uintptr_t TD_POSITIONABLE_ACCESSOR = 0x005D70E0;
+        inline constexpr std::uintptr_t TD_COLOUR_ACCESSOR = 0x005D7240;
+        // 'FEColourAccessor': index is the 'own colour' entry, thiscall.
+        inline constexpr std::uintptr_t COLOUR_IS_SPECIAL = 0x004B94B0;
+
+        // 'FEComboBox' / 'FEListBox' fields.
+        inline constexpr std::size_t CONTROL_FLAGS = 0x10C;     // 40h = open
+        inline constexpr std::size_t CONTROL_CAN_OPEN = 0x110;  // 40h = can be opened
+        inline constexpr std::size_t LIST_DATA = 0x144;         // data accessor, entries and selection
+        inline constexpr std::size_t LIST_BOX_PART = 0x178;     // part 'selectionbox'
+        inline constexpr std::size_t LIST_LABEL_PART = 0x17C;   // part of the closed box
+        inline constexpr std::size_t LIST_SLIDER = 0x1B8;
+        inline constexpr std::size_t LIST_SCROLL = 0x1BC;       // '<Name>.Sliderbar' accessor, value = top row
+        inline constexpr std::size_t LIST_MAX_HEIGHT = 0x1C0;   // height of the selection box
+        inline constexpr std::size_t LIST_HAS_SLIDER = 0x1DC;
+        inline constexpr std::size_t LIST_ALWAYS_OPEN = 0x1DD;  // 'FEListBox'
+        inline constexpr std::size_t LIST_COLOUR_SPECIAL = 0x1DE; // colour list with an 'own colour' entry
+        inline constexpr std::uint32_t CONTROL_OPEN = 0x40;
+
+        // Key codes of the game ['sub_53B530'], the keypad gives the same.
+        inline constexpr int KEY_HOME = 0x4700;
+        inline constexpr int KEY_UP = 0x4800;
+        inline constexpr int KEY_PAGE_UP = 0x4900;
+        inline constexpr int KEY_END = 0x4F00;
+        inline constexpr int KEY_DOWN = 0x5000;
+        inline constexpr int KEY_PAGE_DOWN = 0x5100;
+        inline constexpr int EVENT_KEY = 2;
+    }
 }

@@ -266,6 +266,12 @@ namespace nfs5
         s.m_Controller.m_TriggerDeadzone = std::clamp( ReadFloat( L"Controller", L"TriggerDeadzone", 0.05f ), 0.0f, 0.9f );
         s.m_Controller.m_BackgroundInput = ReadBool( L"Controller", L"BackgroundInput", false );
         s.m_Controller.m_TriggerBindings = ReadBool( L"Controller", L"TriggerBindings", true );
+
+        s.m_Menu.m_Scroll = ReadBool( L"Menu", L"Scroll", true );
+        s.m_Menu.m_WheelRows = ReadInt( L"Menu", L"WheelRows", 3 );
+        if (s.m_Menu.m_WheelRows < 1 || s.m_Menu.m_WheelRows > 20)
+            s.m_Menu.m_WheelRows = 3;
+        s.m_Menu.m_WheelSelect = ReadBool( L"Menu", L"WheelSelect", true );
     }
 
     void Config::Dump() const
@@ -306,5 +312,6 @@ namespace nfs5
             s.m_Controller.m_Enabled, s.m_Controller.m_HideHandledDevices, s.m_Controller.m_Rumble, s.m_Controller.m_RumbleStrength,
             s.m_Controller.m_StickDeadzone, s.m_Controller.m_TriggerDeadzone, s.m_Controller.m_BackgroundInput,
             s.m_Controller.m_TriggerBindings );
+        LOG_INFO( "  Menu Scroll={} WheelRows={} WheelSelect={}", s.m_Menu.m_Scroll, s.m_Menu.m_WheelRows, s.m_Menu.m_WheelSelect );
     }
 }

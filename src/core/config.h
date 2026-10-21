@@ -186,6 +186,18 @@ namespace nfs5
         bool m_TriggerBindings = true;
     };
 
+    // Front end lists scrolled by the mouse wheel and the arrow keys.
+    struct MenuSettings
+    {
+        bool m_Scroll = true;
+
+        // Rows per wheel notch, '1' to '20'.
+        int m_WheelRows = 3;
+
+        // Wheel over a closed drop down list picks the next or previous entry.
+        bool m_WheelSelect = true;
+    };
+
     struct Settings
     {
         GeneralSettings m_General;
@@ -199,6 +211,7 @@ namespace nfs5
         DetailSettings m_Detail;
         TextSettings m_Text;
         ControllerSettings m_Controller;
+        MenuSettings m_Menu;
     };
 
     class Config
