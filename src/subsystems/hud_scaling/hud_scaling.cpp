@@ -124,11 +124,7 @@ namespace nfs5
         int effective_width = width;
         int effective_height = height;
 
-        if (!Widescreen::GetInstance().GetRaceResolutionOverride( effective_width, effective_height ))
-        {
-            effective_width = width;
-            effective_height = height;
-        }
+        Widescreen::GetInstance().GetRaceResolutionOverride( effective_width, effective_height );
 
         Virtualize( effective_width, effective_height, virtual_width, virtual_height );
     }

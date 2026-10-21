@@ -354,11 +354,7 @@ namespace nfs5
             int new_width = width;
             int new_height = height;
 
-            if (!self.GetRaceResolutionOverride( new_width, new_height ))
-            {
-                new_width = width;
-                new_height = height;
-            }
+            self.GetRaceResolutionOverride( new_width, new_height );
 
             const int new_bpp = self.m_Settings.m_RaceColorDepth > 0 ? self.m_Settings.m_RaceColorDepth : bpp;
             const bool changed = new_width != width || new_height != height || new_bpp != bpp;
