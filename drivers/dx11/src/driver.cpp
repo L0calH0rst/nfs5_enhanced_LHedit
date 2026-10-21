@@ -5728,6 +5728,48 @@ namespace dx11z
 
     namespace
     {
+        // Racer list (game: 0x005E8B34, 9 slots, count at 0x00658080). With LFSP [Cars] MaxCars > 9 (lfsp.asi v7w,
+        // PLAN.md 12.4) the list is moved and longer; LfspCarList gives the current one and its capacity.
+        // Without the export, the game's list.
+        const std::uintptr_t * RacerList(
+            std::uint32_t * capacity
+        )
+        {
+            using CarListFn = int( __cdecl * )(void *** list);
+            static CarListFn list_fn = nullptr;
+            static bool resolved = false;
+            if (!resolved)
+            {
+                resolved = true;
+                if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
+                    list_fn = reinterpret_cast<CarListFn>(reinterpret_cast<void *>(::GetProcAddress( lfsp, "LfspCarList" )));
+            }
+            void ** list = reinterpret_cast<void **>(0x005E8B34);
+            int slots = 9;
+            if (list_fn != nullptr)
+                slots = list_fn( &list );
+            *capacity = static_cast<std::uint32_t>(slots);
+            return reinterpret_cast<const std::uintptr_t *>(list);
+        }
+
+        // Car of racer 'index', 0 outside the list.
+        std::uintptr_t RacerCar(
+            std::uint32_t index
+        )
+        {
+            std::uint32_t capacity = 0;
+            const std::uintptr_t * list = RacerList( &capacity );
+            return index < capacity ? list[index] : 0;
+        }
+
+        // Number of racers in the race, at most the list's capacity.
+        std::uint32_t RacerCount()
+        {
+            std::uint32_t capacity = 0;
+            RacerList( &capacity );
+            return std::min( *reinterpret_cast<const std::uint32_t *>(0x00658080), capacity );
+        }
+
         // Tint for another racer from LFSP (lfsp.asi v6d): model year of that car. Without the export, no tint.
         int LfspTintForCar(
             std::uintptr_t car,
@@ -5772,7 +5814,7 @@ namespace dx11z
             return;
 
         const std::uint32_t player = *reinterpret_cast<const std::uint32_t *>(0x0065741C);
-        const std::uintptr_t car = player < 9 ? *reinterpret_cast<const std::uintptr_t *>(0x005E8B34 + player * 4) : 0;
+        const std::uintptr_t car = RacerCar( player );
         std::uintptr_t model = 0;
         std::uintptr_t table = 0;
         std::uint8_t lamps[16] = {};
@@ -5813,7 +5855,7 @@ namespace dx11z
             }
             // Like a headlight flasher it also works with the light switch off (9.10c); the bytes are only logged.
             const std::uint32_t player = *reinterpret_cast<const std::uint32_t *>(0x0065741C);
-            const std::uintptr_t car = player < 9 ? *reinterpret_cast<const std::uintptr_t *>(0x005E8B34 + player * 4) : 0;
+            const std::uintptr_t car = RacerCar( player );
             std::uint8_t lights[2] = {};
             if (car != 0)
                 CarLightsOn( car, lights );
@@ -5932,7 +5974,7 @@ namespace dx11z
 
         for (std::uint32_t i = 0; i < racers && m_RearLights.size() < static_cast<std::size_t>(MAX_REAR_LIGHTS); ++i)
         {
-            const std::uintptr_t car = *reinterpret_cast<const std::uintptr_t *>(0x005E8B34 + i * 4);
+            const std::uintptr_t car = RacerCar( i );
             std::uintptr_t model = 0;
             std::uintptr_t table = 0;
             std::uint8_t lamps[14] = {};
@@ -6095,9 +6137,9 @@ namespace dx11z
             return;
 
         const std::uint32_t player = *reinterpret_cast<const std::uint32_t *>(0x0065741C);
-        const std::uint32_t racers = std::min( *reinterpret_cast<const std::uint32_t *>(0x00658080), 9u );
+        const std::uint32_t racers = RacerCount();
         const bool night = *reinterpret_cast<const std::uint16_t *>(0x00628A28) != 0;
-        const std::uintptr_t player_car = player < 9 ? *reinterpret_cast<const std::uintptr_t *>(0x005E8B34 + player * 4) : 0;
+        const std::uintptr_t player_car = RacerCar( player );
 
         // Check the layout of the rotation once against the game's own player matrix: FUN_004526c0 builds it in
         // every night frame (also with the switch off), by day the day path builds it (9.11c).
@@ -6163,7 +6205,7 @@ namespace dx11z
         std::uint32_t states = 0;
         for (std::uint32_t i = 0; i < racers && m_ConfigOpponents != 0 && m_CarLights.size() < static_cast<std::size_t>(MAX_CAR_LIGHTS); ++i)
         {
-            const std::uintptr_t car = *reinterpret_cast<const std::uintptr_t *>(0x005E8B34 + i * 4);
+            const std::uintptr_t car = RacerCar( i );
             std::uint8_t lights[2] = {};
             if (car == 0 || i == player || !CarLightsOn( car, lights ))
                 continue;
@@ -6431,7 +6473,7 @@ namespace dx11z
 
         const std::uint32_t index = *reinterpret_cast<const std::uint32_t *>(0x0065741C);
         m_DayStats.m_Index = index;
-        const std::uintptr_t car = index < 9 ? *reinterpret_cast<const std::uintptr_t *>(0x005E8B34 + index * 4) : 0;
+        const std::uintptr_t car = RacerCar( index );
         if (car == 0)
         {
             ++m_DayStats.m_NoCar;
