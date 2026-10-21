@@ -258,6 +258,8 @@ namespace nfs5
         s.m_Detail.m_FullCarDetail = ReadBool( L"Detail", L"FullCarDetail", true );
         s.m_Detail.m_TextureDetail = std::clamp( ReadInt( L"Detail", L"TextureDetail", 3 ), -1, 3 );
         s.m_Detail.m_OcclusionRange = std::clamp( ReadFloat( L"Detail", L"OcclusionRange", 220.0f ), 0.0f, 20000.0f );
+        s.m_Detail.m_OcclusionEdge = std::clamp( ReadFloat( L"Detail", L"OcclusionEdge", 1.0f ), 0.0f, 4.0f );
+        s.m_Detail.m_OcclusionEdgeRange = std::clamp( ReadFloat( L"Detail", L"OcclusionEdgeRange", 300.0f ), 0.0f, 20000.0f );
 
         s.m_Controller.m_Enabled = ReadBool( L"Controller", L"Enabled", true );
         s.m_Controller.m_HideHandledDevices = ReadBool( L"Controller", L"HideHandledDevices", true );
@@ -304,9 +306,9 @@ namespace nfs5
         LOG_INFO( "  IO Enabled={} ReadChunkKB={} CacheDiskFreeSpace={} FastCpuSpeedCheck={}",
             s.m_Io.m_Enabled, s.m_Io.m_ReadChunkKB, s.m_Io.m_CacheDiskFreeSpace,
             s.m_Io.m_FastCpuSpeedCheck );
-        LOG_INFO( "  Detail Enabled={} DrawDistanceScale={:.2f} MinDrawDistance={:.0f} FarClipMultiplier={:.2f} KeepDistantWheels={} FullCarDetail={} TextureDetail={} OcclusionRange={:.0f} LodDistanceScale={:.2f}",
+        LOG_INFO( "  Detail Enabled={} DrawDistanceScale={:.2f} MinDrawDistance={:.0f} FarClipMultiplier={:.2f} KeepDistantWheels={} FullCarDetail={} TextureDetail={} OcclusionRange={:.0f} OcclusionEdge={:.2f} OcclusionEdgeRange={:.0f} LodDistanceScale={:.2f}",
             s.m_Detail.m_Enabled, s.m_Detail.m_DrawDistanceScale, s.m_Detail.m_MinDrawDistance, s.m_Detail.m_FarClipMultiplier, s.m_Detail.m_KeepDistantWheels,
-            s.m_Detail.m_FullCarDetail, s.m_Detail.m_TextureDetail, s.m_Detail.m_OcclusionRange,
+            s.m_Detail.m_FullCarDetail, s.m_Detail.m_TextureDetail, s.m_Detail.m_OcclusionRange, s.m_Detail.m_OcclusionEdge, s.m_Detail.m_OcclusionEdgeRange,
             s.m_Widescreen.m_LodDistanceScale );
         LOG_INFO( "  Text Enabled={} Upscale={} Sharpness={:.2f}", s.m_Text.m_Enabled, s.m_Text.m_Upscale, s.m_Text.m_Sharpness );
         LOG_INFO( "  Controller Enabled={} HideHandledDevices={} Rumble={} RumbleStrength={:.2f} StickDeadzone={:.2f} TriggerDeadzone={:.2f} BackgroundInput={} TriggerBindings={}",

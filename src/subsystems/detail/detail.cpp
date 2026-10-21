@@ -87,9 +87,8 @@ namespace nfs5
         safetyhook::Context & context
     )
     {
-        // Nothing to change when the wall test let the object through.
-        if ((context.eax & 0xFF) == 0)
-            return;
+        const DetailSettings & settings = GetInstance().m_Settings;
+        const bool occluded = (context.eax & 0xFF) != 0;
 
         const auto * sphere = reinterpret_cast<const float *>(context.esp + game::detail::OCCLUSION_SPHERE);
         const auto * camera = *reinterpret_cast<const float * const *>(context.esp + game::detail::OCCLUSION_CAMERA);
@@ -101,9 +100,36 @@ namespace nfs5
 
         // Close by the walls only hide what the depth buffer hides anyway. Far away they still
         // drop track pieces whose surrounding ground is not drawn, those would float in the air.
-        if (gap < GetInstance().m_Settings.m_OcclusionRange)
+        if (gap < settings.m_OcclusionRange)
         {
             context.eax &= ~0xFFu;
+            return;
+        }
+
+        // The game only tests the line to the centre. Far away a single track piece slips through a gap
+        // between two walls and floats without its surroundings, the lines to both sides of its sphere
+        // [across the view, radius times 'OcclusionEdge'] close that gap.
+        if (occluded || settings.m_OcclusionEdge <= 0.0f || gap < settings.m_OcclusionEdgeRange)
+            return;
+
+        const float flat = std::sqrt( dx * dx + dz * dz );
+        if (flat <= 1.0f)
+            return;
+
+        const float side = sphere[3] * settings.m_OcclusionEdge / flat;
+        const float px = -dz * side;
+        const float pz = dx * side;
+        const float left[4] = { sphere[0] + px, sphere[1], sphere[2] + pz, sphere[3] };
+        const float right[4] = { sphere[0] - px, sphere[1], sphere[2] - pz, sphere[3] };
+
+        using WallTestFn = unsigned( __fastcall * )(void * map, void * edx, const float * point, const float * camera, int flag);
+        const auto wall_test = reinterpret_cast<WallTestFn>(game::detail::OCCLUSION_WALL_TEST);
+        void * map = *reinterpret_cast<void * const *>(game::detail::OCCLUSION_TRACK_MAP);
+        const int flag = *reinterpret_cast<const std::uint8_t *>(context.esp + game::detail::OCCLUSION_FLAG);
+
+        if ((wall_test( map, nullptr, left, camera, flag ) & 0xFF) != 0 || (wall_test( map, nullptr, right, camera, flag ) & 0xFF) != 0)
+        {
+            context.eax = (context.eax & ~0xFFu) | 1u;
         }
     }
 
@@ -219,7 +245,7 @@ namespace nfs5
             ok &= m_TextureDetailHook != nullptr;
         }
 
-        if (settings.m_OcclusionRange > 0.0f)
+        if (settings.m_OcclusionRange > 0.0f || settings.m_OcclusionEdge > 0.0f)
         {
             m_OcclusionHook = hook::CreateMid( "Occlusion", site::OCCLUSION_RESULT.m_Address, site::OCCLUSION_RESULT.m_Signature,
                 &OcclusionHook );

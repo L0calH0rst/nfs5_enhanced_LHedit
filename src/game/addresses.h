@@ -588,6 +588,11 @@ namespace nfs5::game
 
         inline constexpr std::size_t OCCLUSION_SPHERE = 0x3C;
         inline constexpr std::size_t OCCLUSION_CAMERA = 0x14;
+
+        // [esp+20h] holds the byte flag of the object [400020h] that 'sub_488B50' takes as third argument.
+        inline constexpr std::size_t OCCLUSION_FLAG = 0x20;
+        inline constexpr std::uintptr_t OCCLUSION_WALL_TEST = 0x00488B50;
+        inline constexpr std::uintptr_t OCCLUSION_TRACK_MAP = 0x00628960;
         inline constexpr float OBJECT_LIMIT_400000_STOCK = 600.0f;
         inline constexpr float OBJECT_LIMIT_20_STOCK = 700.0f;
 

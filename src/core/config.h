@@ -164,6 +164,11 @@ namespace nfs5
         // Objects closer than this [distance minus radius, metres] are drawn even when the
         // occlusion test puts them behind a wall, '0' keeps the test everywhere.
         float m_OcclusionRange = 220.0f;
+
+        // Beyond 'm_OcclusionEdgeRange' the lines to both sides of the object [radius times this
+        // factor] are tested against the walls as well, '0' tests the centre only like the game.
+        float m_OcclusionEdge = 1.0f;
+        float m_OcclusionEdgeRange = 300.0f;
     };
 
     struct ControllerSettings
