@@ -231,6 +231,10 @@ namespace nfs5
             m_CarLodOffsetHook = hook::CreateMid( "CarLodOffset", site::CAR_LOD_OFFSET.m_Address, site::CAR_LOD_OFFSET.m_Signature,
                 &CarLodOffsetHook );
             ok &= m_CarLodOffsetHook != nullptr;
+
+            // LOD 0 never gets the suspension travel, the wheels would roll with the body into the ground.
+            ok &= m_WheelSuspensionPatch.Apply( "WheelSuspensionLoop", site::WHEEL_SUSPENSION_LOOP.m_Address,
+                site::WHEEL_SUSPENSION_LOOP.m_Signature, site::WHEEL_SUSPENSION_LOOP_JL );
         }
 
         m_Installed = true;
@@ -246,6 +250,7 @@ namespace nfs5
         RestoreWheelTable();
 
         m_OcclusionHook.reset();
+        m_WheelSuspensionPatch.Restore();
         m_CarLodOffsetHook.reset();
         m_TextureDetailHook.reset();
         m_ObjectLimitPatch20.Restore();
