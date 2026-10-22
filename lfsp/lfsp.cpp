@@ -286,7 +286,6 @@ namespace
     int g_flashPopUps = 1;
     int g_signalsInSync = 1; // 11.5f: Blinker hinten (6/7) im Takt der vorderen statt gegenphasig
     int g_thirdBrakeOnly = 1; // 11.5i: mittiges 3. Bremslicht nur beim Bremsen, nicht als Rücklicht bei Licht an
-    int g_glowBiasFix = 1;        // B23: Tiefenversatz des Leuchten-Glows mindestens -1 (sonst ab ~92 m teils schwarz)
     float g_highGlow = 1.6f;      // 9.10f: Glow der Scheinwerfer am Spielerauto bei Fernlicht × diesen Faktor
     float g_lampBoost = 1.0f;     // Faktor für die gerade geprüfte Leuchte (LampTest → Glow 0x43CDD0)
     bool g_highBroken = false; // 11.5i: beide Scheinwerfer des Spielerautos kaputt, kein Fernlicht
@@ -645,7 +644,6 @@ namespace
         g_flashPopUps = GetPrivateProfileIntA("Lights", "HeadlightsFlashPopUps", 1, ini);
         g_signalsInSync = GetPrivateProfileIntA("Lights", "SignalsInSync", 1, ini);
         g_thirdBrakeOnly = GetPrivateProfileIntA("Lights", "ThirdBrakeLightBrakingOnly", 1, ini);
-        g_glowBiasFix = GetPrivateProfileIntA("Lights", "LampGlowDepthFix", 1, ini);
         {
             char glow[32] = {};
             GetPrivateProfileStringA("Lights", "HeadlightsHighGlow", "1.6", glow, sizeof(glow), ini);
@@ -2955,10 +2953,10 @@ namespace
         }
     }
 
-    // ---- Glow der Leuchten FUN_0043CDD0 (B23, 9.10f, doc/LICHT.md §9.7) ----
+    // ---- Glow der Leuchten FUN_0043CDD0 (9.10f, doc/LICHT.md §9.7) ----
     // Helligkeit b = Winkelfaktor × Stärke [ebp + 0x10]: Größe ∝ b, Alpha = (int)(b × 255) & 0xFF (0x43D3BA),
     // Tiefenversatz = round(−20000 × b × [[0x628130] + 0xC] / Abstand²) (0x43D44C, Sprite +0x10 → State 0x18).
-    // Ab ~92 m rundet der Versatz auf 0, der Glow kämpft dann mit dem Scheinwerferglas und wird teils schwarz.
+    // Ab ~92 m rundet der Versatz auf 0 (B23); das behebt nfs5_enhanced selbst ([Detail], Hook LampGlowDepth).
     const float kLampAlphaMax = 255.0f;
 
     // 0x43D195: FST [EBP+0x10]; FCOMP [0x5B2604] → Helligkeit × g_lampBoost
@@ -2986,23 +2984,6 @@ namespace
             jnz done
             fstp st(0)
             fld dword ptr [kLampAlphaMax]
-        done:
-            ret
-        }
-    }
-
-    // 0x43D44C: FLD [EBP-0x20]; FISTP [EBP-0x14]; MOV EAX,[EBP-0x14] → Versatz höchstens −1
-    __declspec(naked) void LampGlowBiasDetour()
-    {
-        __asm
-        {
-            fld dword ptr [ebp - 0x20]
-            fistp dword ptr [ebp - 0x14]
-            mov eax, dword ptr [ebp - 0x14]
-            cmp eax, -1
-            jle done
-            mov eax, -1
-            mov dword ptr [ebp - 0x14], eax
         done:
             ret
         }
@@ -4550,7 +4531,7 @@ namespace
         std::string base = path;
         base.erase(base.find_last_of('.'));
         g_log = std::fopen((base + ".log").c_str(), "w");
-        Log("LFSP v8e gestartet");
+        Log("LFSP v8f gestartet");
 
         auto * exe = reinterpret_cast<unsigned char *>(GetModuleHandleA(nullptr));
         const auto * dos = reinterpret_cast<IMAGE_DOS_HEADER *>(exe);
@@ -4679,7 +4660,7 @@ namespace
             PatchBytes("Leuchten-Abfrage", site.first, expected, replacement, sizeof(expected));
         }
 
-        // B23 / 9.10f: Glow der Leuchten (Tiefenversatz, Fernlicht heller). Je 9 Bytes → CALL + 4 × NOP.
+        // 9.10f: Glow der Leuchten bei Fernlicht heller. Je 9 Bytes → CALL + 4 × NOP.
         {
             struct GlowSite { const char * name; std::uintptr_t at; unsigned char orig[9]; void * hook; bool on; };
             const GlowSite sites[] = {
@@ -4687,8 +4668,6 @@ namespace
                   reinterpret_cast<void *>(&LampGlowBoostDetour), g_highGlow > 1.0f },
                 { "Leuchten-Glow Alpha", 0x43D3BA, { 0xD9, 0x45, 0x10, 0xD8, 0x0D, 0x10, 0x37, 0x5B, 0x00 },
                   reinterpret_cast<void *>(&LampGlowAlphaDetour), g_highGlow > 1.0f },
-                { "Leuchten-Glow Tiefenversatz", 0x43D44C, { 0xD9, 0x45, 0xE0, 0xDB, 0x5D, 0xEC, 0x8B, 0x45, 0xEC },
-                  reinterpret_cast<void *>(&LampGlowBiasDetour), g_glowBiasFix != 0 },
             };
             for (const auto & s : sites)
             {

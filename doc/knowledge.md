@@ -15,6 +15,7 @@
 | Build | `nfs5_enhanced_LHedit\build-asi\` (`lfsp\lfsp.asi`, `drivers\dx11\dx11z.dll`) | nein |
 | Testinstallation | `G:\NFSP\Game CD\` (ASI, `lfsp.ini`, `drivers\dx11z.dll`, Sicherungen in `drivers\_backup\`) | nein |
 | Werkzeuge, Messungen, Logs, Strecken/HD-Arbeit | `G:\NFSP\work\` | nein (NFSP-M wird nicht mehr committet) |
+| Upstream-PRs | Branch je Fix ab `upstream/master` (iArtorias/nfs5_enhanced), Push nach `origin`, PR im Browser (kein `gh`); nach Abschluss Branch auf GitHub und lokal löschen. Gelöscht 2026-10-22: `fix/wheel-suspension` (#9), `fix/menu-scroll` (#6), `fix/lamp-glow-depth` | LHedit |
 | Ghidra-Projekt und Exporte | `G:\NFSP\GhidraNFSP\` | nein |
 
 ## 1. Texturen – Alpha-Werte als Maske (Fahrzeugtexturen)

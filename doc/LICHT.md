@@ -647,7 +647,9 @@ Wunsch 👤: Beim 944 öffnet L die Klappscheinwerfer, K (Fernlicht der Mod) nic
 - Helligkeit b = Winkelfaktor × Stärke (`0x43D192`, `[ebp + 0x10]`); unter 0,1 kein Glow. Größe ∝ b (`0x43D26D`), Alpha = `ftol(b × 255) & 0xFF` (`0x43D3BA`, läuft bei b > 1 über), Zusatz-Flare `0x451D60` bei b × … > 0,1.
 - Tiefenversatz (Sprite `+0x10` über `0x537A60`, State 0x18 in dx11z): `round(−20000 × b × [[0x628130] + 0xC] / Abstand²)` (`0x43D41C`–`0x43D452`). Der Versatz fällt mit 1/d² und rundet in der Ferne auf 0; dann kämpft der Glow mit dem Scheinwerferglas des Modells und wird teils schwarz. Passt zu B21: Mit `TestNoZBias = 1` wurden die Lichtflecken ebenso teils schwarz.
 
-**Umsetzung LFSP v8e:** Drei Umwege (je 9 Bytes → CALL + NOP): `0x43D44C` Versatz höchstens −1 (`[Lights] LampGlowDepthFix`, alle Autos); `0x43D195` b × Faktor für die Scheinwerfer 0/1 des Spielerautos bei Fernlicht, `1 + (HeadlightsHighGlow − 1) × g_highBeam` (Standard 1,6, gesetzt in `LampTest` direkt vor dem Glow); `0x43D3BA` Alpha auf 255 begrenzt. Heller heißt damit: größer, voll deckend und kräftigerer Zusatz-Flare. 👤 Test offen.
+**Umsetzung LFSP v8e:** Drei Umwege (je 9 Bytes → CALL + NOP): `0x43D44C` Versatz höchstens −1 (`[Lights] LampGlowDepthFix`, alle Autos); `0x43D195` b × Faktor für die Scheinwerfer 0/1 des Spielerautos bei Fernlicht, `1 + (HeadlightsHighGlow − 1) × g_highBeam` (Standard 1,6, gesetzt in `LampTest` direkt vor dem Glow); `0x43D3BA` Alpha auf 255 begrenzt. Heller heißt damit: größer, voll deckend und kräftigerer Zusatz-Flare. ✅ 👤 2026-10-22: funktioniert.
+
+**Upstream (2026-10-22):** Der Tiefenversatz-Fix ist jetzt Teil von nfs5_enhanced (Detail-Subsystem, MidHook `LampGlowDepth` an `0x43D452` nach dem `FISTP`, Versatz höchstens −1, aktiv mit `[Detail] Enabled = 1`; PR aus Branch `fix/lamp-glow-depth`, in LHedit `master` per Cherry-Pick). LFSP v8f hat `LampGlowDepthFix` und den Umweg an `0x43D44C` deshalb entfernt (beide hätten dieselben Bytes geändert). In LFSP bleiben Fernlicht-Glow (`0x43D195`) und Alpha-Grenze (`0x43D3BA`).
 
 ## 10. HUD-Instrumente nach Lichtschalter (11.3)
 
