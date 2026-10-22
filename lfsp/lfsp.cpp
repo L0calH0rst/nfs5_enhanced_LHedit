@@ -321,6 +321,8 @@ namespace
     std::vector<std::string> g_trafficPoolNames; // leer = alle Verkehrsmodelle des Spiels
     std::vector<std::string> g_trafficTrackOnly;  // nur auf Strecken, die das Modell selbst eintragen (Schneepflug EAS4)
     int g_trafficCount[4] = { 0, 2, 5, 8 };       // Verkehrsautos je Menüstufe Kein/Leicht/Mittel/Schwer (Spiel: 0/2/5/7)
+    int g_trafficPorsches = 0;                    // Anteil Porsches im Verkehr in Prozent (0 = nur Verkehrsmodelle)
+    int g_trafficOvertake = 0;                    // 1 = Verkehr überholt über die Gegenfahrbahn (Spiel), 0 = nie
     int g_trafficActive = 5;                      // höchstens gleichzeitig fahrende Verkehrsautos (Spiel: 5)
 
     // Mehr als 9 Autos (12.4, VERKEHR.md §6.6): Tabellen pro Auto liegen dann in eigenem Speicher.
@@ -708,6 +710,11 @@ namespace
             g_trafficCount[i] = g_trafficCount[i] < 0 ? 0 : (g_trafficCount[i] > most ? most : g_trafficCount[i]);
         }
         Log("Verkehr: Stufen Leicht %d, Mittel %d, Schwer %d", g_trafficCount[1], g_trafficCount[2], g_trafficCount[3]);
+        g_trafficPorsches = GetPrivateProfileIntA("Traffic", "Porsches", 0, ini);
+        g_trafficPorsches = g_trafficPorsches < 0 ? 0 : (g_trafficPorsches > 100 ? 100 : g_trafficPorsches);
+        Log("Verkehr: Porsches %d %%", g_trafficPorsches);
+        g_trafficOvertake = GetPrivateProfileIntA("Traffic", "Overtake", 0, ini) != 0;
+        Log("Verkehr: Overtake %d", g_trafficOvertake);
         g_trafficActive = GetPrivateProfileIntA("Traffic", "Active", 5, ini);
         g_trafficActive = g_trafficActive < 1 ? 1 : (g_trafficActive > g_maxCars - 1 ? g_maxCars - 1 : g_trafficActive);
         Log("Verkehr: gleichzeitig hoechstens %d", g_trafficActive);
@@ -3578,6 +3585,7 @@ namespace
     constexpr std::uintptr_t kSimAiConfig = 0x4068F0;
     constexpr std::uintptr_t kFeMode      = 0x690AAC; // Spielart im Menü (0 Einzelrennen, 4 Turnier ...)
     constexpr std::uintptr_t kCarModels   = 0x6919FC; // Zeiger auf Vektor der Fahrzeugmodelle (erstes short = ID)
+    constexpr std::uintptr_t kPorscheModels = 0x6919F0; // Porsches (Art +0x1F4 = 0) mit vorhandener .crp (FUN_004F3E40)
 
     using RaceSetupFn   = void(__cdecl *)(int *);
     using RaceCarFn     = void(__fastcall *)(void *, void *, int, int *, int, const char *, int, char, char, char);
@@ -3716,11 +3724,57 @@ namespace
     // ESI an der Aufrufstelle 0x4ED4DB = Strecken-Datensatz (das Spiel liest dort mov dx,[esi+edx*2+0x7C])
     std::uintptr_t g_lookupEsi = 0;
 
+    // 12.6: Porsche statt Verkehrsmodell. Alle Fahrzeuge aus nfs5.car haben denselben Datensatz (Art +0x1F4:
+    // 0 Porsche, 1 Verkehr, 2 Polizei); die Polizei-Porsches gehen schon denselben Weg (FUN_004EE3B0, FUN_004EEDA0).
+    // Beutel wie oben, über alle verfügbaren Porsches.
+    std::uint32_t g_porscheSeed = GetTickCount() | 1;
+
+    void * PickPorsche()
+    {
+        static std::vector<void *> bag;
+        auto * vec = *reinterpret_cast<void ***>(kPorscheModels);
+        if (!vec)
+        {
+            return nullptr;
+        }
+        if (bag.empty())
+        {
+            for (auto ** it = static_cast<void **>(vec[0]); it < static_cast<void **>(vec[1]); ++it)
+            {
+                if (*it && *reinterpret_cast<short *>(static_cast<char *>(*it) + 0x1F4) == 0)
+                {
+                    bag.push_back(*it);
+                }
+            }
+            if (bag.empty())
+            {
+                return nullptr;
+            }
+        }
+        g_porscheSeed = g_porscheSeed * 1664525u + 1013904223u;
+        const std::size_t i = (g_porscheSeed >> 8) % bag.size();
+        void * rec = bag[i];
+        bag.erase(bag.begin() + static_cast<std::ptrdiff_t>(i));
+        return rec;
+    }
+
     void * __cdecl HookModelById(short id)
     {
         void * rec = g_origModelById(id);
         const bool traffic = reinterpret_cast<std::uintptr_t>(_ReturnAddress()) == kTrafficLookupReturn;
         void * pick = (traffic && g_trafficRandom) ? PickTrafficModel(reinterpret_cast<const char *>(g_lookupEsi)) : nullptr;
+        if (traffic && g_trafficPorsches > 0)
+        {
+            g_porscheSeed = g_porscheSeed * 1664525u + 1013904223u;
+            if (static_cast<int>((g_porscheSeed >> 8) % 100) < g_trafficPorsches)
+            {
+                if (void * porsche = PickPorsche())
+                {
+                    pick = porsche;
+                    Log("Verkehr: Porsche '%s' (ID %d) als Verkehrsauto", ModelName(pick), *static_cast<short *>(pick));
+                }
+            }
+        }
         if (g_trafficMeasure)
         {
             const bool found = rec && *static_cast<short *>(rec) == id;
@@ -4208,6 +4262,16 @@ namespace
         }
     }
 
+    // 12.7: Spurwahl (VERKEHR.md §4c). FUN_00401A00 zieht von der Wertung der Spuren auf der Gegenfahrbahn für
+    // Verkehrsautos nur 12 ab; ein langsameres Auto davor wiegt mehr, also schert der Verkehr aus, ohne schneller zu
+    // sein. Mit Overtake = 0 wird der Abzug -1000: Verkehr bleibt auf seiner Seite und kehrt sonst dorthin zurück.
+    void InstallTrafficOvertake()
+    {
+        static const unsigned char kOld[] = { 0xC7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x40, 0xC1 }; // MOV [ESP+8],-12.0f
+        static const unsigned char kNew[] = { 0xC7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x7A, 0xC4 }; // MOV [ESP+8],-1000.0f
+        PatchBytes("Verkehr nicht ueber die Gegenfahrbahn", 0x401A21, kOld, kNew, sizeof(kOld));
+    }
+
     void InstallTrafficModels()
     {
         static const unsigned char kModelBytes[] = { 0xA1, 0xFC, 0x19, 0x69, 0x00 };
@@ -4235,7 +4299,7 @@ namespace
         std::string base = path;
         base.erase(base.find_last_of('.'));
         g_log = std::fopen((base + ".log").c_str(), "w");
-        Log("LFSP v7y gestartet");
+        Log("LFSP v8a gestartet");
 
         auto * exe = reinterpret_cast<unsigned char *>(GetModuleHandleA(nullptr));
         const auto * dos = reinterpret_cast<IMAGE_DOS_HEADER *>(exe);
@@ -4279,8 +4343,13 @@ namespace
         {
             InstallTrafficSpawn();
         }
+        // 12.7: Verkehr überholt nicht über die Gegenfahrbahn
+        if (!g_trafficOvertake)
+        {
+            InstallTrafficOvertake();
+        }
         // 12.3: Verkehrsmodelle zufällig
-        if (g_trafficMeasure || g_trafficRandom)
+        if (g_trafficMeasure || g_trafficRandom || g_trafficPorsches > 0)
         {
             InstallTrafficModels();
         }
