@@ -511,9 +511,10 @@ namespace nfs5
     {
         // One run is a stretch of glyphs on one line without a wide gap (columns, separate strings in
         // one batch). Inside a run the pens follow the TTF advances, a gap keeps its width scaled like
-        // a space. The run starts where the game put it; ffn_hd.py scales the TTF advances per font to
-        // the game's on average, so lines keep their length. No scaling per run, a clipped list row
-        // would get its own factor.
+        // a space. A complete run is scaled to its original width, so left, centred and right aligned
+        // text keeps its place. A run cut by a clip rectangle (the cut glyph has its UVs moved, so it
+        // matches no glyph) only shows part of its width: it keeps its start and the TTF advances,
+        // which ffn_hd.py scales per font to the game's on average, and the cut glyph moves along.
         const float m = magnification;
         const float space_ratio = sheet.m_GameSpace > 0.0f && sheet.m_Space > 0.0f ? sheet.m_Space / sheet.m_GameSpace : 1.0f;
         std::vector< float > pens;
@@ -525,7 +526,9 @@ namespace nfs5
             pens.clear();
             glyphs.clear();
             float original_pen = 0.0f;
+            float first = 0.0f;
             float pen = 0.0f;
+            bool clipped = false;
             int end = start;
 
             for (; end < quad_count; ++end)
@@ -535,13 +538,17 @@ namespace nfs5
                 const auto it = sheet.m_Layout.find( key );
 
                 if (it == sheet.m_Layout.end())
+                {
+                    clipped = !glyphs.empty();
                     break;
+                }
 
                 const LayoutGlyph & glyph = it->second;
                 const float game_pen = v.m_X - glyph.m_GameOffset * m;
 
                 if (glyphs.empty())
                 {
+                    first = game_pen;
                     pen = game_pen;
                 }
                 else
@@ -563,10 +570,27 @@ namespace nfs5
 
             if (!glyphs.empty())
             {
+                const float original_width = original_pen + glyphs.back()->m_GameAdvance * m - first;
+                const float width = pens.back() + glyphs.back()->m_Advance * m - first;
+                const float scale = !clipped && width > 0.0f ? original_width / width : 1.0f;
+
+                if (clipped)
+                {
+                    // The cut glyph follows the pen of the run.
+                    game::ThrashVertex * quad = &vertices[static_cast<std::size_t>( end ) * 4];
+                    const float shift = width - original_width;
+
+                    for (int k = 0; k < 4; ++k)
+                    {
+                        quad[k].m_X += shift;
+                    }
+                    ++end;
+                }
+
                 for (std::size_t i = 0; i < glyphs.size(); ++i)
                 {
                     game::ThrashVertex * quad = &vertices[(static_cast<std::size_t>( start ) + i) * 4];
-                    const float left = pens[i] + glyphs[i]->m_Offset * m;
+                    const float left = first + (pens[i] - first) * scale + glyphs[i]->m_Offset * m;
                     const float shift = left - quad[0].m_X;
 
                     for (int k = 0; k < 4; ++k)
