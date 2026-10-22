@@ -37,6 +37,7 @@ namespace nfs5
         hook::BytePatch m_WheelSuspensionPatch;
         std::unique_ptr<safetyhook::InlineHook> m_TextureDetailHook;
         std::unique_ptr<safetyhook::MidHook> m_OcclusionHook;
+        std::unique_ptr<safetyhook::MidHook> m_LampGlowDepthHook;
         std::array<std::int32_t, WHEEL_TABLE_SIZE> m_OriginalWheelTable = {};
         bool m_WheelTablePatched = false;
         bool m_Installed = false;
@@ -54,6 +55,10 @@ namespace nfs5
         );
 
         static void OcclusionHook(
+            safetyhook::Context & context
+        );
+
+        static void LampGlowDepthHook(
             safetyhook::Context & context
         );
 
