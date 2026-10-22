@@ -37,6 +37,15 @@ namespace nfs5
             std::uint64_t m_LastUse = 0;
         };
 
+        // Glyph metrics of a prerendered sheet, the quads are set at the TrueType advances.
+        struct LayoutGlyph
+        {
+            float m_GameAdvance = 0.0f; // texels
+            float m_GameOffset = 0.0f; // rectangle left from the pen, texels
+            float m_Advance = 0.0f;
+            float m_Offset = 0.0f;
+        };
+
         struct Sheet
         {
             const std::uint8_t * m_Pixels = nullptr;
@@ -56,6 +65,11 @@ namespace nfs5
             bool m_HavePalette = false;
             bool m_Failed = false;
             std::vector< ColorSet > m_Sets;
+
+            // Keyed by rectangle 'x << 16 | y' in the sheet.
+            std::unordered_map< std::uint32_t, LayoutGlyph > m_Layout;
+            float m_GameSpace = 0.0f;
+            float m_Space = 0.0f;
         };
 
         TextSettings m_Settings;
@@ -118,6 +132,24 @@ namespace nfs5
         [[nodiscard]] bool PickTextureFormat();
 
         void BuildLevels(
+            Sheet & sheet
+        );
+
+        // Layout table of the prerendered sheet, read when the font is uploaded.
+        void LoadLayout(
+            Sheet & sheet
+        );
+
+        // Moves glyph quads to the TrueType advances, each run keeps its original width.
+        void Relayout(
+            const Sheet & sheet,
+            game::ThrashVertex * vertices,
+            int quad_count,
+            float magnification
+        ) const;
+
+        // Levels from a prerendered sheet 'fonts\<checksum>_<factor>.lvl' next to the game, see ffn_hd.py.
+        [[nodiscard]] bool LoadLevels(
             Sheet & sheet
         );
 

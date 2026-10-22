@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+
+#include <windows.h>
 
 #include "../../core/log.h"
 #include "../../game/addresses.h"
@@ -137,6 +140,18 @@ namespace nfs5
             if (du > 0.0f)
             {
                 magnification = dx / du;
+            }
+        }
+
+        // Prerendered sheets come with TTF advances, only when the enlarged sheet is the one drawn.
+        if (magnification > 0.0f && magnification * self.DisplayFactor() >= static_cast<float>(self.m_Upscale) * 0.5f &&
+            hook::Ref<int>( game::text::DISPLAY_BPP ) > 8)
+        {
+            const auto * font_texture = hook::Ref<game::FontTexture *>( game::text::CURRENT_FONT_TEXTURE );
+
+            if (const auto it = self.m_Sheets.find( font_texture ); it != self.m_Sheets.end() && !it->second.m_Layout.empty())
+            {
+                self.Relayout( it->second, vertices, quad_count, magnification );
             }
         }
 
@@ -280,6 +295,7 @@ namespace nfs5
             sheet.m_Segments = (flags & text::FLAG_TWO_STAGE_PALETTE) != 0 ? 2 : 1;
             sheet.m_Levels.clear();
             sheet.m_Failed = false;
+            LoadLayout( sheet );
         }
 
         std::memcpy( sheet.m_Palette.data(), font + text::FONT_PALETTE, sizeof( Palette ) );
@@ -395,10 +411,254 @@ namespace nfs5
     }
 
 
+    namespace
+    {
+        // Prerendered sheet 'fonts\<checksum>_<factor>.lvl' next to the game, header checked against the font:
+        // 'LVL1' or 'LVL2', u16 width, u16 height (already enlarged), then one level byte per pixel.
+        // LVL2 follows with the layout: u16 count, f32 game and TTF space advance, then per glyph
+        // u16 x, u16 y, u8 game advance, s8 xoff, 2 pad, f32 TTF advance, f32 rectangle offset from the pen.
+        FILE * OpenSheet(
+            std::uint32_t checksum,
+            std::int32_t factor,
+            std::int32_t width,
+            std::int32_t height,
+            char ( &path )[MAX_PATH],
+            bool & layout
+        )
+        {
+            const DWORD length = GetModuleFileNameA( nullptr, path, MAX_PATH );
+            char * slash = length > 0 ? std::strrchr( path, '\\' ) : nullptr;
+
+            if (slash == nullptr)
+                return nullptr;
+
+            std::snprintf( slash + 1, static_cast<std::size_t>( path + MAX_PATH - slash - 1 ), "fonts\\%08X_%d.lvl", checksum, factor );
+
+            FILE * file = nullptr;
+
+            if (fopen_s( &file, path, "rb" ) != 0 || file == nullptr)
+                return nullptr;
+
+            std::uint8_t header[8] = {};
+            const bool read = std::fread( header, 1, sizeof( header ), file ) == sizeof( header );
+            layout = read && std::memcmp( header, "LVL2", 4 ) == 0;
+
+            if (!read || (!layout && std::memcmp( header, "LVL1", 4 ) != 0) || ReadField< std::uint16_t >( header, 4 ) != width ||
+                ReadField< std::uint16_t >( header, 6 ) != height)
+            {
+                std::fclose( file );
+                LOG_WARN( "Text sheet {} does not match the {}x{} font", path, width, height );
+                return nullptr;
+            }
+
+            return file;
+        }
+    }
+
+
+    void TextQuality::LoadLayout(
+        Sheet & sheet
+    )
+    {
+        sheet.m_Layout.clear();
+
+        if (sheet.m_Segments != 1 || m_Upscale <= 0)
+            return;
+
+        char path[MAX_PATH] = {};
+        bool layout = false;
+        const std::int32_t width = sheet.m_Width * m_Upscale;
+        const std::int32_t height = sheet.m_Height * m_Upscale;
+        FILE * file = OpenSheet( sheet.m_Checksum, m_Upscale, width, height, path, layout );
+
+        if (file == nullptr)
+            return;
+
+        std::uint8_t head[10] = {};
+
+        if (layout && std::fseek( file, 8 + static_cast<long>( width ) * height, SEEK_SET ) == 0 &&
+            std::fread( head, 1, sizeof( head ), file ) == sizeof( head ))
+        {
+            const std::uint16_t count = ReadField< std::uint16_t >( head, 0 );
+            sheet.m_GameSpace = ReadField< float >( head, 2 );
+            sheet.m_Space = ReadField< float >( head, 6 );
+            std::uint8_t entry[16] = {};
+
+            for (std::uint16_t i = 0; i < count && std::fread( entry, 1, sizeof( entry ), file ) == sizeof( entry ); ++i)
+            {
+                const std::uint32_t key = static_cast<std::uint32_t>( ReadField< std::uint16_t >( entry, 0 ) ) << 16 |
+                    ReadField< std::uint16_t >( entry, 2 );
+                LayoutGlyph & glyph = sheet.m_Layout[key];
+                glyph.m_GameAdvance = static_cast<float>( entry[4] );
+                glyph.m_GameOffset = static_cast<float>( static_cast<std::int8_t>( entry[5] ) );
+                glyph.m_Advance = ReadField< float >( entry, 8 );
+                glyph.m_Offset = ReadField< float >( entry, 12 );
+            }
+
+            LOG_INFO( "Text layout of {} glyphs loaded from {}", sheet.m_Layout.size(), path );
+        }
+
+        std::fclose( file );
+    }
+
+
+    void TextQuality::Relayout(
+        const Sheet & sheet,
+        game::ThrashVertex * vertices,
+        int quad_count,
+        float magnification
+    ) const
+    {
+        // One run is a stretch of glyphs on one line without a wide gap (columns, separate strings in
+        // one batch). Inside a run the pens follow the TTF advances, a gap keeps its width scaled like
+        // a space. The run starts where the game put it; ffn_hd.py scales the TTF advances per font to
+        // the game's on average, so lines keep their length. No scaling per run, a clipped list row
+        // would get its own factor.
+        const float m = magnification;
+        const float space_ratio = sheet.m_GameSpace > 0.0f && sheet.m_Space > 0.0f ? sheet.m_Space / sheet.m_GameSpace : 1.0f;
+        std::vector< float > pens;
+        std::vector< const LayoutGlyph * > glyphs;
+
+        int start = 0;
+        while (start < quad_count)
+        {
+            pens.clear();
+            glyphs.clear();
+            float original_pen = 0.0f;
+            float pen = 0.0f;
+            int end = start;
+
+            for (; end < quad_count; ++end)
+            {
+                const game::ThrashVertex & v = vertices[end * 4];
+                const auto key = static_cast<std::uint32_t>( std::lround( v.m_U ) ) << 16 | static_cast<std::uint32_t>( std::lround( v.m_V ) );
+                const auto it = sheet.m_Layout.find( key );
+
+                if (it == sheet.m_Layout.end())
+                    break;
+
+                const LayoutGlyph & glyph = it->second;
+                const float game_pen = v.m_X - glyph.m_GameOffset * m;
+
+                if (glyphs.empty())
+                {
+                    pen = game_pen;
+                }
+                else
+                {
+                    const LayoutGlyph & last = *glyphs.back();
+                    const float gap = game_pen - original_pen - last.m_GameAdvance * m;
+
+                    // New line or wide gap ends the run.
+                    if (game_pen < original_pen || gap > 2.5f * std::max( sheet.m_GameSpace, 2.0f ) * m)
+                        break;
+
+                    pen += last.m_Advance * m + gap * space_ratio;
+                }
+
+                original_pen = game_pen;
+                pens.push_back( pen );
+                glyphs.push_back( &glyph );
+            }
+
+            if (!glyphs.empty())
+            {
+                for (std::size_t i = 0; i < glyphs.size(); ++i)
+                {
+                    game::ThrashVertex * quad = &vertices[(static_cast<std::size_t>( start ) + i) * 4];
+                    const float left = pens[i] + glyphs[i]->m_Offset * m;
+                    const float shift = left - quad[0].m_X;
+
+                    for (int k = 0; k < 4; ++k)
+                    {
+                        quad[k].m_X += shift;
+                    }
+                }
+            }
+
+            start = std::max( end, start + 1 );
+        }
+
+        // Every rectangle has a free texel on both sides in the atlas, the prerendered glyph may use half
+        // of it. Vertices 0 and 3 are the left edge, 1 and 2 the right one.
+        for (int i = 0; i < quad_count; ++i)
+        {
+            game::ThrashVertex * quad = &vertices[i * 4];
+            const auto key = static_cast<std::uint32_t>( std::lround( quad[0].m_U ) ) << 16 | static_cast<std::uint32_t>( std::lround( quad[0].m_V ) );
+
+            if (sheet.m_Layout.find( key ) == sheet.m_Layout.end())
+                continue;
+
+            for (const int k : { 0, 3 })
+            {
+                quad[k].m_X -= 0.5f * m;
+                quad[k].m_U -= 0.5f;
+            }
+
+            for (const int k : { 1, 2 })
+            {
+                quad[k].m_X += 0.5f * m;
+                quad[k].m_U += 0.5f;
+            }
+        }
+    }
+
+
+    bool TextQuality::LoadLevels(
+        Sheet & sheet
+    )
+    {
+        // Only plain ramps, a prerendered sheet has no second outline stage.
+        if (sheet.m_Segments != 1)
+            return false;
+
+        char path[MAX_PATH] = {};
+        bool layout = false;
+        const std::int32_t width = sheet.m_Width * m_Upscale;
+        const std::int32_t height = sheet.m_Height * m_Upscale;
+        FILE * file = OpenSheet( sheet.m_Checksum, m_Upscale, width, height, path, layout );
+
+        if (file == nullptr)
+            return false;
+
+        std::vector< std::uint8_t > pixels( static_cast<std::size_t>( width ) * height );
+        const bool valid = std::fread( pixels.data(), 1, pixels.size(), file ) == pixels.size();
+        std::fclose( file );
+
+        if (!valid)
+        {
+            LOG_WARN( "Text sheet {} does not match the {}x{} font, interpolating instead", path, width, height );
+            return false;
+        }
+
+        const std::int32_t size = sheet.m_TileSize * m_Upscale;
+        sheet.m_Levels.assign( static_cast<std::size_t>( sheet.m_TileCount ), {} );
+
+        for (std::int32_t t = 0; t < sheet.m_TileCount; ++t)
+        {
+            std::vector< std::uint8_t > & levels = sheet.m_Levels[t];
+            levels.assign( static_cast<std::size_t>( size ) * size, 0 );
+            const std::int32_t top = sheet.m_TileTops[t] * m_Upscale;
+
+            for (std::int32_t y = 0; y < size && top + y < height; ++y)
+            {
+                std::memcpy( &levels[static_cast<std::size_t>( y ) * size], &pixels[static_cast<std::size_t>( top + y ) * width],
+                    static_cast<std::size_t>( std::min( width, size ) ) );
+            }
+        }
+
+        LOG_INFO( "Text sheet {:08X} loaded from {}", sheet.m_Checksum, path );
+        return true;
+    }
+
+
     void TextQuality::BuildLevels(
         Sheet & sheet
     )
     {
+        if (LoadLevels( sheet ))
+            return;
+
         const std::int32_t factor = m_Upscale;
         const std::int32_t tile = sheet.m_TileSize;
         const std::int32_t size = tile * factor;
