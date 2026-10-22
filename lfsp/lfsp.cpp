@@ -323,6 +323,9 @@ namespace
     int g_trafficCount[4] = { 0, 2, 5, 8 };       // Verkehrsautos je Menüstufe Kein/Leicht/Mittel/Schwer (Spiel: 0/2/5/7)
     int g_trafficPorsches = 0;                    // Anteil Porsches im Verkehr in Prozent (0 = nur Verkehrsmodelle)
     int g_trafficOvertake = 0;                    // 1 = Verkehr überholt über die Gegenfahrbahn (Spiel), 0 = nie
+    // Lacke des Verkehrs (12.8): Farbe 0xRRGGBB mit Gewicht; leer = Zufallsfarbe des Spiels
+    std::vector<std::pair<std::uint32_t, int>> g_trafficColours;
+    int g_trafficColourRandom = 10;               // Anteil in Prozent, der die Zufallsfarbe des Spiels behält
     int g_trafficActive = 5;                      // höchstens gleichzeitig fahrende Verkehrsautos (Spiel: 5)
 
     // Mehr als 9 Autos (12.4, VERKEHR.md §6.6): Tabellen pro Auto liegen dann in eigenem Speicher.
@@ -715,6 +718,22 @@ namespace
         Log("Verkehr: Porsches %d %%", g_trafficPorsches);
         g_trafficOvertake = GetPrivateProfileIntA("Traffic", "Overtake", 0, ini) != 0;
         Log("Verkehr: Overtake %d", g_trafficOvertake);
+        // Colours = RRGGBB:Gewicht, ... (Vorgabe: Lacke, wie sie um 2000 auf der Straße häufig waren)
+        for (const auto & entry : ReadNameList(ini, "Traffic", "Colours",
+                 "F2F2F0:18, 151515:17, B8BCC0:17, 75787C:12, 45484C:6, 9E1B1B:9, 2B4A80:7, 162444:5, "
+                 "1E4D2B:4, C9B58C:2, 5A3E2B:1, D8B620:1"))
+        {
+            unsigned colour = 0;
+            int weight = 1;
+            if (std::sscanf(entry.c_str(), "%x:%d", &colour, &weight) >= 1 && weight > 0)
+            {
+                g_trafficColours.emplace_back(colour & 0xFFFFFF, weight);
+            }
+        }
+        g_trafficColourRandom = GetPrivateProfileIntA("Traffic", "ColourRandom", 10, ini);
+        g_trafficColourRandom = g_trafficColourRandom < 0 ? 0 : (g_trafficColourRandom > 100 ? 100 : g_trafficColourRandom);
+        Log("Verkehr: %u Lacke (leer = Zufallsfarbe des Spiels), %d %% Zufallsfarbe",
+            static_cast<unsigned>(g_trafficColours.size()), g_trafficColourRandom);
         g_trafficActive = GetPrivateProfileIntA("Traffic", "Active", 5, ini);
         g_trafficActive = g_trafficActive < 1 ? 1 : (g_trafficActive > g_maxCars - 1 ? g_maxCars - 1 : g_trafficActive);
         Log("Verkehr: gleichzeitig hoechstens %d", g_trafficActive);
@@ -4272,6 +4291,68 @@ namespace
         PatchBytes("Verkehr nicht ueber die Gegenfahrbahn", 0x401A21, kOld, kNew, sizeof(kOld));
     }
 
+    // 12.8: Lacke des Verkehrs (VERKEHR.md §3). Die Verkehrsschleife von FUN_004ECF00 würfelt vier Zufallsbytes
+    // (FUN_00538040) und gibt sie als alle vier Farben (ARGB, wie car[N].colorconfig in fe_out.txt) an FUN_004EE3B0
+    // (thiscall, ret 0x1C). LFSP leitet nur diesen Aufruf (0x4ED542) um und setzt eine Farbe aus [Traffic] Colours,
+    // nach Gewicht gezogen und in der Helligkeit leicht gestreut.
+    constexpr std::uintptr_t kCarInstance = 0x4EE3B0;
+    constexpr std::uintptr_t kTrafficColourCall = 0x4ED542;
+    std::uint32_t g_colourSeed = GetTickCount() | 1;
+
+    std::uint32_t PickTrafficColour()
+    {
+        int total = 0;
+        for (const auto & c : g_trafficColours)
+        {
+            total += c.second;
+        }
+        g_colourSeed = g_colourSeed * 1664525u + 1013904223u;
+        int roll = static_cast<int>((g_colourSeed >> 8) % static_cast<std::uint32_t>(total));
+        std::uint32_t rgb = g_trafficColours.back().first;
+        for (const auto & c : g_trafficColours)
+        {
+            if (roll < c.second)
+            {
+                rgb = c.first;
+                break;
+            }
+            roll -= c.second;
+        }
+        // Helligkeit ±6 %, damit gleiche Lacke nicht völlig gleich aussehen
+        g_colourSeed = g_colourSeed * 1664525u + 1013904223u;
+        const float scale = 0.94f + 0.12f * static_cast<float>((g_colourSeed >> 8) & 0xFF) / 255.0f;
+        std::uint32_t out = 0xFF000000u;
+        for (int shift = 0; shift <= 16; shift += 8)
+        {
+            const float v = static_cast<float>((rgb >> shift) & 0xFF) * scale;
+            out |= static_cast<std::uint32_t>(v > 255.0f ? 255.0f : v) << shift;
+        }
+        return out;
+    }
+
+    void * __fastcall HookTrafficColour(void * self, void *, int * rec, int c0, int c1, int c2, int c3, int p6, int p7)
+    {
+        using CarInstanceFn = void *(__fastcall *)(void *, void *, int *, int, int, int, int, int, int);
+        // ColourRandom: dieser Anteil behält die Zufallsfarbe des Spiels
+        g_colourSeed = g_colourSeed * 1664525u + 1013904223u;
+        if (static_cast<int>((g_colourSeed >> 8) % 100) < g_trafficColourRandom)
+        {
+            return reinterpret_cast<CarInstanceFn>(kCarInstance)(self, nullptr, rec, c0, c1, c2, c3, p6, p7);
+        }
+        const int colour = static_cast<int>(PickTrafficColour());
+        return reinterpret_cast<CarInstanceFn>(kCarInstance)(self, nullptr, rec, colour, colour, colour, colour, p6, p7);
+    }
+
+    void InstallTrafficColours()
+    {
+        static const unsigned char kOld[] = { 0xE8, 0x69, 0x0E, 0x00, 0x00 }; // CALL 0x4EE3B0
+        unsigned char call[5] = { 0xE8 };
+        const auto rel = static_cast<std::int32_t>(reinterpret_cast<std::uintptr_t>(&HookTrafficColour) -
+                                                   (kTrafficColourCall + 5));
+        std::memcpy(call + 1, &rel, 4);
+        PatchBytes("Verkehr Lacke", kTrafficColourCall, kOld, call, sizeof(call));
+    }
+
     void InstallTrafficModels()
     {
         static const unsigned char kModelBytes[] = { 0xA1, 0xFC, 0x19, 0x69, 0x00 };
@@ -4347,6 +4428,11 @@ namespace
         if (!g_trafficOvertake)
         {
             InstallTrafficOvertake();
+        }
+        // 12.8: Lacke des Verkehrs
+        if (!g_trafficColours.empty())
+        {
+            InstallTrafficColours();
         }
         // 12.3: Verkehrsmodelle zufällig
         if (g_trafficMeasure || g_trafficRandom || g_trafficPorsches > 0)
