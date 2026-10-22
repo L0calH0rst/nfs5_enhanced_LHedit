@@ -292,6 +292,7 @@ namespace
     // [Camera] Cinematic (11.1) und Action (11.2), doc/KAMERA.md
     int g_cineInCycle = 1;     // Cinematic als fünfte Ansicht der Kamerataste des Spiels (C)
     int g_cineKey = 0;         // eigene Taste zum Umschalten, 0 = keine
+    int g_cineEngine = 1;      // Motor in Cinematic laut wie in der Wiederholung
     int g_action = 1;          // Verfolgerkameras reagieren auf die Fahrt
     int g_actionKey = 0;       // Taste: Action an/aus, 0 = keine
     unsigned g_actionCams = (1u << 2) | (1u << 3) | (1u << 4); // Kameratypen mit Action-Verhalten (TailCam0..2)
@@ -307,6 +308,10 @@ namespace
     float g_actBuildUp = 1.2f; // Sekunden, bis der Kurven-Effekt beim Lenken aufgebaut ist
     float g_actSpeedBoost = 0.35f; // Kurven-Effekte bei hohem Tempo stärker (Anteil)
     float g_cockpitFov = 85.0f; // Innenansichten: FOV in Grad (Spiel: 75), 0 = unverändert
+    float g_replayMinFov = 30.0f; // Außenansichten/Wiederholung: Mindest-FOV in Grad, 0 = aus
+    DWORD g_fovLogTick = 0;
+    float g_engineRoofBoost = 0.6f;    // Innenansicht: Motor lauter bei offenem Verdeck (Anteil)
+    float g_engineWindowBoost = 0.25f; // Innenansicht: Motor lauter bei offenen Fenstern (Anteil)
     float g_actImpact = 1.0f;  // Stoß-Wackeln bei Aufprall und Landung, Anteil (0 = aus)
     bool g_cineKeyDown = false;
     bool g_actionKeyDown = false;
@@ -583,6 +588,7 @@ namespace
         };
         g_cineInCycle = GetPrivateProfileIntA("Camera", "CinematicInCycle", 1, ini);
         g_cineKey = readOptionalKey("CinematicKey");
+        g_cineEngine = GetPrivateProfileIntA("Camera", "CinematicEngineSound", 1, ini);
         g_action = GetPrivateProfileIntA("Camera", "Action", 1, ini);
         g_actionKey = readOptionalKey("ActionKey");
         char cams[128] = {};
@@ -619,7 +625,11 @@ namespace
         {
             g_cockpitFov = 40.0f;
         }
-        Log("Kamera: SpeedBoost %.2f, CockpitFov %.0f", g_actSpeedBoost, g_cockpitFov);
+        g_replayMinFov = readFloat("ReplayMinFov", "30", 0.0f, 90.0f);
+        g_engineRoofBoost = readFloat("EngineRoofBoost", "0.6", 0.0f, 2.0f);
+        g_engineWindowBoost = readFloat("EngineWindowBoost", "0.25", 0.0f, 2.0f);
+        Log("Kamera: EngineRoofBoost %.2f, EngineWindowBoost %.2f", g_engineRoofBoost, g_engineWindowBoost);
+        Log("Kamera: SpeedBoost %.2f, CockpitFov %.0f, ReplayMinFov %.0f", g_actSpeedBoost, g_cockpitFov, g_replayMinFov);
         g_actImpact = readFloat("ActionImpact", "1.0", 0.0f, 3.0f);
         Log("Kamera: Roll %.1f, Overshoot %.2f, BuildUp %.2f, Impact %.2f", g_actRoll, g_actOvershoot, g_actBuildUp, g_actImpact);
         Log("Kamera: CinematicInCycle %d, CinematicKey 0x%02X, Action %d, ActionKey 0x%02X, ActionCams 0x%X, "
@@ -2860,6 +2870,23 @@ namespace
     {
         RecordLamp(mirrored, model, number, lamp);
         const std::uint32_t on = reinterpret_cast<std::uint32_t (__thiscall *)(void *, unsigned)>(kLampTest)(model, number);
+        // Fernlicht ohne Lichtschalter (Lichthupe): Das Spiel setzt die Scheinwerfer-Leuchten 0/1 nur bei Licht an,
+        // LFSP meldet sie am Spielerauto an, solange das Fernlicht brennt und die Seite heil ist (wie 0x4398C6).
+        if ((number == 0 || number == 1) && (on & 0xFF) == 0 && g_highBeam > 0.0f && !InFrontend())
+        {
+            auto * car = CarAt(*reinterpret_cast<const std::uint32_t *>(0x65741C));
+            auto * state = At<unsigned char *>(model, kModelCar);
+            if (car && At<void *>(car, 0x74C) == model && state &&
+                At<float>(state, number == 0 ? 0x4E4 : 0x4EC) <= *reinterpret_cast<const float *>(0x5B2408))
+            {
+                auto * strength = At<float *>(model, 0x2D8);
+                if (strength && strength[number] < 1.0f)
+                {
+                    strength[number] = 1.0f;
+                }
+                return (on & ~0xFFu) | 1u;
+            }
+        }
         if (!g_thirdBrakeOnly || (on & 0xFF) == 0 || !lamp ||
             (number != 2 && number != 3 && number != 10 && number != 11) ||
             std::fabs(*reinterpret_cast<const float *>(lamp)) >= kThirdBrakeX || InFrontend())
@@ -3368,6 +3395,55 @@ namespace
         v[2] = -x * s + z * c;
     }
 
+    // Rest der View wie am Ende von FUN_00464f80 neu aufbauen (nach Änderung von Position/Drehung in out)
+    void RebuildView(float * out)
+    {
+        reinterpret_cast<TransposeFn>(0x532A00)(out + 3, out + 0xF);
+        std::memcpy(out + 0x18, out + 0xF, 9 * sizeof(float));
+        reinterpret_cast<SetRotFn>(0x466280)(out + 0x21, out + 3);
+        reinterpret_cast<SetPosFn>(0x466220)(out + 0x21, out);
+        const float negPos[3] = { -out[0], -out[1], -out[2] };
+        reinterpret_cast<VecMatFn>(0x532A40)(1, negPos, out + 0xF, out + 0xC);
+    }
+
+    // Motorgeräusch (doc/FENSTER-VERDECK.md §5a): FUN_004ac780(Platz, Lautstärke, Tonhöhe, ...) gibt den Motorton
+    // aus; in der Innenansicht des eigenen Autos hebt LFSP die Lautstärke bei offenem Verdeck/offenen Fenstern an.
+    using EngineVoiceFn = void (__cdecl *)(int, int, int, int, int, int, int, int);
+    EngineVoiceFn g_origEngineVoice = nullptr;
+    DWORD g_engineLogTick = 0;
+
+    void __cdecl HookEngineVoice(int slot, int volume, int pitch, int a4, int a5, int a6, int a7, int a8)
+    {
+        if (slot == 0 && volume > 0 && InRace() && !g_cineActive && CamType(0) <= 1)
+        {
+            unsigned char * car = *reinterpret_cast<unsigned char **>(kCamState);
+            void * model = car ? At<void *>(car, 0x74C) : nullptr;
+            const auto it = model ? g_models.find(model) : g_models.end();
+            if (it != g_models.end())
+            {
+                const ModelState & st = it->second;
+                const float max = SlotMax(model, kAnimSlotRoof);
+                const float roof =
+                    max > 0.0f ? std::fmin(std::fmax(SlotValue(model, kAnimSlotRoof) / max, 0.0f), 1.0f) : 0.0f;
+                float win = st.windowsOpen ? 1.0f : 0.0f;
+                if (st.shiftApplied > 0.0f && g_windowDepth > 0.0f)
+                {
+                    win = std::fmin(st.shiftApplied / g_windowDepth, 1.0f);
+                }
+                const float gain = 1.0f + roof * g_engineRoofBoost + win * g_engineWindowBoost;
+                const int boosted = std::min(127, static_cast<int>(volume * gain + 0.5f));
+                const DWORD tick = GetTickCount();
+                if (g_measure && tick - g_engineLogTick >= 1000)
+                {
+                    g_engineLogTick = tick;
+                    Log("Motor: Verdeck %.2f, Fenster %.2f -> Lautstaerke %d -> %d", roof, win, volume, boosted);
+                }
+                volume = boosted;
+            }
+        }
+        g_origEngineVoice(slot, volume, pitch, a4, a5, a6, a7, a8);
+    }
+
     void __cdecl HookCamView(int player, float * out, int mirror)
     {
         g_origCamView(player, out, mirror);
@@ -3386,6 +3462,34 @@ namespace
         if (g_cockpitFov > 0.0f && view && car && !g_cineActive && InRace() && CamType(0) <= 1)
         {
             At<float>(view, 0x130) = g_cockpitFov * 0.5f;
+        }
+        // Mindest-FOV für Außenansichten: der Zoom der Streckenkameras (FUN_00462b80) verengt das FOV
+        // mit dem Abstand ohne Untergrenze; gilt auch in der Wiederholung (daher nicht InRace()).
+        // (Heranfahren an das Auto statt weiterem FOV wurde getestet und verworfen, 👤.)
+        if (g_replayMinFov > 0.0f && view && car && !InFrontend() && CamType(0) > 1)
+        {
+            const float half = At<float>(view, 0x130);
+            const float minHalf = g_replayMinFov * 0.5f;
+            if (half > 0.1f && half < minHalf)
+            {
+                const DWORD tick = GetTickCount();
+                if (g_measure && tick - g_fovLogTick >= 1000)
+                {
+                    g_fovLogTick = tick;
+                    Log("MinFov: Typ %d, FOV/2 %.2f -> %.2f, Near %.2f", CamType(0), half, minHalf,
+                        At<float>(view, 0x18));
+                }
+                At<float>(view, 0x130) = minHalf;
+                // Near-Plane: der Zoom schiebt sie mit (37,5 - FOV/2) / (FOV/2) weit nach vorn (FUN_00462b80,
+                // view + 0x18); bei bis zu ~12 m schnitt sie das herangefahrene Auto und die Straße ab (👤 Screenshot).
+                // Hier denselben Wert wie das Spiel für das Mindest-FOV nehmen, dann FUN_004670f0 wie das Original.
+                const float nearPlane = minHalf < 37.5f ? std::fmax((37.5f - minHalf) / minHalf, 0.2f) : 0.5f;
+                if (At<float>(view, 0x18) > nearPlane)
+                {
+                    At<float>(view, 0x18) = nearPlane;
+                    reinterpret_cast<void (__fastcall *)(void *)>(0x4670F0)(view);
+                }
+            }
         }
         if (!g_action || !g_actionOn || g_cineActive || !InRace() || !car ||
             (g_actionCams & (1u << (CamType(0) & 31))) == 0)
@@ -3468,18 +3572,18 @@ namespace
         Smooth(s.latSlow, latN, 0.5f, dt);
         // v6p fühlte sich gummiartig an (👤): Anstoß 0,6 auch beim Aufrichten (zielte über die Mitte hinaus) und
         // Dämpfung 0,5. Seit v6q: Anstoß 0,3 nur beim Einlenken (Querbeschleunigung nimmt zu), Dämpfung 0,7;
-        // zurück zur Mitte langsam und ohne Überschwingen (2,2 rad/s, kritisch gedämpft).
+        // zurück zur Mitte ohne Überschwingen (kritisch gedämpft; 2,2 rad/s, seit v7y 2,7 rad/s, 👤: etwas schneller).
         // v6r: Mit der Tastatur springt die Querbeschleunigung fast sofort auf ihren Wert (👤: Einlenken zu heftig).
-        // Der Effekt baut sich deshalb über ActionBuildUp auf, wird also mit längerem Lenken stärker; Abbau 0,6 s.
+        // Der Effekt baut sich deshalb über ActionBuildUp auf, wird also mit längerem Lenken stärker; Abbau 0,5 s (bis v7x 0,6 s).
         const bool turningIn = latN * (latN - s.latSlow) > 0.0f;
         const bool building = std::fabs(latN) > std::fabs(s.latBuild) && latN * s.latBuild >= 0.0f;
-        Smooth(s.latBuild, latN, building ? g_actBuildUp : 0.6f, dt);
+        Smooth(s.latBuild, latN, building ? g_actBuildUp : 0.5f, dt);
         const float kick = turningIn ? 0.3f * g_actOvershoot : 0.0f;
         const float latT = std::fmax(-1.3f, std::fmin(s.latBuild + (latN - s.latSlow) * kick, 1.3f));
         const float zetaIn = std::fmax(0.35f, std::fmin(1.0f - 0.3f * g_actOvershoot, 1.0f));
         auto turnSpring = [&](float & value, float & speed, float target) {
             const bool back = std::fabs(target) < std::fabs(value);
-            Spring(value, speed, target, back ? 2.2f : 4.0f, back ? 1.0f : zetaIn, dt);
+            Spring(value, speed, target, back ? 2.7f : 4.0f, back ? 1.0f : zetaIn, dt);
         };
         // v6s: mit dem Tempo etwas stärker (ab 10 m/s, voll bei 60 m/s)
         const float speedN = std::fmax(0.0f, std::fmin((speed - 10.0f) / 50.0f, 1.0f));
@@ -3570,13 +3674,7 @@ namespace
             }
         }
 
-        // Rest der View wie am Ende von FUN_00464f80 neu aufbauen
-        reinterpret_cast<TransposeFn>(0x532A00)(out + 3, out + 0xF);
-        std::memcpy(out + 0x18, out + 0xF, 9 * sizeof(float));
-        reinterpret_cast<SetRotFn>(0x466280)(out + 0x21, out + 3);
-        reinterpret_cast<SetPosFn>(0x466220)(out + 0x21, out);
-        const float negPos[3] = { -out[0], -out[1], -out[2] };
-        reinterpret_cast<VecMatFn>(0x532A40)(1, negPos, out + 0xF, out + 0xC);
+        RebuildView(out);
         if (view)
         {
             At<float>(view, 0x130) *= 1.0f + s.fov;
@@ -4380,7 +4478,7 @@ namespace
         std::string base = path;
         base.erase(base.find_last_of('.'));
         g_log = std::fopen((base + ".log").c_str(), "w");
-        Log("LFSP v8a gestartet");
+        Log("LFSP v8d gestartet");
 
         auto * exe = reinterpret_cast<unsigned char *>(GetModuleHandleA(nullptr));
         const auto * dos = reinterpret_cast<IMAGE_DOS_HEADER *>(exe);
@@ -4440,8 +4538,25 @@ namespace
             InstallTrafficModels();
         }
 
+        // Motorgeräusch bei TV-Kamera (Typ 12): FUN_004aa050 nimmt die weit reichende Abschwächung der
+        // Wiederholung nur bei Modus [0x5E99F4] >= 2; im Rennen (Cinematic) fällt der Motor sonst mit
+        // 2048 / (Abstand + 2) ab, die Reifen (FUN_004a93c0) mit 8192 / (Abstand + 1). Typ 12 gibt es im
+        // Rennen nur durch Cinematic, daher fällt die Moduspruefung (jl) ganz weg.
+        if (g_engineRoofBoost > 0.0f || g_engineWindowBoost > 0.0f)
+        {
+            static const unsigned char kVoiceBytes[] = { 0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x1C };
+            InstallHook("Motorgeraeusch", 0x4AC780, kVoiceBytes, sizeof(kVoiceBytes),
+                        reinterpret_cast<void *>(&HookEngineVoice), reinterpret_cast<void **>(&g_origEngineVoice));
+        }
+        if (g_cineEngine)
+        {
+            static const unsigned char kOld[] = { 0x7C, 0x1A };
+            static const unsigned char kNew[] = { 0x90, 0x90 };
+            PatchBytes("Cinematic Motorgeraeusch", 0x4AA083, kOld, kNew, sizeof(kOld));
+        }
+
         // 11.1/11.2: Kamera (Takt für Cinematic und Tasten, View-Aufbau für Action, Kamerataste für den Wechsel)
-        if (g_cineInCycle || g_cineKey || g_action || g_cockpitFov > 0.0f)
+        if (g_cineInCycle || g_cineKey || g_action || g_cockpitFov > 0.0f || g_replayMinFov > 0.0f)
         {
             static const unsigned char kCamTickBytes[]  = { 0xA0, 0x40, 0x7F, 0x62, 0x00 };
             static const unsigned char kCamViewBytes[]  = { 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00 };
