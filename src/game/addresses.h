@@ -622,6 +622,18 @@ namespace nfs5::game
 
         // 'jle' to 'jl', the loop runs once at LOD 0 and is unchanged otherwise.
         inline constexpr std::uint8_t WHEEL_SUSPENSION_LOOP_JL[] = { 0x85, 0xC0, 0x7C };
+
+        // Lamp glow sprite in 'sub_43CDD0' (headlights, tail lights): depth bias
+        // round( -20000 * brightness * [[628130] + C] / distance^2 ) stored at [ebp-14] and
+        // handed to the sprite state ('sub_537A60'). Beyond about 90 m it rounds to 0 and the
+        // glow z-fights with the lamp lens of the car model, parts of it turn black.
+        inline constexpr Site LAMP_GLOW_DEPTH_BIAS =
+        {
+            0x0043D452, "8B 45 EC 8D 8D A0 FE FF FF 50"
+        };
+
+        // Offset of the rounded bias from 'ebp'.
+        inline constexpr std::ptrdiff_t LAMP_GLOW_DEPTH_BIAS_EBP = -0x14;
     }
 
     namespace text
