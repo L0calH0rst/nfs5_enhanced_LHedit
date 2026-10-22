@@ -64,7 +64,7 @@ Unlike the original mod which intentionally kept vanilla visuals unchanged, **LH
 Unzip the release package into a folder.
 
 ### 2. Copy into game folder
-Copy `nfs5_enhanced.asi`, `nfs5_enhanced.ini`, and `SDL3.dll` next to `Porsche.exe`, and `dx11z.dll` into the `Drivers` directory of the game.
+Copy `nfs5_enhanced.asi`, `nfs5_enhanced.ini`, `lfsp.asi` (from `lfsp/`), `lfsp.ini` (from `config/`) and `SDL3.dll` next to `Porsche.exe`, and `dx11z.dll` into the `Drivers` directory of the game.
 
 ### 3. Play
 Run `Porsche.exe`. Options are configured in `nfs5_enhanced.ini`.

@@ -75,6 +75,7 @@ else()
 endif()
 
 add_subdirectory( drivers/dx11 )
+add_subdirectory( lfsp )
 
 # The 32 bit 'SDL3.dll' is copied next to the ASI so a build folder can be dropped into the game.
 add_custom_command( TARGET nfs5_enhanced POST_BUILD
