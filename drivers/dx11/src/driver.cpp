@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 
 #include "formats.h"
 #include "shaders.h"
@@ -432,7 +433,7 @@ namespace dx11z
         m_Device->CreateBuffer( &desc, nullptr, m_PresentConstants.Put() );
         desc.ByteWidth = sizeof( ClearConstants );
         m_Device->CreateBuffer( &desc, nullptr, m_ClearConstants.Put() );
-        desc.ByteWidth = 160; // MirrorConstants of the scene shader, also the tint of the reflection composite
+        desc.ByteWidth = 240; // MirrorConstants of the scene shader, also the constants of the reflection composite
         m_Device->CreateBuffer( &desc, nullptr, m_MirrorConstants.Put() );
 
         D3D11_SAMPLER_DESC sampler = {};
@@ -503,10 +504,11 @@ namespace dx11z
             return false;
         }
 
-        auto build = [&] ( const char * source, std::size_t length, const char * entry, const char * profile, ComPtr<ID3DBlob> & blob )
+        auto build = [&] ( const char * source, std::size_t length, const char * entry, const char * profile, ComPtr<ID3DBlob> & blob,
+            const D3D_SHADER_MACRO * defines = nullptr )
         {
             ComPtr<ID3DBlob> errors;
-            const HRESULT hr = compile( source, length, nullptr, nullptr, nullptr, entry, profile, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, blob.Put(),
+            const HRESULT hr = compile( source, length, nullptr, defines, nullptr, entry, profile, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, blob.Put(),
                 errors.Put() );
 
             if (FAILED( hr ))
@@ -569,6 +571,11 @@ namespace dx11z
         {
             m_Device->CreateVertexShader( vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, m_ReflCompositeVs.Put() );
             m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_ReflCompositePs.Put() );
+        }
+        const D3D_SHADER_MACRO multisampled[] = { { "STENCIL_MS", "1" }, { nullptr, nullptr } };
+        if (build( shaders::REFLECT, sizeof( shaders::REFLECT ) - 1, "MainPS", "ps_4_1", ps, multisampled ))
+        {
+            m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_ReflCompositeMsPs.Put() );
         }
 
         return m_SceneVs && m_ScenePs && m_SceneLayout && m_PresentVs && m_PresentPs && m_ClearVs && m_ClearPs;
@@ -1444,7 +1451,18 @@ namespace dx11z
             m_ConfigReflectionStrength = std::clamp( static_cast<float>(std::atof( water_value( "ReflectionStrength", "0.6" ).c_str() )), 0.0f, 1.0f );
             m_ConfigReflectionTint = static_cast<std::uint32_t>(std::strtoul( water_value( "ReflectionTint", "FFFFFF" ).c_str(), nullptr, 16 )) & 0xFFFFFFu;
             m_ConfigGuardBand = ::GetPrivateProfileIntA( "World", "GuardBand", 1, lights_ini.c_str() ) != 0;
-            m_ConfigReflectionDebug = std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Water", "ReflectionDebug", 0, lights_ini.c_str() )), 0, 2 );
+            m_ConfigReflectionDebug = std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Water", "ReflectionDebug", 0, lights_ini.c_str() )), 0, 4 );
+            m_ConfigReflectionTwoSided = std::clamp( std::atoi( water_value( "ReflectionTwoSided", "1" ).c_str() ), 0, 1 );
+            m_ConfigReflectionWaves = std::clamp( static_cast<float>(std::atof( water_value( "ReflectionWaves", "3" ).c_str() )), 0.0f, 20.0f );
+            m_ConfigReflectionBlur = std::clamp( static_cast<float>(std::atof( water_value( "ReflectionBlur", "2" ).c_str() )), 0.0f, 20.0f );
+            m_ConfigReflectionFresnel = std::clamp( static_cast<float>(std::atof( water_value( "ReflectionFresnel", "0.3" ).c_str() )), 0.0f, 1.0f );
+            m_ConfigShoreFade = std::clamp( static_cast<float>(std::atof( water_value( "ShoreFade", "0.27" ).c_str() )), 0.0f, 0.9f );
+            m_ConfigWaterFarFade = std::clamp( static_cast<float>(std::atof( water_value( "FarFade", "0.3" ).c_str() )), 0.0f, 0.9f );
+            m_ConfigWaterEvenColour = std::clamp( std::atoi( water_value( "WaterEvenColour", "1" ).c_str() ), 0, 1 );
+            m_ConfigReflectionScale = std::clamp( static_cast<float>(std::atof( water_value( "ReflectionScale", "0.5" ).c_str() )), 0.25f, 1.0f );
+            m_ConfigReflectionGrazing = std::clamp( static_cast<float>(std::atof( water_value( "ReflectionGrazing", "1" ).c_str() )), 0.0f, 1.0f );
+            m_ConfigWaterEdgeFade = std::clamp( static_cast<float>(std::atof( water_value( "EdgeFade", "40" ).c_str() )), 0.0f, 200.0f );
+            m_ConfigReflectionSky = std::clamp( std::atoi( water_value( "ReflectionSky", "1" ).c_str() ), 0, 1 );
             m_ConfigRemoveBaked = std::clamp( std::atoi( water_value( "RemoveBakedReflections", "1" ).c_str() ), 0, 1 );
 
             const auto parse_hashes = [&]( const char * key, const char * fallback, std::vector<std::uint32_t> & out ) {
@@ -1464,6 +1482,9 @@ namespace dx11z
             Log( "Config water: ShoreTextures %s", shore.c_str() );
             // Only these textures are the game's baked reflections; other blended draws of list 1 (trees on rocks) stay.
             const std::string baked = parse_hashes( "BakedTextures", "41C66523,92CDBBAB", m_ConfigBakedTextures );
+            const std::string skip = parse_hashes( "ReflectionSkip", "", m_ConfigReflectionSkip );
+            const std::string far_water = parse_hashes( "FarWaterTextures", "28884AC8", m_ConfigFarWaterTextures );
+            Log( "Config water: EdgeFade %.0f, ReflectionSkip %s, FarWaterTextures %s", m_ConfigWaterEdgeFade, skip.c_str(), far_water.c_str() );
 
             Log( "Config GuardBand %d", m_ConfigGuardBand ? 1 : 0 );
             Log( "Config water: Reflections %d strength %.2f tint %06X RemoveBakedReflections %d (%s), %zu water textures (%s)", m_ConfigReflections,
@@ -1729,6 +1750,12 @@ namespace dx11z
         m_ReflBlends.clear();
         m_ReflNoColour.Reset();
         m_ReflShoreDebug.Reset();
+        m_ReflSky.Reset();
+        m_ReflSkyView.Reset();
+        m_ReflWeightRtv.Reset();
+        m_ReflWeightSrv.Reset();
+        m_ReflWeight.Reset();
+        m_ReflWeightBlend.Reset();
         m_ReflDepthStates.clear();
         m_ReflRasters.clear();
         m_ReflTargetSrv.Reset();
@@ -1741,6 +1768,7 @@ namespace dx11z
         m_ReflBatches.clear();
         m_ReflUsed = 0;
         m_ReflWater.clear();
+        m_ReflWaterHash.clear();
         m_DrawConstants.Reset();
         m_PresentConstants.Reset();
         m_ClearConstants.Reset();
@@ -1888,6 +1916,7 @@ namespace dx11z
         m_ReflUsed = 0;
         m_ReflSkyCount = 0;
         m_ReflSkyPhase = true;
+        m_ReflSkyRun = false;
         LogLampTable();
         ProbeFlip();
 
@@ -4102,6 +4131,12 @@ namespace dx11z
         constants.m_Flags[2] = render[rs::ALPHATESTENABLE] != 0 ? static_cast<std::int32_t>(render[rs::ALPHAFUNC]) : 8;
         constants.m_Flags[3] = (m_Bound[0] != nullptr ? 1 : 0) | (m_Bound[1] != nullptr ? 2 : 0);
         constants.m_AlphaRef[0] = static_cast<float>(render[rs::ALPHAREF] & 0xFF) / 255.0f;
+        const bool far_fade = m_ConfigWaterFarFade > 0.0f && m_ReflWaterFar > 0.0f && m_ConfigReflections && m_QueueList > 0 && IsWaterTexture();
+        constants.m_AlphaRef[2] = far_fade ? m_ReflWaterFar * (1.0f - m_ConfigWaterFarFade) : 0.0f;
+        constants.m_AlphaRef[3] = far_fade ? m_ReflWaterFar : 0.0f;
+        constants.m_AlphaRef[1] = m_ConfigShoreFade > 0.0f && m_Bound[0] != nullptr &&
+            std::find( m_ConfigShoreTextures.begin(), m_ConfigShoreTextures.end(), m_Bound[0]->m_Hash ) != m_ConfigShoreTextures.end()
+            ? m_ConfigShoreFade : 0.0f;
         constants.m_Debug[0] = m_ConfigMeasure == 2 && m_MeasureSuspect ? 1.0f : 0.0f;
         constants.m_Debug[1] = static_cast<float>(m_EdgePass);
         constants.m_Debug[2] = static_cast<float>(m_ConfigAlphaEdgeRef) / 255.0f;
@@ -4326,9 +4361,11 @@ namespace dx11z
             desc.FrontFace.StencilPassOp = ToStencilOp( render[rs::STENCILPASS] );
             if (water_stencil != 0)
             {
+                // Water sets bit 1; solid draws clear it and set bit 2, so stencil 0 stays where only the sky is.
+                // Solid draws without depth writing (B21) also set bit 3: the depth there is of what lies behind.
                 desc.StencilEnable = TRUE;
                 desc.StencilReadMask = 1;
-                desc.StencilWriteMask = 1;
+                desc.StencilWriteMask = water_stencil == 1 ? 7 : 1;
                 desc.FrontFace.StencilFunc = D3D11_COMPARISON_ALWAYS;
                 desc.FrontFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
                 desc.FrontFace.StencilDepthFailOp = D3D11_STENCIL_OP_KEEP;
@@ -4338,7 +4375,7 @@ namespace dx11z
             m_Device->CreateDepthStencilState( &desc, depth.Put() );
         }
 
-        m_Context->OMSetDepthStencilState( depth.Get(), water_stencil != 0 ? (water_stencil == 2 ? 1u : 0u) : render[rs::STENCILREF] & 0xFF );
+        m_Context->OMSetDepthStencilState( depth.Get(), water_stencil != 0 ? (water_stencil == 2 ? 1u : (depth_write ? 2u : 6u)) : render[rs::STENCILREF] & 0xFF );
 
         // Rasterizer, D3D7 culls by screen winding like D3D11 with clockwise front faces.
         std::uint32_t cull_mode = render[rs::CULLMODE];
@@ -4464,7 +4501,26 @@ namespace dx11z
         }
 
         const bool water = reflections && IsWaterTexture();
-        if (water)
+        // '[Water] WaterEvenColour': the game lights the water near the player brighter than further out (a circle
+        // around the car). All water vertices get one colour, the running mean of the water drawn so far.
+        if (water && m_ConfigWaterEvenColour && !m_BatchVertices.empty())
+        {
+            double sum[3] = {};
+            for (const TlVertex & v : m_BatchVertices)
+                for (int c = 0; c < 3; ++c)
+                    sum[c] += (v.m_Diffuse >> (16 - c * 8)) & 0xFF;
+            const double n = static_cast<double>(m_BatchVertices.size());
+            for (int c = 0; c < 3; ++c)
+                m_WaterColour[c] = m_WaterColour[c] < 0.0f ? static_cast<float>(sum[c] / n)
+                    : m_WaterColour[c] * 0.98f + static_cast<float>(sum[c] / n) * 0.02f;
+            const std::uint32_t rgb = (static_cast<std::uint32_t>(std::lround( m_WaterColour[0] )) << 16) |
+                (static_cast<std::uint32_t>(std::lround( m_WaterColour[1] )) << 8) | static_cast<std::uint32_t>(std::lround( m_WaterColour[2] ));
+            for (TlVertex & v : m_BatchVertices)
+                v.m_Diffuse = (v.m_Diffuse & 0xFF000000u) | rgb;
+        }
+
+        // The plane is fitted to the water itself; the far sea of some tracks is not flat (B15, jumps).
+        if (water && !IsFarWaterTexture())
         {
             constexpr std::size_t MAX_WATER = 3 * 8192;
             for (std::size_t i = 0; i + 2 < m_BatchIndices.size() && m_ReflWater.size() + 3 <= MAX_WATER; i += 3)
@@ -4478,7 +4534,10 @@ namespace dx11z
                     corners[k] = { v.m_X, v.m_Y, valid ? 1.0f / v.m_Rhw : 0.0f };
                 }
                 if (valid)
+                {
                     m_ReflWater.insert( m_ReflWater.end(), corners.begin(), corners.end() );
+                    m_ReflWaterHash.push_back( m_Bound[0] != nullptr ? m_Bound[0]->m_Hash : 0 );
+                }
             }
         }
 
@@ -4554,12 +4613,25 @@ namespace dx11z
             render[rs::ZENABLE] != 0 && m_Bound[0] != nullptr &&
             std::find( m_ConfigShoreTextures.begin(), m_ConfigShoreTextures.end(), m_Bound[0]->m_Hash ) != m_ConfigShoreTextures.end())
         {
+            // The whole shore joins the mask; how much it mirrors comes from its transparency (weight target),
+            // so the reflection fades in with the shore instead of starting at a hard line.
             m_ShorePass = true;
-            m_EdgePass = 2;
+            m_EdgePass = m_ReflWeightRtv ? 0 : 2;
             ++m_ReflShoreDraws;
             ApplyPipeline();
             m_Context->DrawIndexed( static_cast<UINT>(m_BatchIndices.size()), 0, 0 );
             m_ShorePass = false;
+
+            if (m_ReflWeightRtv && m_ReflWeightBlend)
+            {
+                ID3D11RenderTargetView * weight = m_ReflWeightRtv.Get();
+                m_Context->OMSetRenderTargets( 1, &weight, nullptr );
+                const float factor[4] = {};
+                m_Context->OMSetBlendState( m_ReflWeightBlend.Get(), factor, 0xFFFFFFFF );
+                m_Context->DrawIndexed( static_cast<UINT>(m_BatchIndices.size()), 0, 0 );
+                ID3D11RenderTargetView * frame = m_FrameView.Get();
+                m_Context->OMSetRenderTargets( 1, &frame, m_DepthView.Get() );
+            }
         }
 
         // '[Dx11] ForceTwoSided', the faces the game culls, pushed back.
@@ -7274,18 +7346,204 @@ namespace dx11z
         // switched to the next view (rear view mirror after the main view).
         if (previous == 0 && list > 0)
         {
+            m_ReflSkyRun = false;
             if (m_ReflSkyPhase)
             {
                 m_ReflSkyPhase = false;
                 m_ReflSkyCount = m_ReflUsed;
+                m_ReflSkyRun = m_ConfigReflectionSky != 0;
             }
             m_ReflShoreDraws = 0;
+            PrepareReflWeight();
             m_ReflClip = ScaledClip();
             m_ReflCameraValid = ReadCamera( m_ReflClipOfView.data(), m_ReflViewOfClip.data(), m_ReflViewport.data() );
         }
 
         if (previous > 0 && list == 0)
             DrawReflections();
+    }
+
+
+    void Driver::PrepareReflWeight()
+    {
+        if (m_ConfigShoreTextures.empty() || m_RenderWidth <= 0 || m_RenderHeight <= 0)
+            return;
+
+        D3D11_TEXTURE2D_DESC have = {};
+        if (m_ReflWeight)
+            m_ReflWeight->GetDesc( &have );
+
+        if (!m_ReflWeight || have.Width != static_cast<UINT>(m_RenderWidth) || have.Height != static_cast<UINT>(m_RenderHeight))
+        {
+            m_ReflWeightRtv.Reset();
+            m_ReflWeightSrv.Reset();
+            m_ReflWeight.Reset();
+            D3D11_TEXTURE2D_DESC desc = {};
+            desc.Width = static_cast<UINT>(m_RenderWidth);
+            desc.Height = static_cast<UINT>(m_RenderHeight);
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_R8_UNORM;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED( m_Device->CreateTexture2D( &desc, nullptr, m_ReflWeight.Put() ) ) ||
+                FAILED( m_Device->CreateRenderTargetView( m_ReflWeight.Get(), nullptr, m_ReflWeightRtv.Put() ) ) ||
+                FAILED( m_Device->CreateShaderResourceView( m_ReflWeight.Get(), nullptr, m_ReflWeightSrv.Put() ) ))
+            {
+                m_ReflWeightRtv.Reset();
+                m_ReflWeightSrv.Reset();
+                m_ReflWeight.Reset();
+                return;
+            }
+        }
+
+        if (!m_ReflWeightBlend)
+        {
+            // weight = weight * (1 - alpha), the target starts at 1.
+            D3D11_BLEND_DESC desc = {};
+            auto & target = desc.RenderTarget[0];
+            target.BlendEnable = TRUE;
+            target.SrcBlend = D3D11_BLEND_ZERO;
+            target.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+            target.BlendOp = D3D11_BLEND_OP_ADD;
+            target.SrcBlendAlpha = D3D11_BLEND_ZERO;
+            target.DestBlendAlpha = D3D11_BLEND_ONE;
+            target.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            target.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED;
+            m_Device->CreateBlendState( &desc, m_ReflWeightBlend.Put() );
+        }
+
+        const float one[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        m_Context->ClearRenderTargetView( m_ReflWeightRtv.Get(), one );
+    }
+
+
+    bool Driver::PrepareSkyImage()
+    {
+        if (m_RenderWidth <= 0 || m_RenderHeight <= 0)
+            return false;
+
+        D3D11_TEXTURE2D_DESC have = {};
+        if (m_ReflSky)
+            m_ReflSky->GetDesc( &have );
+
+        if (!m_ReflSky || have.Width != static_cast<UINT>(m_RenderWidth) || have.Height != static_cast<UINT>(m_RenderHeight))
+        {
+            m_ReflSkyRtv.Reset();
+            m_ReflSkyView.Reset();
+            m_ReflSky.Reset();
+            D3D11_TEXTURE2D_DESC desc = {};
+            desc.Width = static_cast<UINT>(m_RenderWidth);
+            desc.Height = static_cast<UINT>(m_RenderHeight);
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED( m_Device->CreateTexture2D( &desc, nullptr, m_ReflSky.Put() ) ) ||
+                FAILED( m_Device->CreateRenderTargetView( m_ReflSky.Get(), nullptr, m_ReflSkyRtv.Put() ) ) ||
+                FAILED( m_Device->CreateShaderResourceView( m_ReflSky.Get(), nullptr, m_ReflSkyView.Put() ) ))
+            {
+                m_ReflSky.Reset();
+                m_ReflSkyRtv.Reset();
+                m_ReflSkyView.Reset();
+                return false;
+            }
+        }
+        return true;
+    }
+
+
+    bool Driver::CopyFrame()
+    {
+        if (!m_Frame)
+            return false;
+
+        D3D11_TEXTURE2D_DESC desc = {};
+        m_Frame->GetDesc( &desc );
+
+        D3D11_TEXTURE2D_DESC have = {};
+        if (m_ReflFrameCopy)
+            m_ReflFrameCopy->GetDesc( &have );
+
+        if (!m_ReflFrameCopy || have.Width != desc.Width || have.Height != desc.Height || have.Format != desc.Format)
+        {
+            m_ReflFrameCopyView.Reset();
+            m_ReflFrameCopy.Reset();
+            desc.SampleDesc.Count = 1;
+            desc.SampleDesc.Quality = 0;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            desc.CPUAccessFlags = 0;
+            desc.MiscFlags = 0;
+            if (FAILED( m_Device->CreateTexture2D( &desc, nullptr, m_ReflFrameCopy.Put() ) ) ||
+                FAILED( m_Device->CreateShaderResourceView( m_ReflFrameCopy.Get(), nullptr, m_ReflFrameCopyView.Put() ) ))
+            {
+                m_ReflFrameCopy.Reset();
+                m_ReflFrameCopyView.Reset();
+                return false;
+            }
+            m_Frame->GetDesc( &desc );
+        }
+
+        if (desc.SampleDesc.Count > 1)
+            m_Context->ResolveSubresource( m_ReflFrameCopy.Get(), 0, m_Frame.Get(), 0, desc.Format );
+        else
+            m_Context->CopyResource( m_ReflFrameCopy.Get(), m_Frame.Get() );
+        return true;
+    }
+
+
+    bool Driver::CopyStencil()
+    {
+        if (!m_Depth)
+            return false;
+
+        D3D11_TEXTURE2D_DESC desc = {};
+        m_Depth->GetDesc( &desc );
+
+        D3D11_TEXTURE2D_DESC have = {};
+        if (m_ReflStencil)
+            m_ReflStencil->GetDesc( &have );
+
+        if (!m_ReflStencil || have.Width != desc.Width || have.Height != desc.Height || have.SampleDesc.Count != desc.SampleDesc.Count)
+        {
+            m_ReflStencilView.Reset();
+            m_ReflDepthCopyView.Reset();
+            m_ReflStencil.Reset();
+            // Same typeless group as D24S8, so the whole depth buffer copies over; read as stencil and as depth.
+            desc.Format = DXGI_FORMAT_R24G8_TYPELESS;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            desc.CPUAccessFlags = 0;
+            desc.MiscFlags = 0;
+            D3D11_SHADER_RESOURCE_VIEW_DESC view = {};
+            view.Format = DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+            if (desc.SampleDesc.Count > 1)
+            {
+                view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
+            }
+            else
+            {
+                view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                view.Texture2D.MipLevels = 1;
+            }
+            D3D11_SHADER_RESOURCE_VIEW_DESC depth_view = view;
+            depth_view.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+            if (FAILED( m_Device->CreateTexture2D( &desc, nullptr, m_ReflStencil.Put() ) ) ||
+                FAILED( m_Device->CreateShaderResourceView( m_ReflStencil.Get(), &view, m_ReflStencilView.Put() ) ) ||
+                FAILED( m_Device->CreateShaderResourceView( m_ReflStencil.Get(), &depth_view, m_ReflDepthCopyView.Put() ) ))
+            {
+                m_ReflStencil.Reset();
+                m_ReflStencilView.Reset();
+                m_ReflDepthCopyView.Reset();
+                Log( "Water: depth and stencil copy %ux%u x%u failed", desc.Width, desc.Height, desc.SampleDesc.Count );
+                return false;
+            }
+        }
+
+        m_Context->CopyResource( m_ReflStencil.Get(), m_Depth.Get() );
+        return true;
     }
 
 
@@ -7296,7 +7554,15 @@ namespace dx11z
         if (texture == nullptr)
             return false;
 
-        return std::find( m_ConfigWaterTextures.begin(), m_ConfigWaterTextures.end(), texture->m_Hash ) != m_ConfigWaterTextures.end();
+        return std::find( m_ConfigWaterTextures.begin(), m_ConfigWaterTextures.end(), texture->m_Hash ) != m_ConfigWaterTextures.end() ||
+            std::find( m_ConfigFarWaterTextures.begin(), m_ConfigFarWaterTextures.end(), texture->m_Hash ) != m_ConfigFarWaterTextures.end();
+    }
+
+    bool Driver::IsFarWaterTexture() const
+    {
+        const Texture * texture = m_Bound[0];
+        return texture != nullptr &&
+            std::find( m_ConfigFarWaterTextures.begin(), m_ConfigFarWaterTextures.end(), texture->m_Hash ) != m_ConfigFarWaterTextures.end();
     }
 
     bool Driver::IsBakedTexture() const
@@ -7348,6 +7614,10 @@ namespace dx11z
         if (m_ReflUsed >= MAX_BATCHES || m_ReflConstants.empty())
             return;
 
+        const std::uint32_t hash = m_Bound[0] != nullptr ? m_Bound[0]->m_Hash : 0;
+        if (std::find( m_ConfigReflectionSkip.begin(), m_ConfigReflectionSkip.end(), hash ) != m_ConfigReflectionSkip.end())
+            return;
+
         if (m_ReflUsed == m_ReflBatches.size())
             m_ReflBatches.emplace_back();
 
@@ -7359,6 +7629,7 @@ namespace dx11z
         batch.m_BlendKey = render[rs::ALPHABLENDENABLE] != 0 ? 1u : 0u;
         batch.m_DepthWrite = render[rs::ZWRITEENABLE] != 0;
         batch.m_Cull = render[rs::CULLMODE];
+        batch.m_Hash = hash;
 
         for (int stage = 0; stage < 2; ++stage)
         {
@@ -7378,8 +7649,9 @@ namespace dx11z
         struct ClearWater
         {
             std::vector<std::array<float, 3>> & m_Water;
-            ~ClearWater() { m_Water.clear(); }
-        } clear_water{ m_ReflWater };
+            std::vector<std::uint32_t> & m_Hash;
+            ~ClearWater() { m_Water.clear(); m_Hash.clear(); }
+        } clear_water{ m_ReflWater, m_ReflWaterHash };
 
         if (batches == 0 || water == 0 || !m_FrameView || !m_DepthView)
         {
@@ -7420,6 +7692,15 @@ namespace dx11z
         double normal[3] = {};
         double centre[3] = {};
         double total_weight = 0.0;
+
+        // Far end of the water surface (largest w) for '[Water] FarFade', main view only, smoothed.
+        if (m_ReflSkyRun)
+        {
+            float farthest = 0.0f;
+            for (const auto & corner : m_ReflWater)
+                farthest = std::max( farthest, corner[2] );
+            m_ReflWaterFar = m_ReflWaterFar <= 0.0f ? farthest : m_ReflWaterFar * 0.9f + farthest * 0.1f;
+        }
 
         for (std::size_t t = 0; t < water; ++t)
         {
@@ -7478,13 +7759,107 @@ namespace dx11z
         if (m_ReflLogged < 6 || trace)
         {
             ++m_ReflLogged;
-            Log( "Water: reflection #%llu flip %u, %zu draws, %zu water triangles, %u shore draws, plane %.3f %.3f %.3f %.2f, viewport %.1f %.1f %.1f %.1f, clip %ld %ld %ld %ld",
-                static_cast<unsigned long long>(m_ReflFrames), m_FlipCount, batches, water, m_ReflShoreDraws, plane[0], plane[1], plane[2], plane[3],
+            Log( "Water: reflection #%llu flip %u, %zu draws, %zu water triangles, %u shore draws, sky %d, plane %.3f %.3f %.3f %.2f, viewport %.1f %.1f %.1f %.1f, clip %ld %ld %ld %ld",
+                static_cast<unsigned long long>(m_ReflFrames), m_FlipCount, batches, water, m_ReflShoreDraws, m_ReflSkyRun && m_ReflSkyView ? 1 : 0, plane[0], plane[1], plane[2], plane[3],
                 viewport[0], viewport[1], viewport[2], viewport[3], m_ReflClip.left, m_ReflClip.top, m_ReflClip.right, m_ReflClip.bottom );
         }
 
-        // Target and depth of the reflection, one sample, the render size.
-        if (m_ReflWidth != m_RenderWidth || m_ReflHeight != m_RenderHeight || !m_ReflTargetView)
+        // First frame of the trace: the kept draws by texture, where they are on screen, their w and z (z against
+        // 1/w as z = a + b/w; a draw off that line has a w of its own) and their height above the plane.
+        if (trace && m_ReflTrace == 119)
+        {
+            struct Group
+            {
+                std::size_t m_Batches = 0, m_Triangles = 0, m_Count = 0;
+                double m_X[2] = { 1e30, -1e30 }, m_Y[2] = { 1e30, -1e30 }, m_W[2] = { 1e30, -1e30 }, m_Z[2] = { 1e30, -1e30 };
+                double m_Above[2] = { 1e30, -1e30 };
+                double m_R = 0, m_Zs = 0, m_RR = 0, m_RZ = 0;
+            };
+            std::map<std::uint32_t, Group> groups;
+            for (std::size_t i = std::min( m_ReflSkyCount, batches ); i < batches; ++i)
+            {
+                const MirrorBatch & batch = m_ReflBatches[i];
+                Group & group = groups[batch.m_Hash];
+                ++group.m_Batches;
+                group.m_Triangles += batch.m_Indices.size() / 3;
+                for (const TlVertex & v : batch.m_Vertices)
+                {
+                    if (!(v.m_Rhw > 0.0f && v.m_Rhw < 1e30f))
+                        continue;
+                    const double w = 1.0 / v.m_Rhw;
+                    double view[3];
+                    to_view( { v.m_X, v.m_Y, static_cast<float>(w) }, view );
+                    const double above = plane[0] * view[0] + plane[1] * view[1] + plane[2] * view[2] + plane[3];
+                    const double values[5] = { v.m_X, v.m_Y, w, v.m_Z, above };
+                    double * ranges[5] = { group.m_X, group.m_Y, group.m_W, group.m_Z, group.m_Above };
+                    for (int k = 0; k < 5; ++k)
+                    {
+                        ranges[k][0] = std::min( ranges[k][0], values[k] );
+                        ranges[k][1] = std::max( ranges[k][1], values[k] );
+                    }
+                    ++group.m_Count;
+                    group.m_R += v.m_Rhw;
+                    group.m_Zs += v.m_Z;
+                    group.m_RR += static_cast<double>(v.m_Rhw) * v.m_Rhw;
+                    group.m_RZ += static_cast<double>(v.m_Rhw) * v.m_Z;
+                }
+            }
+            // The water triangles of the plane fit by texture: w, distance of their corners to the plane, share of the fit.
+            struct Fit
+            {
+                std::size_t m_Triangles = 0;
+                double m_W[2] = { 1e30, -1e30 }, m_Above[2] = { 1e30, -1e30 };
+                double m_Weight = 0.0;
+            };
+            std::map<std::uint32_t, Fit> fits;
+            double fit_total = 0.0;
+            for (std::size_t t = 0; t < water && t < m_ReflWaterHash.size(); ++t)
+            {
+                Fit & fit = fits[m_ReflWaterHash[t]];
+                ++fit.m_Triangles;
+                double mid[3] = {};
+                for (int k = 0; k < 3; ++k)
+                {
+                    const auto & corner = m_ReflWater[t * 3 + k];
+                    double view[3];
+                    to_view( corner, view );
+                    const double above = plane[0] * view[0] + plane[1] * view[1] + plane[2] * view[2] + plane[3];
+                    fit.m_W[0] = std::min( fit.m_W[0], static_cast<double>(corner[2]) );
+                    fit.m_W[1] = std::max( fit.m_W[1], static_cast<double>(corner[2]) );
+                    fit.m_Above[0] = std::min( fit.m_Above[0], above );
+                    fit.m_Above[1] = std::max( fit.m_Above[1], above );
+                    for (int j = 0; j < 3; ++j)
+                        mid[j] += view[j] / 3.0;
+                }
+                const double weight = 1.0 / std::max( mid[0] * mid[0] + mid[1] * mid[1] + mid[2] * mid[2], 1.0 );
+                fit.m_Weight += weight;
+                fit_total += weight;
+            }
+            Log( "Water: water triangles by texture: texture triangles, w, distance of the corners to the plane, share of the fit" );
+            for (const auto & [hash, fit] : fits)
+                Log( "Water:   %08X %zu, w %.2f..%.2f, plane %.3f..%.3f, fit %.1f %%", hash, fit.m_Triangles, fit.m_W[0], fit.m_W[1], fit.m_Above[0],
+                    fit.m_Above[1], fit_total > 0.0 ? fit.m_Weight / fit_total * 100.0 : 0.0 );
+
+            Log( "Water: kept draws by texture (%zu sky draws left out): texture batches triangles, screen x y, w, z, z = a + b/w, height above water",
+                std::min( m_ReflSkyCount, batches ) );
+            for (const auto & [hash, group] : groups)
+            {
+                if (group.m_Count == 0)
+                    continue;
+                const double n = static_cast<double>(group.m_Count);
+                const double variance = group.m_RR / n - (group.m_R / n) * (group.m_R / n);
+                const double b = variance > 1e-18 ? (group.m_RZ / n - (group.m_R / n) * (group.m_Zs / n)) / variance : 0.0;
+                const double a = group.m_Zs / n - b * group.m_R / n;
+                Log( "Water:   %08X %zu %zu, x %.0f..%.0f y %.0f..%.0f, w %.2f..%.2f, z %.5f..%.5f, a %.5f b %.5f, above %.2f..%.2f", hash,
+                    group.m_Batches, group.m_Triangles, group.m_X[0], group.m_X[1], group.m_Y[0], group.m_Y[1], group.m_W[0], group.m_W[1],
+                    group.m_Z[0], group.m_Z[1], a, b, group.m_Above[0], group.m_Above[1] );
+            }
+        }
+
+        // Target and depth of the reflection, one sample, the render size times '[Water] ReflectionScale'.
+        const int refl_width = std::max( 1, static_cast<int>(std::lround( m_RenderWidth * m_ConfigReflectionScale )) );
+        const int refl_height = std::max( 1, static_cast<int>(std::lround( m_RenderHeight * m_ConfigReflectionScale )) );
+        if (m_ReflWidth != refl_width || m_ReflHeight != refl_height || !m_ReflTargetView)
         {
             m_ReflTargetSrv.Reset();
             m_ReflTargetView.Reset();
@@ -7493,8 +7868,8 @@ namespace dx11z
             m_ReflDepth.Reset();
 
             D3D11_TEXTURE2D_DESC desc = {};
-            desc.Width = static_cast<UINT>(m_RenderWidth);
-            desc.Height = static_cast<UINT>(m_RenderHeight);
+            desc.Width = static_cast<UINT>(refl_width);
+            desc.Height = static_cast<UINT>(refl_height);
             desc.MipLevels = 1;
             desc.ArraySize = 1;
             desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -7513,8 +7888,8 @@ namespace dx11z
                 m_Device->CreateDepthStencilView( m_ReflDepth.Get(), nullptr, m_ReflDepthView.Put() );
             }
 
-            m_ReflWidth = m_RenderWidth;
-            m_ReflHeight = m_RenderHeight;
+            m_ReflWidth = refl_width;
+            m_ReflHeight = refl_height;
             Log( "Water: reflection target %dx%d %s", m_ReflWidth, m_ReflHeight, m_ReflTargetView && m_ReflDepthView ? "created" : "FAILED" );
         }
 
@@ -7526,21 +7901,50 @@ namespace dx11z
         m_Context->ClearDepthStencilView( m_ReflDepthView.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0 );
 
         D3D11_MAPPED_SUBRESOURCE mapped = {};
-        if (SUCCEEDED( m_Context->Map( m_MirrorConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
+        // The sky dome moves with the camera and is smaller than the camera height over the water: mirrored at
+        // the water its lower, blue half came into view. The sky is far away, so it is mirrored at the plane
+        // through the camera (d = 0) instead, that only turns the directions round.
+        const auto set_mirror_plane = [&]( bool sky )
         {
-            auto * out = static_cast<float *>(mapped.pData);
-            std::memcpy( out, plane, sizeof( plane ) );
-            std::memcpy( out + 4, viewport, sizeof( float ) * 4 );
-            std::memcpy( out + 8, view_of_clip, sizeof( float ) * 16 );
-            std::memcpy( out + 24, clip_of_view, sizeof( float ) * 16 );
-            m_Context->Unmap( m_MirrorConstants.Get(), 0 );
+            if (SUCCEEDED( m_Context->Map( m_MirrorConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
+            {
+                auto * out = static_cast<float *>(mapped.pData);
+                std::memcpy( out, plane, sizeof( plane ) );
+                if (sky)
+                    out[3] = 0.0f;
+                std::memcpy( out + 4, viewport, sizeof( float ) * 4 );
+                std::memcpy( out + 8, view_of_clip, sizeof( float ) * 16 );
+                std::memcpy( out + 24, clip_of_view, sizeof( float ) * 16 );
+                m_Context->Unmap( m_MirrorConstants.Get(), 0 );
+            }
+        };
+        const std::size_t sky_batches = std::min( m_ReflSkyCount, batches );
+
+        // Depth of the game z = 1 - n / w; n follows the near plane of the camera (0.5 chase view, 0.15 bonnet and
+        // cockpit). Median of (1 - z) * w over the kept draws, for the depth lookups of the composite.
+        float depth_scale = 0.5f;
+        {
+            std::vector<float> samples;
+            for (std::size_t i = sky_batches; i < batches && samples.size() < 4096; ++i)
+                for (const TlVertex & v : m_ReflBatches[i].m_Vertices)
+                    if (v.m_Rhw > 0.0f && v.m_Rhw < 1e30f && v.m_Z < 1.0f && samples.size() < 4096)
+                        samples.push_back( (1.0f - v.m_Z) / v.m_Rhw );
+            if (!samples.empty())
+            {
+                std::nth_element( samples.begin(), samples.begin() + samples.size() / 2, samples.end() );
+                depth_scale = std::clamp( samples[samples.size() / 2], 0.01f, 10.0f );
+            }
         }
+        set_mirror_plane( sky_batches > 0 );
 
         ID3D11RenderTargetView * reflection_target = m_ReflTargetView.Get();
         m_Context->OMSetRenderTargets( 1, &reflection_target, m_ReflDepthView.Get() );
-        D3D11_VIEWPORT view = { 0, 0, static_cast<float>(m_RenderWidth), static_cast<float>(m_RenderHeight), 0, 1 };
+        D3D11_VIEWPORT view = { 0, 0, static_cast<float>(refl_width), static_cast<float>(refl_height), 0, 1 };
         m_Context->RSSetViewports( 1, &view );
-        const D3D11_RECT scissor = m_ReflClip;
+        const float sx = static_cast<float>(refl_width) / static_cast<float>(std::max( m_RenderWidth, 1 ));
+        const float sy = static_cast<float>(refl_height) / static_cast<float>(std::max( m_RenderHeight, 1 ));
+        const D3D11_RECT scissor = { static_cast<LONG>(m_ReflClip.left * sx), static_cast<LONG>(m_ReflClip.top * sy),
+            static_cast<LONG>(std::ceil( m_ReflClip.right * sx )), static_cast<LONG>(std::ceil( m_ReflClip.bottom * sy )) };
         m_Context->RSSetScissorRects( 1, &scissor );
 
         m_Context->IASetInputLayout( m_SceneLayout.Get() );
@@ -7560,13 +7964,12 @@ namespace dx11z
 
         const float one[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 
-        for (std::size_t i = 0; i < batches; ++i)
+        // Vertices, indices, constants, textures and samplers of a kept draw.
+        const auto upload = [&]( const MirrorBatch & batch )
         {
-            const MirrorBatch & batch = m_ReflBatches[i];
-
             if (batch.m_Vertices.empty() || batch.m_Indices.empty() || batch.m_Vertices.size() > RAW_VERTICES ||
                 batch.m_Indices.size() > RAW_INDICES)
-                continue;
+                return false;
 
             if (SUCCEEDED( m_Context->Map( m_VertexBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
             {
@@ -7583,6 +7986,27 @@ namespace dx11z
                 std::memcpy( mapped.pData, batch.m_Constants.data(), std::min( batch.m_Constants.size(), sizeof( DrawConstants ) ) );
                 m_Context->Unmap( m_DrawConstants.Get(), 0 );
             }
+
+            ID3D11ShaderResourceView * views[2] = { batch.m_Views[0], batch.m_Views[1] };
+            ID3D11SamplerState * samplers[2] = { batch.m_Samplers[0], batch.m_Samplers[1] };
+            m_Context->PSSetShaderResources( 0, 2, views );
+            m_Context->PSSetSamplers( 0, 2, samplers );
+            return true;
+        };
+
+        for (std::size_t i = 0; i < batches; ++i)
+        {
+            if (i == sky_batches && i > 0)
+                set_mirror_plane( false );
+            // With the sky lookup of the composite the sky comes from the frame itself, in one piece with the
+            // part above the top edge; the mirrored dome would leave a seam where it ends.
+            if (i < sky_batches && m_ReflSkyRun)
+                continue;
+
+            const MirrorBatch & batch = m_ReflBatches[i];
+
+            if (!upload( batch ))
+                continue;
 
             // Opaque: colour as is, coverage 1 (blend factor). Blended: over the target, coverage accumulated.
             auto & blend = m_ReflBlends[batch.m_BlendKey];
@@ -7631,6 +8055,9 @@ namespace dx11z
                 desc.FillMode = D3D11_FILL_SOLID;
                 const std::uint32_t cull = batch.m_Cull & 3;
                 desc.CullMode = cull == 2 ? D3D11_CULL_BACK : (cull == 3 ? D3D11_CULL_FRONT : D3D11_CULL_NONE);
+                // '[Water] ReflectionTwoSided': the mirrored camera looks from below and sees faces the game culls.
+                if (m_ConfigReflectionTwoSided)
+                    desc.CullMode = D3D11_CULL_NONE;
                 desc.FrontCounterClockwise = FALSE;
                 desc.DepthClipEnable = TRUE;
                 desc.ScissorEnable = TRUE;
@@ -7638,12 +8065,83 @@ namespace dx11z
             }
             m_Context->RSSetState( raster.Get() );
 
-            ID3D11ShaderResourceView * views[2] = { batch.m_Views[0], batch.m_Views[1] };
-            ID3D11SamplerState * samplers[2] = { batch.m_Samplers[0], batch.m_Samplers[1] };
-            m_Context->PSSetShaderResources( 0, 2, views );
-            m_Context->PSSetSamplers( 0, 2, samplers );
             m_Context->DrawIndexed( static_cast<UINT>(batch.m_Indices.size()), 0, 0 );
         }
+
+        // The sky alone, the draws of the sky phase as the game made them (not mirrored): the composite looks up
+        // the reflected sky there. Taken from the frame, anything in front of the sky (flags, poles) would be
+        // mirrored at the horizon like the sky itself.
+        if (m_ReflSkyRun)
+            m_ReflSkyRun = PrepareSkyImage();
+        // The sky image and the composite are of the render size.
+        const D3D11_VIEWPORT full = { 0, 0, static_cast<float>(m_RenderWidth), static_cast<float>(m_RenderHeight), 0, 1 };
+        m_Context->RSSetViewports( 1, &full );
+        const D3D11_RECT full_scissor = m_ReflClip;
+        m_Context->RSSetScissorRects( 1, &full_scissor );
+        if (m_ReflSkyRun)
+        {
+            ID3D11RenderTargetView * sky_target = m_ReflSkyRtv.Get();
+            m_Context->OMSetRenderTargets( 1, &sky_target, nullptr );
+            // The sky dome is blended, over the background colour of the game like in the frame.
+            float background[4];
+            ColorToFloat4( m_BackgroundColor, background );
+            background[3] = 1.0f;
+            m_Context->ClearRenderTargetView( sky_target, background );
+            m_Context->VSSetShader( m_SceneVs.Get(), nullptr, 0 );
+
+            auto & sky_depth = m_ReflDepthStates[0x200];
+            if (!sky_depth)
+            {
+                D3D11_DEPTH_STENCIL_DESC desc = {};
+                desc.DepthEnable = FALSE;
+                desc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+                desc.DepthFunc = D3D11_COMPARISON_ALWAYS;
+                m_Device->CreateDepthStencilState( &desc, sky_depth.Put() );
+            }
+            m_Context->OMSetDepthStencilState( sky_depth.Get(), 0 );
+
+            auto & sky_raster = m_ReflRasters[0x200];
+            if (!sky_raster)
+            {
+                D3D11_RASTERIZER_DESC desc = {};
+                desc.FillMode = D3D11_FILL_SOLID;
+                desc.CullMode = D3D11_CULL_NONE;
+                desc.DepthClipEnable = FALSE;
+                m_Device->CreateRasterizerState( &desc, sky_raster.Put() );
+            }
+            m_Context->RSSetState( sky_raster.Get() );
+
+            for (std::size_t i = 0; i < sky_batches; ++i)
+            {
+                const MirrorBatch & batch = m_ReflBatches[i];
+                if (!upload( batch ))
+                    continue;
+                const bool blended = batch.m_BlendKey != 0;
+                auto & blend = m_ReflBlends[blended ? 0x201u : 0x200u];
+                if (!blend)
+                {
+                    D3D11_BLEND_DESC desc = {};
+                    auto & target = desc.RenderTarget[0];
+                    target.BlendEnable = blended ? TRUE : FALSE;
+                    target.SrcBlend = D3D11_BLEND_SRC_ALPHA;
+                    target.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+                    target.BlendOp = D3D11_BLEND_OP_ADD;
+                    target.SrcBlendAlpha = D3D11_BLEND_ZERO;
+                    target.DestBlendAlpha = D3D11_BLEND_ONE;
+                    target.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+                    target.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+                    m_Device->CreateBlendState( &desc, blend.Put() );
+                }
+                m_Context->OMSetBlendState( blend.Get(), one, 0xFFFFFFFF );
+                m_Context->DrawIndexed( static_cast<UINT>(batch.m_Indices.size()), 0, 0 );
+            }
+        }
+        // Before the composite clears the water bit: open sky (stencil 0) next to the water for '[Water] EdgeFade',
+        // solid draws in front of the sky for the sky lookup.
+        // The frame and its depth: holes of the mirrored scene (geometry the game never drew) take the frame in the
+        // mirrored direction where what is seen there is far away (then it lies like the sky, mirrored at the horizon).
+        const bool stencil = m_ReflSkyRun && (m_Samples > 1 ? m_ReflCompositeMsPs : m_ReflCompositePs) && CopyStencil() && CopyFrame();
+        const bool edge_fade = stencil && m_ConfigWaterEdgeFade > 0.0f;
 
         // Over the water pixels of the frame (stencil bit 1, then cleared), tinted and with the strength as alpha.
         ID3D11RenderTargetView * frame_target = m_FrameView.Get();
@@ -7655,7 +8153,29 @@ namespace dx11z
             out[0] = static_cast<float>((m_ConfigReflectionTint >> 16) & 0xFF) / 255.0f;
             out[1] = static_cast<float>((m_ConfigReflectionTint >> 8) & 0xFF) / 255.0f;
             out[2] = static_cast<float>(m_ConfigReflectionTint & 0xFF) / 255.0f;
-            out[3] = m_ConfigReflectionDebug != 0 ? -1.0f : m_ConfigReflectionStrength;
+            out[3] = m_ConfigReflectionDebug == 1 || m_ConfigReflectionDebug == 2 ? -1.0f : m_ConfigReflectionStrength;
+            // Reflected sky where the mirrored scene is empty: plane, viewport, camera and whether the sky copy is valid.
+            std::memcpy( out + 4, plane, sizeof( plane ) );
+            std::memcpy( out + 8, viewport, sizeof( float ) * 4 );
+            out[12] = m_ReflSkyRun && m_ReflSkyView ? 1.0f : 0.0f;
+            out[13] = static_cast<float>(::GetTickCount64() % 3600000ull) / 1000.0f;
+            out[14] = m_ConfigReflectionWaves;
+            out[15] = m_ConfigReflectionBlur;
+            std::memcpy( out + 16, view_of_clip, sizeof( float ) * 16 );
+            std::memcpy( out + 32, clip_of_view, sizeof( float ) * 16 );
+            out[48] = m_ConfigReflectionFresnel;
+            out[49] = m_ReflWeightSrv ? 1.0f : 0.0f;
+            const bool far_fade = m_ConfigWaterFarFade > 0.0f && m_ReflWaterFar > 0.0f && m_ReflSkyRun;
+            out[50] = far_fade ? m_ReflWaterFar * (1.0f - m_ConfigWaterFarFade) : 0.0f;
+            out[51] = far_fade ? m_ReflWaterFar : 0.0f;
+            out[52] = edge_fade ? m_ConfigWaterEdgeFade : 0.0f;
+            out[53] = m_ConfigReflectionDebug >= 3 ? static_cast<float>(m_ConfigReflectionDebug) : 0.0f;
+            out[54] = stencil ? 1.0f : 0.0f;
+            out[55] = m_ConfigReflectionGrazing;
+            out[56] = static_cast<float>(m_RenderWidth);
+            out[57] = static_cast<float>(m_RenderHeight);
+            out[58] = depth_scale;
+            out[59] = 0.0f;
             m_Context->Unmap( m_MirrorConstants.Get(), 0 );
         }
 
@@ -7676,7 +8196,8 @@ namespace dx11z
         }
         m_Context->OMSetBlendState( composite_blend.Get(), one, 0xFFFFFFFF );
 
-        auto & composite_depth = m_ReflDepthStates[0x100];
+        // With the stencil copy the shader picks the pixels itself (water, holes in it); the water bit is cleared everywhere.
+        auto & composite_depth = m_ReflDepthStates[stencil ? 0x101u : 0x100u];
         if (!composite_depth)
         {
             D3D11_DEPTH_STENCIL_DESC desc = {};
@@ -7686,7 +8207,7 @@ namespace dx11z
             desc.StencilEnable = TRUE;
             desc.StencilReadMask = 1;
             desc.StencilWriteMask = 1;
-            desc.FrontFace.StencilFunc = D3D11_COMPARISON_EQUAL;
+            desc.FrontFace.StencilFunc = stencil ? D3D11_COMPARISON_ALWAYS : D3D11_COMPARISON_EQUAL;
             desc.FrontFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
             desc.FrontFace.StencilDepthFailOp = D3D11_STENCIL_OP_KEEP;
             desc.FrontFace.StencilPassOp = D3D11_STENCIL_OP_ZERO;
@@ -7709,15 +8230,18 @@ namespace dx11z
 
         m_Context->IASetInputLayout( nullptr );
         m_Context->VSSetShader( m_ReflCompositeVs.Get(), nullptr, 0 );
-        m_Context->PSSetShader( m_ReflCompositePs.Get(), nullptr, 0 );
+        m_Context->PSSetShader( stencil && m_Samples > 1 ? m_ReflCompositeMsPs.Get() : m_ReflCompositePs.Get(), nullptr, 0 );
         ID3D11Buffer * tint_buffer = m_MirrorConstants.Get();
         m_Context->PSSetConstantBuffers( 0, 1, &tint_buffer );
-        ID3D11ShaderResourceView * reflection = m_ReflTargetSrv.Get();
-        m_Context->PSSetShaderResources( 0, 1, &reflection );
+        ID3D11ShaderResourceView * reflection[6] = { m_ReflTargetSrv.Get(), m_ReflSkyView.Get(), m_ReflWeightSrv.Get(),
+            stencil ? m_ReflStencilView.Get() : nullptr, stencil ? m_ReflFrameCopyView.Get() : nullptr, stencil ? m_ReflDepthCopyView.Get() : nullptr };
+        m_Context->PSSetShaderResources( 0, 6, reflection );
+        ID3D11SamplerState * sky_sampler = m_PresentSampler.Get();
+        m_Context->PSSetSamplers( 1, 1, &sky_sampler );
         m_Context->Draw( 3, 0 );
 
         // The next draws set their own state; the target must not stay bound as a texture.
-        ID3D11ShaderResourceView * none[2] = {};
-        m_Context->PSSetShaderResources( 0, 2, none );
+        ID3D11ShaderResourceView * none[6] = {};
+        m_Context->PSSetShaderResources( 0, 6, none );
     }
 }

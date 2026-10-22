@@ -16,7 +16,7 @@ cbuffer DrawConstants : register( b0 )
     float4 g_FogColor;
     float4 g_FogParams; // start, end, density, table mode
     int4 g_Flags; // fog enable, specular enable, alpha func, texture mask
-    float4 g_AlphaRef; // reference 0 to 1
+    float4 g_AlphaRef; // x: reference 0 to 1, y: shore fade ('[Water] ShoreFade', alpha below it transparent), z/w: water far fade start/end (w)
     float4 g_Debug; // x: tint for '[Dx11] Measure = 2', y: edge pass, z: edge reference, w: '[Dx11] AlphaMipScale'
     float4 g_Head; // '[Dx11] Headlights': x on, y scale x, z scale z, w scale y
     float4 g_HeadColour;
@@ -310,6 +310,10 @@ float4 MainPS( PixelIn input ) : SV_Target
     float4 tex0 = ( g_Flags.w & 1 ) ? g_Texture0.Sample( g_Sampler0, input.m_Uv.xy ) : float4( 1, 1, 1, 1 );
     float4 tex1 = ( g_Flags.w & 2 ) ? g_Texture1.Sample( g_Sampler1, input.m_Uv.zw ) : float4( 1, 1, 1, 1 );
 
+    // Shore textures fade out towards the water: the lower alpha range becomes transparent, the rest ramps up.
+    if ( g_AlphaRef.y > 0.0 )
+        tex0.a = saturate( ( tex0.a - g_AlphaRef.y ) / ( 1.0 - g_AlphaRef.y ) );
+
     // '[Dx11] AlphaMipScale' (BUGS.md B21): alpha-tested textures lose coverage in the smaller mip levels, so thin
     // cut-out edges open up in the distance and close again up close. Scale alpha with the mip level of texture 0.
     if ( g_Debug.w > 0 && g_Flags.z != 8 && ( g_Flags.w & 1 ) )
@@ -333,6 +337,10 @@ float4 MainPS( PixelIn input ) : SV_Target
 
     if ( g_Flags.y != 0 )
         current.rgb = saturate( current.rgb + specular.rgb );
+
+    // Water fades out towards the far end of its surface ('[Water] FarFade'), the sea of the sky shows through.
+    if ( g_AlphaRef.w > g_AlphaRef.z && g_AlphaRef.w > 0.0 )
+        current.a *= saturate( ( g_AlphaRef.w - input.m_Position.w ) / ( g_AlphaRef.w - g_AlphaRef.z ) );
 
     if ( !AlphaPasses( current.a ) )
         discard;
@@ -410,9 +418,84 @@ float4 MainPS( PixelIn input ) : SV_Target
 cbuffer ReflectConstants : register( b0 )
 {
     float4 g_Tint; // rgb tint, a strength
+    float4 g_Plane; // water plane in view space, n.xyz, d
+    float4 g_Viewport; // fx, fy, cx, cy of the game
+    float4 g_Sky; // x: sky copy valid, y: time in seconds, z: wave amplitude, w: blur radius (pixels at 1080 lines)
+    row_major float4x4 g_ViewOfClip;
+    row_major float4x4 g_ClipOfView;
+    float4 g_Fresnel; // x: share of the reflection looking straight down (1 = no Fresnel), y: weight target bound, z/w: water far fade start/end (w)
+    float4 g_Edge; // x: edge fade radius (pixels at 1080 lines, 0 = off), y: 'ReflectionDebug' 3 or 4, z: frame, depth and stencil copies bound, w: strength looking along the water
+    float4 g_Size; // xy: render size (the reflection target may be smaller), z: depth scale n of z = 1 - n / w
 };
 
 Texture2D g_Reflection : register( t0 );
+Texture2D g_SkyFrame : register( t1 ); // the sky alone, drawn again from the sky phase
+SamplerState g_SkySampler : register( s1 );
+Texture2D<float> g_Weight : register( t2 ); // 1 water, 1 - alpha on the shore
+// Stencil of the frame: bit 1 water, bit 2 solid draw of the render queue; 0 = only the sky drawn there.
+// The frame before the composite and its depth (z = 1 - n / w, n in g_Size.z).
+Texture2D g_Frame : register( t4 );
+#ifdef STENCIL_MS
+Texture2DMS<uint2> g_Stencil : register( t3 );
+Texture2DMS<float> g_Depth : register( t5 );
+uint StencilAt( int2 p ) { return g_Stencil.Load( p, 0 ).g; }
+float DepthAt( int2 p ) { return g_Depth.Load( p, 0 ); }
+#else
+Texture2D<uint2> g_Stencil : register( t3 );
+Texture2D<float> g_Depth : register( t5 );
+uint StencilAt( int2 p ) { return g_Stencil.Load( int3( p, 0 ) ).g; }
+float DepthAt( int2 p ) { return g_Depth.Load( int3( p, 0 ) ); }
+#endif
+
+// The sky is far away: its reflection only depends on the direction. The view ray of the pixel, mirrored at the
+// water plane, projected back onto the screen; above the top edge the top row of the sky copy is used.
+float3 ReflectedSky( float2 pixel, float2 size, out float found, out float sky_v )
+{
+    found = 0.0;
+    sky_v = -1.0;
+    float2 game = pixel * ( 2.0 * g_Viewport.zw ) / size;
+    float3 ray = mul( float4( ( game.x - g_Viewport.z ) / g_Viewport.x, ( game.y - g_Viewport.w ) / g_Viewport.y, 1.0, 0.0 ), g_ViewOfClip ).xyz;
+    float facing = dot( ray, g_Plane.xyz );
+    if ( facing >= 0.0 )
+        return float3( 0.0, 0.0, 0.0 );
+    float3 mirrored = ray - 2.0 * facing * g_Plane.xyz;
+    float3 c = mul( float4( mirrored, 0.0 ), g_ClipOfView ).xyz;
+    float2 uv;
+    if ( c.z > 1e-4 )
+        uv = float2( c.x / c.z * g_Viewport.x + g_Viewport.z, c.y / c.z * g_Viewport.y + g_Viewport.w ) / ( 2.0 * g_Viewport.zw );
+    else
+        uv = float2( 0.5, -1.0 ); // straight up or behind: the top of the sky
+    // Across for the band above the top edge by the angle of the direction, the same as uv.x in the middle;
+    // c.x / c.z jumps where the ray turns past the side of the camera (a line moving over the water).
+    float band_x = 0.5 + atan2( c.x, c.z ) * g_Viewport.x / ( 2.0 * g_Viewport.z );
+    found = 1.0;
+    sky_v = uv.y;
+    // Above the top edge nothing was drawn: instead of repeating the top row, fade into a blurred band of the
+    // upper sky (a few rows down, the very top may be empty).
+    float3 near = g_SkyFrame.SampleLevel( g_SkySampler, saturate( uv ), 0 ).rgb;
+    // What the frame shows there, if it is far (over 12 times the height of the camera above the water): mirrored
+    // it lies close to where the sky lies, like the rock behind a hole of the mirrored scene. Near things (flags
+    // on the promenade) would land in the wrong place, there the sky alone.
+    if ( g_Edge.z > 0.5 && uv.y >= 0.0 && uv.y <= 1.0 && uv.x >= 0.0 && uv.x <= 1.0 )
+    {
+        int2 q = clamp( int2( uv * size ), int2( 0, 0 ), int2( size ) - 1 );
+        // Only solid things: where the depth is still cleared it is sky, a flag laid over it without depth stays out.
+        float z = DepthAt( q );
+        float w = g_Size.z / max( 1.0 - z, 1e-6 );
+        float distant = z < 0.99999 ? saturate( ( w / max( g_Plane.w, 0.1 ) - 12.0 ) / 12.0 ) : 0.0;
+        // Out towards the edges of the frame, so the switch to the sky alone beyond them leaves no line.
+        distant *= saturate( uv.y * 10.0 ) * saturate( ( 1.0 - uv.y ) * 10.0 ) * saturate( uv.x * 10.0 ) * saturate( ( 1.0 - uv.x ) * 10.0 );
+        near = lerp( near, g_Frame.Load( int3( q, 0 ) ).rgb, distant );
+    }
+    float3 band = float3( 0.0, 0.0, 0.0 );
+    [unroll] for ( int k = 0; k < 6; ++k )
+    {
+        [unroll] for ( int j = 0; j < 3; ++j )
+            band += g_SkyFrame.SampleLevel( g_SkySampler, saturate( float2( band_x + ( k - 2.5 ) * 0.025, 0.02 + j * 0.04 ) ), 0 ).rgb;
+    }
+    band /= 18.0;
+    return lerp( near, band, saturate( ( 0.2 - uv.y ) / 0.4 ) );
+}
 
 float4 MainVS( uint id : SV_VertexID ) : SV_Position
 {
@@ -422,13 +505,165 @@ float4 MainVS( uint id : SV_VertexID ) : SV_Position
 
 float4 MainPS( float4 position : SV_Position ) : SV_Target
 {
-    float4 colour = g_Reflection.Load( int3( position.xy, 0 ) );
+    float2 size = g_Size.xy;
+    float scale = size.y / 1080.0;
+
+    float2 p = position.xy;
+
+    // Not water, but seen through the water plane (deeper than where the ray meets it): a hole in the water
+    // geometry or the end of it under the water, gets the reflection too. The fitted plane is off by some
+    // tenths of a metre near and more far away: only from 1 m plus 2 % of the distance under it, fading in
+    // over as much again.
+    float hole = 0.0;
+    uint here = g_Edge.z > 0.5 ? StencilAt( int2( p ) ) : 1u;
+    if ( ( here & 1 ) == 0 )
+    {
+        // Drawn without depth (B21): the depth is of what lies behind it.
+        if ( ( here & 4 ) != 0 )
+            discard;
+        float2 at = p * ( 2.0 * g_Viewport.zw ) / size;
+        float3 ray_at = mul( float4( ( at.x - g_Viewport.z ) / g_Viewport.x, ( at.y - g_Viewport.w ) / g_Viewport.y, 1.0, 0.0 ), g_ViewOfClip ).xyz;
+        float down_at = -dot( ray_at, g_Plane.xyz );
+        float z = DepthAt( int2( p ) );
+        if ( down_at <= 1e-5 || z >= 0.99999 )
+            discard;
+        float w = g_Size.z / max( 1.0 - z, 1e-6 );
+        float margin = 1.0 + 0.02 * w;
+        hole = saturate( ( ( w - g_Plane.w / down_at ) * down_at - margin ) / margin );
+        if ( hole <= 0.0 )
+            discard;
+        if ( g_Edge.y > 3.5 )
+            return float4( 1.0, 0.0, 0.0, hole );
+    }
+
+    // Small waves: the lookup swings a little sideways and up and down, slowly moving.
+    float t = g_Sky.y;
+    float2 wave = float2( sin( p.y * 0.09 / scale + t * 0.8 ) + 0.5 * sin( p.y * 0.23 / scale + p.x * 0.01 / scale - t * 1.1 ),
+        0.6 * sin( p.x * 0.05 / scale + p.y * 0.04 / scale + t * 0.6 ) ) * g_Sky.z * scale;
+    float2 uv = ( p + wave ) / size;
+
+    // Soft blur, five taps (the colour is premultiplied by the coverage, so it averages right).
+    float2 r = g_Sky.w * scale / size;
+    float4 colour = g_Reflection.SampleLevel( g_SkySampler, uv, 0 ) * 0.4 +
+        ( g_Reflection.SampleLevel( g_SkySampler, uv + float2( r.x, 0.0 ), 0 ) + g_Reflection.SampleLevel( g_SkySampler, uv - float2( r.x, 0.0 ), 0 ) +
+          g_Reflection.SampleLevel( g_SkySampler, uv + float2( 0.0, r.y ), 0 ) + g_Reflection.SampleLevel( g_SkySampler, uv - float2( 0.0, r.y ), 0 ) ) * 0.15;
+    // At the waterline the waves and the blur leave a gap of a few pixels between the object and its mirror
+    // image: the mirror image reaches up to it (looked up below, where the mirrored object continues).
+    if ( colour.a < 0.999 )
+    {
+        [unroll] for ( int k = 1; k <= 3; ++k )
+        {
+            float4 below = g_Reflection.SampleLevel( g_SkySampler, uv + float2( 0.0, k * 1.5 * scale / size.y ), 0 );
+            colour += below * ( 1.0 - saturate( colour.a ) );
+        }
+    }
     // Blended draws were laid over black, so the colour carries their coverage.
     float3 rgb = colour.a > 0.001 ? colour.rgb / colour.a : float3( 0.0, 0.0, 0.0 );
-    // '[Water] ReflectionDebug' (strength sent negative): water mask without reflection in magenta.
+    // Not covered by the mirrored scene (it was never drawn): the reflected sky fills the rest.
+    bool sky_filled = false;
+    if ( g_Sky.x > 0.5 )
+    {
+        float found;
+        float sky_v;
+        float3 sky = ReflectedSky( p + wave, size, found, sky_v );
+        if ( found > 0.5 )
+        {
+            // The game draws only what is in the frame: the mirrored scene ends at the mirror image of the top
+            // edge (a line moving over the water). It fades into the sky before it gets there.
+            float a = saturate( colour.a ) * saturate( sky_v / 0.12 );
+            rgb = saturate( rgb ) * a + sky * ( 1.0 - a );
+            sky_filled = a < 0.999;
+            colour.a = 1.0;
+        }
+    }
+    // '[Water] ReflectionDebug' (strength sent negative): water mask without reflection in magenta,
+    // filled with the reflected sky in cyan.
+    if ( g_Tint.a < 0.0 && sky_filled )
+        return float4( 0.0, 1.0, 1.0, 1.0 );
     if ( g_Tint.a < 0.0 )
         return colour.a > 0.001 ? float4( saturate( rgb ), 1.0 ) : float4( 1.0, 0.0, 1.0, 1.0 );
-    return float4( saturate( rgb ) * g_Tint.rgb, saturate( colour.a ) * g_Tint.a );
+    // Fresnel: water looked at from above mirrors little, at a flat angle a lot. Also hides that the sky
+    // straight above (mirrored when looking steeply down) was never drawn.
+    float2 game = p * ( 2.0 * g_Viewport.zw ) / size;
+    float3 ray = normalize( mul( float4( ( game.x - g_Viewport.z ) / g_Viewport.x, ( game.y - g_Viewport.w ) / g_Viewport.y, 1.0, 0.0 ), g_ViewOfClip ).xyz );
+    float steep = saturate( -dot( ray, g_Plane.xyz ) );
+    float fresnel = lerp( g_Fresnel.x, 1.0, pow( 1.0 - steep, 3.0 ) );
+    // Same far fade as the water itself: the depth w of the water point is where the ray meets the plane.
+    if ( g_Fresnel.w > g_Fresnel.z && g_Fresnel.w > 0.0 )
+    {
+        float3 ray_w = mul( float4( ( game.x - g_Viewport.z ) / g_Viewport.x, ( game.y - g_Viewport.w ) / g_Viewport.y, 1.0, 0.0 ), g_ViewOfClip ).xyz;
+        float down = -dot( ray_w, g_Plane.xyz );
+        float water_w = down > 1e-5 ? g_Plane.w / down : 1e9;
+        fresnel *= saturate( ( g_Fresnel.w - water_w ) / ( g_Fresnel.w - g_Fresnel.z ) );
+    }
+    float weight = g_Fresnel.y > 0.5 ? g_Weight.Load( int3( position.xy, 0 ) ) : 1.0;
+    float3 mirrored = saturate( rgb ) * g_Tint.rgb;
+    float alpha = saturate( colour.a ) * g_Tint.a * fresnel * weight;
+    // Looking along the water it mirrors almost everything ('[Water] ReflectionGrazing'): far water takes the
+    // colour of the reflected sky, like the far sea of the game next to it.
+    alpha = lerp( alpha, saturate( colour.a ) * max( g_Tint.a, g_Edge.w ) * weight, pow( 1.0 - steep, 8.0 ) );
+    // The hole shows ground, not the water: the water around it (frame before the composite) with the
+    // reflection over it as on the water, laid over the hole.
+    if ( hole > 0.0 )
+    {
+        float3 base = float3( 0.0, 0.0, 0.0 );
+        float found_water = 0.0;
+        [unroll] for ( int ring = 1; ring <= 4; ++ring )
+        {
+            [unroll] for ( int k = 0; k < 8; ++k )
+            {
+                float angle = ( k + ( ring & 1 ) * 0.5 ) * 0.7853982;
+                int2 q = clamp( int2( p + float2( cos( angle ), sin( angle ) ) * ring * 8.0 * scale ), int2( 0, 0 ), int2( size ) - 1 );
+                if ( ( StencilAt( q ) & 1 ) != 0 )
+                {
+                    base += g_Frame.Load( int3( q, 0 ) ).rgb;
+                    found_water += 1.0;
+                }
+            }
+        }
+        if ( found_water > 0.0 )
+        {
+            mirrored = lerp( base / found_water, mirrored, alpha );
+            alpha = hole;
+        }
+        else
+        {
+            alpha = max( alpha, 0.85 ) * hole;
+        }
+        return float4( mirrored, alpha );
+    }
+
+    // Where the water surface ends against open sky (map end, sea painted into the sky), the water with its
+    // reflection fades into what lies behind it, the sky image at this pixel. Share of open sky in a disc
+    // around the pixel: half at the edge.
+    if ( g_Edge.x > 0.0 )
+    {
+        float radius = g_Edge.x * scale;
+        int2 last = int2( size ) - 1;
+        float open = 0.0;
+        [unroll] for ( int ring = 1; ring <= 6; ++ring )
+        {
+            [unroll] for ( int k = 0; k < 12; ++k )
+            {
+                float angle = ( k + ( ring & 1 ) * 0.5 ) * 0.5235988;
+                int2 q = clamp( int2( p + float2( cos( angle ), sin( angle ) ) * radius * ( ring / 6.0 ) ), int2( 0, 0 ), last );
+                if ( ( StencilAt( q ) & 3 ) == 0 )
+                    open += 1.0;
+            }
+        }
+        float edge = open > 0.0 ? smoothstep( 0.0, 1.0, saturate( open / 72.0 * 2.0 ) ) : 0.0;
+        if ( g_Edge.y > 2.5 && g_Edge.y < 3.5 )
+            return float4( edge, 0.0, 1.0 - edge, 1.0 );
+        if ( edge > 0.0 )
+        {
+            float3 beyond = g_SkyFrame.Load( int3( p, 0 ) ).rgb;
+            // frame * (1 - a) + mirrored * a, then towards the sky by edge: one blend with alpha a + edge - a * edge.
+            float total = alpha + edge - alpha * edge;
+            mirrored = ( mirrored * alpha * ( 1.0 - edge ) + beyond * edge ) / max( total, 1e-4 );
+            alpha = total;
+        }
+    }
+    return float4( mirrored, alpha );
 }
 )hlsl";
 

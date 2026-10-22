@@ -899,6 +899,7 @@ namespace dx11z
             std::uint32_t m_Cull = 1;
             std::array<ID3D11ShaderResourceView *, 2> m_Views = {};
             std::array<ID3D11SamplerState *, 2> m_Samplers = {};
+            std::uint32_t m_Hash = 0; // texture of stage 0
         };
 
         int m_ConfigReflections = 0;
@@ -923,6 +924,7 @@ namespace dx11z
         std::size_t m_ReflSkyCount = 0; // batches before the first queue run (sky), kept for every view
         bool m_ReflSkyPhase = true;
         std::vector<std::array<float, 3>> m_ReflWater; // water triangle corners: screen x, y and w
+        std::vector<std::uint32_t> m_ReflWaterHash; // texture of each water triangle (measurement)
         int m_ReflLogged = 0;
         int m_ReflTrace = 0;
         D3D11_RECT m_ReflClip = {};
@@ -935,6 +937,40 @@ namespace dx11z
         ComPtr<ID3D11Texture2D> m_ReflTarget;
         ComPtr<ID3D11RenderTargetView> m_ReflTargetView;
         ComPtr<ID3D11ShaderResourceView> m_ReflTargetSrv;
+        // The sky alone, drawn again from the draws of the sky phase; where the mirrored scene has nothing, the
+        // composite looks up the reflected sky there (B15, geometry the game never drew).
+        ComPtr<ID3D11Texture2D> m_ReflSky;
+        ComPtr<ID3D11ShaderResourceView> m_ReflSkyView;
+        ComPtr<ID3D11RenderTargetView> m_ReflSkyRtv;
+        // How much the water mask mirrors (1 = water, shore pixels 1 - alpha), B15 soft shore.
+        ComPtr<ID3D11Texture2D> m_ReflWeight;
+        ComPtr<ID3D11RenderTargetView> m_ReflWeightRtv;
+        ComPtr<ID3D11ShaderResourceView> m_ReflWeightSrv;
+        ComPtr<ID3D11BlendState> m_ReflWeightBlend;
+        bool m_ReflSkyRun = false; // the current queue run is the one right after the sky
+        int m_ConfigReflectionSky = 1;
+        int m_ConfigReflectionTwoSided = 1;
+        float m_ConfigReflectionWaves = 3.0f;
+        float m_ConfigReflectionBlur = 2.0f;
+        float m_ConfigReflectionFresnel = 0.3f;
+        float m_ConfigShoreFade = 0.27f;
+        float m_ConfigWaterFarFade = 0.3f;
+        float m_ReflWaterFar = 0.0f;
+        // '[Water] EdgeFade': where the water surface ends against open sky (stencil 0: nothing of the render queue
+        // drawn there), the water fades into that sky. Needs a copy of the stencil (bit 2 = solid queue draw).
+        float m_ConfigWaterEdgeFade = 40.0f;
+        int m_ConfigWaterEvenColour = 1; // '[Water] WaterEvenColour', one vertex colour for all water
+        std::array<float, 3> m_WaterColour = { -1.0f, -1.0f, -1.0f };
+        float m_ConfigReflectionScale = 0.5f; // '[Water] ReflectionScale', size of the reflection target
+        float m_ConfigReflectionGrazing = 1.0f; // '[Water] ReflectionGrazing', strength looking along the water
+        std::vector<std::uint32_t> m_ConfigReflectionSkip; // '[Water] ReflectionSkip', textures left out of the mirror
+        std::vector<std::uint32_t> m_ConfigFarWaterTextures; // '[Water] FarWaterTextures', water mask but not in the plane fit
+        ComPtr<ID3D11Texture2D> m_ReflFrameCopy; // the frame before the composite, for holes of the mirrored scene
+        ComPtr<ID3D11ShaderResourceView> m_ReflFrameCopyView;
+        ComPtr<ID3D11ShaderResourceView> m_ReflDepthCopyView; // depth of the stencil copy
+        ComPtr<ID3D11Texture2D> m_ReflStencil;
+        ComPtr<ID3D11ShaderResourceView> m_ReflStencilView;
+        ComPtr<ID3D11PixelShader> m_ReflCompositeMsPs; // the same, stencil copy multisampled
         ComPtr<ID3D11Texture2D> m_ReflDepth;
         ComPtr<ID3D11DepthStencilView> m_ReflDepthView;
         int m_ReflWidth = 0;
@@ -954,7 +990,12 @@ namespace dx11z
         // the queue the reflections are drawn.
         void NoteQueueList();
 
+        bool PrepareSkyImage();
+        bool CopyStencil();
+        bool CopyFrame();
+        void PrepareReflWeight();
         bool IsWaterTexture() const;
+        bool IsFarWaterTexture() const;
         bool IsBakedTexture() const;
 
         // The game camera: clip (xc, yc, wc) of view and back, viewport fx, fy, cx, cy (as PrepareHeadMesh).
