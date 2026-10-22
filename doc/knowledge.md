@@ -5,6 +5,18 @@
 > **Pflege:** Ändert sich ein Fakt, zuerst das Themen-Dokument anpassen, dann die Zeile hier.
 > **Status:** ✅ = im Projekt gemessen oder belegt · 📖 = Nutzer- oder Community-Wissen, noch nicht selbst geprüft.
 
+## 0. Ablage im Projekt (Stand 2026-10-22)
+
+| Was | Wo | Git |
+|---|---|---|
+| Doku (dieser Ordner) | `G:\NFSP\nfs5_enhanced_LHedit\doc\` (bis 2026-10-22 `G:\NFSP\doc\`, dort gelöscht) | LHedit, `master` |
+| Mod-Code: ASI, dx11z, LFSP | `G:\NFSP\nfs5_enhanced_LHedit\` (`src`, `drivers/dx11`, `lfsp`) | LHedit (github L0calH0rst/nfs5_enhanced_LHedit) |
+| Standard-INIs (`lfsp.ini`, `nfs5_enhanced.ini`) | `nfs5_enhanced_LHedit\config\` | LHedit |
+| Build | `nfs5_enhanced_LHedit\build-asi\` (`lfsp\lfsp.asi`, `drivers\dx11\dx11z.dll`) | nein |
+| Testinstallation | `G:\NFSP\Game CD\` (ASI, `lfsp.ini`, `drivers\dx11z.dll`, Sicherungen in `drivers\_backup\`) | nein |
+| Werkzeuge, Messungen, Logs, Strecken/HD-Arbeit | `G:\NFSP\work\` | nein (NFSP-M wird nicht mehr committet) |
+| Ghidra-Projekt und Exporte | `G:\NFSP\GhidraNFSP\` | nein |
+
 ## 1. Texturen – Alpha-Werte als Maske (Fahrzeugtexturen)
 
 Bei Fahrzeugtexturen ist Alpha **nicht nur Transparenz**, sondern eine Material-Maske (📖 Nutzer):

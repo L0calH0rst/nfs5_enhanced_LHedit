@@ -1,6 +1,6 @@
 # PLAN.md – Need for Speed: Porsche Unleashed (NFS5, 2000)
 
-**Stand:** 2026-10-16 · **Workspace:** `G:\NFSP` · **Ziel:** das Originalspiel modernisieren (Weg W1): stabil unter Windows 11, HD-Auflösung, HD-Texturen.
+**Stand:** 2026-10-22 · **Workspace:** `G:\NFSP` (Code und Doku im Repo `nfs5_enhanced_LHedit`, Ablage `knowledge.md` §0) · **Ziel:** das Originalspiel modernisieren (Weg W1): stabil unter Windows 11, HD-Auflösung, HD-Texturen.
 
 ## Dokumentenstruktur
 
@@ -25,6 +25,7 @@
 | 2026-10-16 | **F:** HD-Texturen per FSH-Repack, nicht per Laufzeit-Ersatz in dx11z | `FSH-REPACK.md` §10 |
 | 2026-10-16 | B4-Fix: `AlphaEdgeFix = 2` (Zwei-Pass); Variante 1 verworfen | `BUGS.md` §8.7–8.9 |
 | 2026-10-16 | Dokumentenstruktur wie oben | Status-Drift zwischen mehreren Dokumenten |
+| 2026-10-22 | Mod-Code (ASI, dx11z, LFSP) und Doku nur noch im Repo `nfs5_enhanced_LHedit` (`doc/`); `G:\NFSP` (NFSP-M) wird nicht mehr committet | doppelte Kopien liefen auseinander (`knowledge.md` §0) |
 | 2026-10-16 | Gelände-Unterteilung (wie Skyrim „Smooth Terrain“) als optionale Phase 7, zuerst Machbarkeitsprüfung; **nicht** in dx11z | dx11z erhält nur transformierte, vorbeleuchtete Vertices ohne Normalen und Nachbarschaft (`knowledge.md` §3) |
 
 ## 2. Arbeitsweise
@@ -123,6 +124,7 @@ Beschreibung und Analyse je Bug: `BUGS.md` §0–§8. **Grundsatz:** dauerhaft b
 | B20 | Ferner Streckenabschnitt schwebt vor dem Panorama (Alpen) | Originalfehler: Sichtlinie zur Objektmitte geht durch eine Lücke zwischen zwei Verdeckungswänden, das Gelände daneben fällt weg (`BUGS.md` §17) | ✅ deutlich kleiner mit LFSP v7e `[World] TrackOcclusionEdge = 1.0`, `TrackOcclusionEdgeRange = 300` (Rand-Test für ferne Objekte); kleiner Rest bleibt (👤 2026-10-18) |
 | B21 | Loch im Boden nahe vor dem Auto (Alpen) | Originalfehler: 2D-Verdeckungstest `FUN_00488b50` ohne Höhe verwirft sichtbare Wiesen-Objekte (`BUGS.md` §18) | ✅ behoben mit LFSP v7b `[World] TrackOcclusion = 0`, `TrackOcclusionRange = 220` (👤 2026-10-18) |
 | B22 | Reifenspuren teils unsichtbar (gezackte Kante) | Spur liegt unter dem gezeichneten LOD 0, Fahrbahnquerschnitt weicht ab (`BUGS.md` §19, Messung `SICHTWEITE.md` §2d) | 🔄 Ursache im Code (§19.1): Spur-Höhe aus dem Fahrzeugkasten, quer waagrecht, gerade Stücke über jeden 8. Aufruf. Fix dx11z (§19.2): Hook der Spur-Zeichenstelle `0x5B3D30`, Tiefe abstandsabhängig nach vorn, `[World] SkidDepthBias = 0.003` in `lfsp.ini`; ✅ 👤 2026-10-22: korrekt, nur noch selten verdeckt |
+| B23 | Scheinwerfer-Glow ab ~92 m zur Kamera teils schwarz (auch im Original) | Tiefenversatz des Glow-Sprites `≈ −20000·b/d²` rundet in der Ferne auf 0, Glow kämpft mit dem Scheinwerferglas (`LICHT.md` §9.7) | 🔄 LFSP v8e: Versatz höchstens −1 (`[Lights] LampGlowDepthFix = 1`); 👤 Test offen |
 
 | ID | Wer | Aufgabe | Status / Ergebnis |
 |---|---|---|---|
@@ -212,7 +214,7 @@ Ziel: Scheinwerfer bei Nacht schöner (Lichtkegel, Abfall mit Entfernung), Live-
 | 9.7 | 🤖+👤 | Eigene Lichtkarte nur im Treiber (`[Dx11] HeadlightsMap`, Graustufen-BMP, auch > 128²), mitgelieferte Karte mit zwei Kegeln, hellem Kern, Abfall über die Entfernung | `LICHT.md` §8.1 | 👤: eigene Karte wirkt bei Tag und Nacht, sieht nach Scheinwerfer aus | ✅ 9.7a: eigene Karte wirkt bei Tag und Nacht, Ausrichtung geprüft (Schriftzug „RECHTS“ rechts, nicht gespiegelt; 👤 Screenshots `screenshots/9.7a/`, `LICHT.md` §8.5) |
 | 9.8 | 🤖+👤 | Baujahr des Spielerautos live aus dem Spiel lesen (auch Zusatz-/Mod-Autos): Quelle der Menü-Jahre finden, Speicherstelle am Auto | `LICHT.md` §8.2 | Jahr für mind. 3 Autos richtig im Log (z. B. 356, 911, 996) | ✅ 9.8a (LFSP v6a, damals `nfsp_carparts.asi`): Jahr aus dem `.sim`-Namen in `car + 0x760`; 356 B = 1960, 959 = 1987, GT3 = 1998 für Spieler und Gegner richtig (`LICHT.md` §8.2, Log `work/logs/9.8a-lfsp/`) |
 | 9.9 | 🤖+👤 | Lichtfarbe nach Baujahr (`[Dx11] HeadlightsColourByYear`): Glühlampe gelb → Xenon kaltweiß, fließend | `LICHT.md` §8.3 | 👤: 356 deutlich gelber als 996, Übergänge plausibel | ✅ 9.9a Farbe nach Baujahr wirkt (👤 Screenshots `screenshots/9.9a/`); ✅ 9.9b: Licht mischt sich mit farbiger Umgebung (Summe nicht mehr vor der Textur gekappt, `LICHT.md` §8.3a; 👤: „sieht realistisch aus“) |
-| 9.10 | 🤖+👤 | Fernlicht: `L` gedrückt halten → zweite Karte (`HeadlightsMapHigh`) oder Abblendkarte gestreckt und heller, weniger Höhenabzug | `LICHT.md` §8.4 | 👤: Fernlicht reicht sichtbar weiter, Taste kollidiert nicht mit dem Spiel | ✅ 9.10c: Taste K, nur nach oben gestreckt (Höhenabzug 0,4, Helligkeit 1,2), wirkt auch ohne Abblendlicht wie eine Lichthupe (👤 getestet, Log `work/logs/9.10c/`: Taste bei `light bytes 0 0`; `LICHT.md` §8.4b). 9.10d (Lichtschalter mitsetzen) öffnete die Klappen, schaltete aber Heckleuchten mit und blieb nach Antippen an. ✅ 9.10e: LFSP fährt nur die Klappen-Animation selbst, Schalter unberührt (LFSP v6i; 👤: Klappen öffnen mit K, Heckleuchten bleiben aus, Antippen schließt wieder; `LICHT.md` §9.4) |
+| 9.10 | 🤖+👤 | Fernlicht: `L` gedrückt halten → zweite Karte (`HeadlightsMapHigh`) oder Abblendkarte gestreckt und heller, weniger Höhenabzug | `LICHT.md` §8.4 | 👤: Fernlicht reicht sichtbar weiter, Taste kollidiert nicht mit dem Spiel | ✅ 9.10c: Taste K, nur nach oben gestreckt (Höhenabzug 0,4, Helligkeit 1,2), wirkt auch ohne Abblendlicht wie eine Lichthupe (👤 getestet, Log `work/logs/9.10c/`: Taste bei `light bytes 0 0`; `LICHT.md` §8.4b). 9.10d (Lichtschalter mitsetzen) öffnete die Klappen, schaltete aber Heckleuchten mit und blieb nach Antippen an. ✅ 9.10e: LFSP fährt nur die Klappen-Animation selbst, Schalter unberührt (LFSP v6i; 👤: Klappen öffnen mit K, Heckleuchten bleiben aus, Antippen schließt wieder; `LICHT.md` §9.4). 9.10f (LFSP v8e): Glow der eigenen Scheinwerfer bei Fernlicht heller (`HeadlightsHighGlow` 1,6, `LICHT.md` §9.7), 👤 Test offen. ✅ 9.10g: `HeadlightsHighHeight` = Höhe an Wänden (1 = Abblendlicht, 2 = doppelt; vorher Kehrwert 0,4), 👤 „funktioniert“ |
 | 9.11 | 🤖+👤 | Scheinwerfer der Gegner beleuchten nachts die Strecke, wenn ihr Licht an ist (bis 8 Lichter, Matrix je Auto wie `FUN_004526c0`) | `LICHT.md` §8.4a | 👤: Gegner vor/neben dem Spieler werfen sichtbares Licht, kein Einbruch der Bildrate | ✅ 9.11b (dx11z 9.11b, LFSP v6d; `LICHT.md` §8.4a): 👤 „solide, keine Probleme“; alle Licht-Schalter in `lfsp.ini [Lights]`. Das gesicherte Log enthält nur ein Tagrennen; dort blieben die Gegner aus, weil die Matrix-Prüfung nur nachts lief → 9.11c. Nachts schlug die Matrix-Prüfung fehl (Translation falsch nachgebildet), Gegner waren nie aktiv → ✅ 9.11d: Gegner leuchten nachts, unabhängig vom eigenen Licht (👤 Screenshot, Log: Variante transponiert/Zeile exakt) |
 
 ### Phase 10 – Menü-Komfort (Feature-Requests) 🔄
@@ -284,7 +286,7 @@ Auftrag 👤 2026-10-21 (`plan_pvs_haze_1.md`). Abgleich mit dem Projektstand un
 | 32-Bit-Prozess ohne LAA: HD-Satz sprengt 2 GB Adressraum oder interne Speicherbudgets der Engine | unbekannt | 2.0b messen; LAA-Flag nur nach Messung (prüfen, dass der Mod danach noch hakt) |
 | Fahrzeugtexturen (`7B`) werden als ARGB4444 geladen → HD-Alpha dort nur 4 Bit (Strecke nicht betroffen) | hoch | `FSH-REPACK.md` §11.3; Test `RaceColorDepth = 32` (§11.4 B), sonst Eingriff in dx11z/Engine |
 | `gimme.dll`-Analyse ohne Symbole dauert lange | hoch | nur gezielt (3C.2, 3.7) |
-| Neues Mod-Release überschreibt eigene dx11z-Änderungen | mittel | Patch-Kette in `work/patches/dx11z/` (`MOD.md` §6) |
+| Neues Mod-Release überschreibt eigene dx11z-Änderungen | mittel | eigene Änderungen im Fork `nfs5_enhanced_LHedit` (Git), Upstream per Merge; alte Patch-Kette `work/patches/dx11z/` (`MOD.md` §6) |
 
 ## 5. Definition of Done
 
@@ -314,4 +316,4 @@ Vom Nutzer auf Win11 bestätigt:
 2. 👤 Bei Gelegenheit B2-Gegenprobe (Map-Lücke, DDS > 1) mit dem neuen Hook.
 3. **Phase 2** vorbereiten: 2.1 Kunstentscheidung (👤); Pipeline 2.2 inkl. Atlas-Lücken (B7) und Fahrzeug-Masken.
 4. Weiter offen: 2.0b Lauf 2 (HD-Speicher), Alpha-Inhalt-Test, B9 (Engine), 3C.2 (B1–B3) nach Freigabe, B6.
-5. **Phase 9:** 9.7 eigene Lichtkarte ✅; Fahrzeug-Seite des Lichts wandert in die Mod LFSP (`LICHT.md` §8.2a); 9.8 Baujahr ✅; als Nächstes 9.9 Lichtfarbe nach Baujahr, danach 9.10 Fernlicht.
+5. **Phase 9:** 9.7 eigene Lichtkarte ✅; Fahrzeug-Seite des Lichts wandert in die Mod LFSP (`LICHT.md` §8.2a); 9.8 Baujahr ✅, 9.9 Lichtfarbe ✅, 9.10 Fernlicht ✅ (9.10f Glow und B23 im Test).
