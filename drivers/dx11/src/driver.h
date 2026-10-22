@@ -528,7 +528,7 @@ namespace dx11z
         float m_ConfigHighRange = 1.0f;
         float m_ConfigHighWidth = 1.0f;
         float m_ConfigHighStrength = 1.2f;
-        float m_ConfigHighHeight = 0.4f;
+        float m_ConfigHighHeight = 0.4f; // inverse of the INI value
         float m_High = 0.0f;
         bool m_HighKey = false;
         std::uint32_t m_HighFlip = 0xFFFFFFFFu;

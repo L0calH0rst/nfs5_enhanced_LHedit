@@ -1416,7 +1416,9 @@ namespace dx11z
         m_ConfigHighRange = std::clamp( static_cast<float>(std::atof( light_value( "HeadlightsHighRange", "1.0" ).c_str() )), 1.0f, 4.0f );
         m_ConfigHighWidth = std::clamp( static_cast<float>(std::atof( light_value( "HeadlightsHighWidth", "1.0" ).c_str() )), 0.25f, 2.0f );
         m_ConfigHighStrength = std::clamp( static_cast<float>(std::atof( light_value( "HeadlightsHighStrength", "1.2" ).c_str() )), 0.0f, 4.0f );
-        m_ConfigHighHeight = std::clamp( static_cast<float>(std::atof( light_value( "HeadlightsHighHeight", "0.4" ).c_str() )), 0.0f, 2.0f );
+        // 'HeadlightsHighHeight' is the height reach on walls (1 = as low beam, 2 = twice as high); the shader takes the
+        // inverse as factor on the vertical falloff
+        m_ConfigHighHeight = 1.0f / std::clamp( static_cast<float>(std::atof( light_value( "HeadlightsHighHeight", "2.5" ).c_str() )), 0.5f, 10.0f );
         Log( "Config high beam: range %.2f width %.2f strength %.2f height %.2f", m_ConfigHighRange, m_ConfigHighWidth, m_ConfigHighStrength,
             m_ConfigHighHeight );
 

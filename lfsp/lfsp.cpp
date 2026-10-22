@@ -286,6 +286,9 @@ namespace
     int g_flashPopUps = 1;
     int g_signalsInSync = 1; // 11.5f: Blinker hinten (6/7) im Takt der vorderen statt gegenphasig
     int g_thirdBrakeOnly = 1; // 11.5i: mittiges 3. Bremslicht nur beim Bremsen, nicht als Rücklicht bei Licht an
+    int g_glowBiasFix = 1;        // B23: Tiefenversatz des Leuchten-Glows mindestens -1 (sonst ab ~92 m teils schwarz)
+    float g_highGlow = 1.6f;      // 9.10f: Glow der Scheinwerfer am Spielerauto bei Fernlicht × diesen Faktor
+    float g_lampBoost = 1.0f;     // Faktor für die gerade geprüfte Leuchte (LampTest → Glow 0x43CDD0)
     bool g_highBroken = false; // 11.5i: beide Scheinwerfer des Spielerautos kaputt, kein Fernlicht
     int g_gaugesFollowLights = 1; // HUD-Instrumente folgen dem Lichtschalter (11.3)
     unsigned char * g_flashCar = nullptr; // Auto, dessen Klappen LFSP gerade für die Lichthupe geöffnet hat
@@ -642,6 +645,12 @@ namespace
         g_flashPopUps = GetPrivateProfileIntA("Lights", "HeadlightsFlashPopUps", 1, ini);
         g_signalsInSync = GetPrivateProfileIntA("Lights", "SignalsInSync", 1, ini);
         g_thirdBrakeOnly = GetPrivateProfileIntA("Lights", "ThirdBrakeLightBrakingOnly", 1, ini);
+        g_glowBiasFix = GetPrivateProfileIntA("Lights", "LampGlowDepthFix", 1, ini);
+        {
+            char glow[32] = {};
+            GetPrivateProfileStringA("Lights", "HeadlightsHighGlow", "1.6", glow, sizeof(glow), ini);
+            g_highGlow = std::fmin(4.0f, std::fmax(1.0f, static_cast<float>(std::atof(glow))));
+        }
         g_gaugesFollowLights = GetPrivateProfileIntA("Lights", "InstrumentsFollowLights", 1, ini);
         Log("Licht: Fernlicht-Taste 0x%02X, Ueberblenden %d ms", g_highKey, g_highFadeMs);
         g_colourByYear = GetPrivateProfileIntA("Lights", "HeadlightsColourByYear", 1, ini);
@@ -2870,6 +2879,16 @@ namespace
     {
         RecordLamp(mirrored, model, number, lamp);
         const std::uint32_t on = reinterpret_cast<std::uint32_t (__thiscall *)(void *, unsigned)>(kLampTest)(model, number);
+        // 9.10f: Der Glow dieser Leuchte folgt gleich (0x43DA77 → 0x43CDD0); Scheinwerfer des Spielerautos bei Fernlicht heller
+        g_lampBoost = 1.0f;
+        if ((number == 0 || number == 1) && g_highBeam > 0.0f && g_highGlow > 1.0f && !InFrontend())
+        {
+            auto * car = CarAt(*reinterpret_cast<const std::uint32_t *>(0x65741C));
+            if (car && At<void *>(car, 0x74C) == model)
+            {
+                g_lampBoost = 1.0f + (g_highGlow - 1.0f) * g_highBeam;
+            }
+        }
         // Fernlicht ohne Lichtschalter (Lichthupe): Das Spiel setzt die Scheinwerfer-Leuchten 0/1 nur bei Licht an,
         // LFSP meldet sie am Spielerauto an, solange das Fernlicht brennt und die Seite heil ist (wie 0x4398C6).
         if ((number == 0 || number == 1) && (on & 0xFF) == 0 && g_highBeam > 0.0f && !InFrontend())
@@ -2933,6 +2952,59 @@ namespace
             call LampTest
             add esp, 16
             ret 4
+        }
+    }
+
+    // ---- Glow der Leuchten FUN_0043CDD0 (B23, 9.10f, doc/LICHT.md §9.7) ----
+    // Helligkeit b = Winkelfaktor × Stärke [ebp + 0x10]: Größe ∝ b, Alpha = (int)(b × 255) & 0xFF (0x43D3BA),
+    // Tiefenversatz = round(−20000 × b × [[0x628130] + 0xC] / Abstand²) (0x43D44C, Sprite +0x10 → State 0x18).
+    // Ab ~92 m rundet der Versatz auf 0, der Glow kämpft dann mit dem Scheinwerferglas und wird teils schwarz.
+    const float kLampAlphaMax = 255.0f;
+
+    // 0x43D195: FST [EBP+0x10]; FCOMP [0x5B2604] → Helligkeit × g_lampBoost
+    __declspec(naked) void LampGlowBoostDetour()
+    {
+        __asm
+        {
+            fmul dword ptr [g_lampBoost]
+            fst dword ptr [ebp + 0x10]
+            fcomp dword ptr ds:[0x5B2604]
+            ret
+        }
+    }
+
+    // 0x43D3BA: FLD [EBP+0x10]; FMUL [0x5B3710] → Alpha höchstens 255 (sonst läuft das Byte bei b > 1 über)
+    __declspec(naked) void LampGlowAlphaDetour()
+    {
+        __asm
+        {
+            fld dword ptr [ebp + 0x10]
+            fmul dword ptr ds:[0x5B3710]
+            fcom dword ptr [kLampAlphaMax]
+            fnstsw ax
+            test ah, 0x41
+            jnz done
+            fstp st(0)
+            fld dword ptr [kLampAlphaMax]
+        done:
+            ret
+        }
+    }
+
+    // 0x43D44C: FLD [EBP-0x20]; FISTP [EBP-0x14]; MOV EAX,[EBP-0x14] → Versatz höchstens −1
+    __declspec(naked) void LampGlowBiasDetour()
+    {
+        __asm
+        {
+            fld dword ptr [ebp - 0x20]
+            fistp dword ptr [ebp - 0x14]
+            mov eax, dword ptr [ebp - 0x14]
+            cmp eax, -1
+            jle done
+            mov eax, -1
+            mov dword ptr [ebp - 0x14], eax
+        done:
+            ret
         }
     }
 
@@ -4478,7 +4550,7 @@ namespace
         std::string base = path;
         base.erase(base.find_last_of('.'));
         g_log = std::fopen((base + ".log").c_str(), "w");
-        Log("LFSP v8d gestartet");
+        Log("LFSP v8e gestartet");
 
         auto * exe = reinterpret_cast<unsigned char *>(GetModuleHandleA(nullptr));
         const auto * dos = reinterpret_cast<IMAGE_DOS_HEADER *>(exe);
@@ -4605,6 +4677,30 @@ namespace
             std::memcpy(expected + 1, &rel, 4);
             std::memcpy(replacement + 1, &relHook, 4);
             PatchBytes("Leuchten-Abfrage", site.first, expected, replacement, sizeof(expected));
+        }
+
+        // B23 / 9.10f: Glow der Leuchten (Tiefenversatz, Fernlicht heller). Je 9 Bytes → CALL + 4 × NOP.
+        {
+            struct GlowSite { const char * name; std::uintptr_t at; unsigned char orig[9]; void * hook; bool on; };
+            const GlowSite sites[] = {
+                { "Leuchten-Glow Fernlicht", 0x43D195, { 0xD9, 0x55, 0x10, 0xD8, 0x1D, 0x04, 0x26, 0x5B, 0x00 },
+                  reinterpret_cast<void *>(&LampGlowBoostDetour), g_highGlow > 1.0f },
+                { "Leuchten-Glow Alpha", 0x43D3BA, { 0xD9, 0x45, 0x10, 0xD8, 0x0D, 0x10, 0x37, 0x5B, 0x00 },
+                  reinterpret_cast<void *>(&LampGlowAlphaDetour), g_highGlow > 1.0f },
+                { "Leuchten-Glow Tiefenversatz", 0x43D44C, { 0xD9, 0x45, 0xE0, 0xDB, 0x5D, 0xEC, 0x8B, 0x45, 0xEC },
+                  reinterpret_cast<void *>(&LampGlowBiasDetour), g_glowBiasFix != 0 },
+            };
+            for (const auto & s : sites)
+            {
+                if (!s.on)
+                {
+                    continue;
+                }
+                unsigned char replacement[9] = { 0xE8, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90 };
+                const auto rel = static_cast<std::int32_t>(reinterpret_cast<std::uintptr_t>(s.hook) - (s.at + 5));
+                std::memcpy(replacement + 1, &rel, 4);
+                PatchBytes(s.name, s.at, s.orig, replacement, sizeof(replacement));
+            }
         }
 
         // 11.5f: Die Leuchten-Logik (0x439360) setzt die Blinker vorn (4/5) auf den Takt P, hinten (6/7) auf "nicht P"
