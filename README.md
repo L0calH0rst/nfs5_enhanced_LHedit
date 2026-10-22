@@ -88,6 +88,7 @@ Gamepads are read through [SDL3](https://libsdl.org), the game never talks to th
 | Bindings that stay | The game sees one controller, always present and always at the same place in its list, so bindings made in *Options > Controller* survive restarts and pad swaps. |
 | Modern default bindings | Right trigger accelerates, left trigger brakes, left stick steers, A hand brake, B camera, X look behind, Y reset car, right and left shoulder shift up and down. Applied when the gamepad is picked as default controller in *Options > Controller*. Every stick, trigger and button can still be bound freely. |
 | Rumble | The force feedback the game plays for wheels drives the pad motors. |
+| Scrolling menu lists | Car, paint, track and other lists in the menus scroll with the mouse wheel over the list, and with the arrow keys, Page Up / Page Down and Home / End. The game only moved them by dragging the scroll bar. The wheel over a closed drop down list picks the next or previous entry. |
 
 ### Widescreen
 
@@ -215,6 +216,7 @@ Everything is set in `nfs5_enhanced.ini`, and every setting is explained in the 
 | `[Text]` | Sharp text, enlargement factor and edge sharpness. |
 | `[Detail]` | Draw distance, far clip, distant wheels. |
 | `[Controller]` | SDL3 gamepads, rumble, dead zones, default bindings. |
+| `[Menu]` | Mouse wheel and key scrolling of the menu lists. |
 
 Common adjustments:
 
