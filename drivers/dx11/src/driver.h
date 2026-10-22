@@ -570,6 +570,7 @@ namespace dx11z
         ComPtr<ID3D11SamplerState> m_HeadSampler;
 
         void InstallHeadlightHooks();
+        void InstallSkidHook();
         bool UpdateHeadMap(
             bool day
         );
@@ -748,6 +749,7 @@ namespace dx11z
         std::uint32_t m_BackgroundColor = 0;
         float m_ClearDepthValue = 1.0f;
         float m_DepthBias = 0.0f;
+        bool m_SkidDraw = false; // inside the skid mark draw 0x451420 (BUGS.md 19.1)
         bool m_WhiteDiffuse = false;
         bool m_TwoUvSets = false;
         bool m_FogTableActive = false;
@@ -907,6 +909,7 @@ namespace dx11z
         std::uint32_t m_ConfigReflectionTint = 0xFFFFFF;
         int m_ConfigRemoveBaked = 1;
         bool m_ConfigGuardBand = true;
+        float m_ConfigSkidBias = 0.003f; // '[World] SkidDepthBias' (BUGS.md B22): skid marks moved towards the camera, share of the distance
         int m_ConfigReflectionDebug = 0;
         std::vector<std::uint32_t> m_ConfigWaterTextures;
         std::vector<std::uint32_t> m_ConfigShoreTextures; // water part (low alpha) joins the water mask
@@ -1118,6 +1121,14 @@ namespace dx11z
         void OnDayTrackDraw(
             bool begin
         );
+
+        // Called around the game's skid mark draw 0x451420 (begin, end), '[World] SkidDepthBias' (BUGS.md 19.1).
+        void OnSkidDraw(
+            bool begin
+        )
+        {
+            m_SkidDraw = begin;
+        }
 
         // First driver draw inside a day world draw: the game has updated the camera matrices by now.
         void PrepareDayPending();

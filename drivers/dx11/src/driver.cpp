@@ -1451,6 +1451,11 @@ namespace dx11z
             m_ConfigReflectionStrength = std::clamp( static_cast<float>(std::atof( water_value( "ReflectionStrength", "0.6" ).c_str() )), 0.0f, 1.0f );
             m_ConfigReflectionTint = static_cast<std::uint32_t>(std::strtoul( water_value( "ReflectionTint", "FFFFFF" ).c_str(), nullptr, 16 )) & 0xFFFFFFu;
             m_ConfigGuardBand = ::GetPrivateProfileIntA( "World", "GuardBand", 1, lights_ini.c_str() ) != 0;
+            {
+                char bias[32] = {};
+                ::GetPrivateProfileStringA( "World", "SkidDepthBias", "0.003", bias, sizeof( bias ), lights_ini.c_str() );
+                m_ConfigSkidBias = std::clamp( static_cast<float>(std::atof( bias )), 0.0f, 0.1f );
+            }
             m_ConfigReflectionDebug = std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Water", "ReflectionDebug", 0, lights_ini.c_str() )), 0, 4 );
             m_ConfigReflectionTwoSided = std::clamp( std::atoi( water_value( "ReflectionTwoSided", "1" ).c_str() ), 0, 1 );
             m_ConfigReflectionWaves = std::clamp( static_cast<float>(std::atof( water_value( "ReflectionWaves", "3" ).c_str() )), 0.0f, 20.0f );
@@ -1529,6 +1534,12 @@ namespace dx11z
         if (m_ConfigHeadlights > 0 || m_ConfigMeasure > 0)
         {
             InstallHeadlightHooks();
+        }
+
+        Log( "Config SkidDepthBias %.4f", m_ConfigSkidBias );
+        if (m_ConfigSkidBias > 0.0f)
+        {
+            InstallSkidHook();
         }
     }
 
@@ -3665,6 +3676,11 @@ namespace dx11z
         std::memcpy( &vertex, source, VertexStride() );
         vertex.m_Z += m_DepthBias;
 
+        // Skid marks lie flat at the height of the car body and run straight for several metres, the curved
+        // road cuts through them (BUGS.md 19.1). Moving them by a share of the distance keeps the bias small up close.
+        if (m_SkidDraw)
+            vertex.m_Z = std::max( 0.0f, vertex.m_Z - m_ConfigSkidBias * (1.0f - vertex.m_Z) );
+
         if (m_WhiteDiffuse)
         {
             vertex.m_Diffuse = 0xFFFFFFFF;
@@ -5315,6 +5331,25 @@ namespace dx11z
         }
 
 
+        // Skid mark draw 0x451420, slot 2 of the table 005B3D28 (calls FUN_0047a060), thiscall with two arguments
+        // like the track chunk draw (doc/BUGS.md 19.1).
+        constexpr std::uintptr_t SKID_DRAW = 0x00451420;
+        constexpr std::uintptr_t SKID_DRAW_SLOT = 0x005B3D30;
+
+        void __fastcall SkidDrawHook(
+            void * self,
+            void *,
+            std::uint32_t a,
+            std::uint32_t b
+        )
+        {
+            Driver & driver = Driver::GetInstance();
+            driver.OnSkidDraw( true );
+            reinterpret_cast<void( __thiscall * )(void *, std::uint32_t, std::uint32_t)>(SKID_DRAW)(self, a, b);
+            driver.OnSkidDraw( false );
+        }
+
+
         // Track chunk draw FUN_00450ca0, slot 2 of the table 005B3CF0, thiscall with two arguments. It runs
         // by day and by night; the colour nodes with the headlight code only exist at night (doc/LICHT.md 7.9).
         constexpr std::uintptr_t TRACK_DRAW = 0x00450CA0;
@@ -5539,6 +5574,19 @@ namespace dx11z
         ::AddVectoredExceptionHandler( 1, WatchHandler );
     }
 
+
+    void Driver::InstallSkidHook()
+    {
+        if (*reinterpret_cast<const std::uintptr_t *>(SKID_DRAW_SLOT) != SKID_DRAW)
+        {
+            Log( "Skid hook not installed, table entry %08X does not match", static_cast<unsigned>(SKID_DRAW_SLOT) );
+            m_ConfigSkidBias = 0.0f;
+            return;
+        }
+
+        PatchSlot( SKID_DRAW_SLOT, reinterpret_cast<const void *>(&SkidDrawHook) );
+        Log( "Skid hook installed at %08X, depth bias %.4f", static_cast<unsigned>(SKID_DRAW_SLOT), m_ConfigSkidBias );
+    }
 
     void Driver::InstallHeadlightHooks()
     {
