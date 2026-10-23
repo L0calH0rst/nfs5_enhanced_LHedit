@@ -83,6 +83,16 @@ namespace nfs5
     }
 
 
+    void Detail::LampGlowDepthHook(
+        safetyhook::Context & context
+    )
+    {
+        // Keep the glow at least one step in front of the lamp lens at any distance.
+        auto & bias = *reinterpret_cast<std::int32_t *>(context.ebp + game::detail::LAMP_GLOW_DEPTH_BIAS_EBP);
+        bias = std::min( bias, -1 );
+    }
+
+
     void Detail::OcclusionHook(
         safetyhook::Context & context
     )
@@ -237,6 +247,11 @@ namespace nfs5
                 site::WHEEL_SUSPENSION_LOOP.m_Signature, site::WHEEL_SUSPENSION_LOOP_JL );
         }
 
+        // Lamp glows turn partly black from about 90 m on, also in the stock game.
+        m_LampGlowDepthHook = hook::CreateMid( "LampGlowDepth", site::LAMP_GLOW_DEPTH_BIAS.m_Address, site::LAMP_GLOW_DEPTH_BIAS.m_Signature,
+            &LampGlowDepthHook );
+        ok &= m_LampGlowDepthHook != nullptr;
+
         m_Installed = true;
 
         LOG_INFO( "Detail installed, draw distance x{:.2f} at least {:.0f} far clip {:.0f} distant wheels {} occlusion from {:.0f} all ok {}",
@@ -249,6 +264,7 @@ namespace nfs5
     {
         RestoreWheelTable();
 
+        m_LampGlowDepthHook.reset();
         m_OcclusionHook.reset();
         m_WheelSuspensionPatch.Restore();
         m_CarLodOffsetHook.reset();
