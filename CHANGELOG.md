@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.3.0 (2026-10-23)
+
+- Menu lists (cars, paints, tracks and others) scroll with the mouse wheel over the list, and with
+  the arrow keys, `Page Up`, `Page Down` and `Home`, `End`. The game only moved them by dragging the scroll
+  bar. New `[Menu]` section: `Scroll`, `WheelRows` (rows per wheel notch, default `3`) and
+  `WheelSelect` (the wheel over a closed drop down list picks the next or previous entry).
+
+### Fixes
+
+- Sky and track chunks were culled with the narrow 4:3 field of view even with `HorPlus` on, so
+  ground and sky near the screen edges could be missing on wide monitors. Culling now uses the
+  same widened field of view as the picture.
+- Ground pieces close to the car were dropped by the occlusion test against the track's walls.
+  That test runs in the top view without height, so from a slightly raised spot nearby ground was
+  hidden although it is in plain sight. New `OcclusionRange` (`[Detail]`, default 220m) keeps
+  objects closer than that drawn. `0` restores the original test everywhere.
+- Wheels never received their suspension travel at LOD 0, the model `FullCarDetail` selects, and
+  stayed fixed to the rolling body instead, sinking into the ground on the outside of a bend and
+  lifting on the inside.
+- Lamp glow sprites (headlights, tail lights) round their depth bias to 0 beyond about 90m and
+  z-fight with the lamp lens of the car model, turning part of the glow black; this also happens
+  in the stock game.
+
+  Thanks to [L0calH0rst](https://github.com/L0calH0rst) for the contribution.
+
 ## 1.2.0 (2026-10-19)
 
 ### Controllers

@@ -96,6 +96,7 @@ Gamepads are read through [SDL3](https://libsdl.org), the game never talks to th
 |---|---|
 | Hor+ projection | Every 3D camera, including the rear view mirror, keeps the 4:3 vertical view and opens up to the sides. Nothing is cropped or stretched. |
 | Round light flares | Headlight and lamp flares stay round on wide screens instead of being stretched. |
+| Matching culling | Sky and track chunks are selected with the same widened field of view as the picture. The game used to test them against the narrow 4:3 view even with Hor+ on, so ground and sky near the screen edges could be missing on wide monitors. |
 | Unlocked resolutions | Every display mode of 640x480 and up is offered. The game used to hide modes behind a video memory estimate from 2000. |
 | Largest mode | The resolution list skipped the last entry of the driver mode table, usually the native resolution in 32 bit, so it was only offered in 16 bit. |
 | Race resolution | Races can use the Options resolution, the desktop resolution or any fixed size, in 16 or 32 bit color. |
@@ -127,10 +128,12 @@ Gamepads are read through [SDL3](https://libsdl.org), the game never talks to th
 | Draw distance | Track scenery is drawn twice as far, on top of the *View Distance* option. `MinDrawDistance` draws at least a fixed distance everywhere. |
 | Consistent scenery | Two kinds of scenery had fixed limits of 600 and 700 m that ignored the draw distance. With a longer distance they disappeared while everything around them was still drawn, buildings floated and ground went missing. They now follow the draw distance. |
 | Far clip | The 700 unit far plane that cut off cars and objects follows the new draw distance, with room for large pieces of scenery so they are not sliced at the horizon. |
+| No nearby holes | Ground close to the car no longer disappears behind the track's occlusion walls, tested in the top view without height, which left holes just outside a slightly raised spot. `OcclusionRange` (default 220m) sets how close, `0` restores the original test. |
 | Car detail | Cars keep their detailed models 4 times further. The wider Hor+ view is compensated automatically. |
-| Full car detail | The game never drew the most detailed car model in races, not even for your own car, so cars looked simpler than in the garage. Nearby cars now use the same model the garage shows. |
+| Full car detail | The game never drew the most detailed car model in races, not even for your own car, so cars looked simpler than in the garage. Nearby cars now use the same model the garage shows, and keep their wheel suspension travel, which the game only applied at lower LODs and used to leave fixed to the rolling body. |
 | Full texture quality | The game rates any CPU above 2.1 GHz as a 1990s machine and loads every texture in 16 bit, the larger ones at half size, so car lettering, plates and decals look blurry next to the garage. Textures now load at the highest quality. |
 | Distant wheels | The two farthest car models have no wheels in the game data, cars in the distance now keep theirs. |
+| Lamp glow | Headlight and tail light glow sprites no longer turn black past about 90m, where their depth bias used to round down to 0 and z-fight with the lamp lens. This also happened in the stock game. |
 
 ### Stability and compatibility
 
@@ -214,7 +217,7 @@ Everything is set in `nfs5_enhanced.ini`, and every setting is explained in the 
 | `[IO]`, `[Loading]` | Read chunk size, free space cache, CPU clock check. |
 | `[HudScaling]` | HUD size, text, gauge style, loading screen. |
 | `[Text]` | Sharp text, enlargement factor and edge sharpness. |
-| `[Detail]` | Draw distance, far clip, distant wheels. |
+| `[Detail]` | Draw distance, far clip, distant wheels, occlusion range. |
 | `[Controller]` | SDL3 gamepads, rumble, dead zones, default bindings. |
 | `[Menu]` | Mouse wheel and key scrolling of the menu lists. |
 
@@ -236,6 +239,8 @@ Common adjustments:
 | Scenery even further away | `DrawDistanceScale = 4.0`, or a fixed `MinDrawDistance = 2000` |
 | Stronger or weaker rumble | `RumbleStrength = 1.5` or `0.5` |
 | The game's own DirectInput controller handling | `Enabled = 0` under `[Controller]` |
+| The original occlusion test near walls | `OcclusionRange = 0` under `[Detail]` |
+| No mouse wheel scrolling in menu lists | `Scroll = 0` under `[Menu]` |
 
 > [!TIP]
 > With interpolation on, the race draws as often as it can. Cap it with `FpsLimit` or with `VSync`
