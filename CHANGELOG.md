@@ -18,6 +18,11 @@ suspension at LOD 0 and the lamp glow depth fix are now part of upstream).
 - The sides of distant objects are tested against the occlusion walls as well
   (`OcclusionEdge`, `OcclusionEdgeRange`), no more single track pieces floating in gaps.
 
+### Texture pool
+
+- `nfsp_texpool.asi` (own CMake target, `nfsp_texpool.ini`): the in-race texture pool `DTEX` grows
+  from 24 MB to `TexturePoolMB` (default 256 MB), so HD textures no longer crash the game.
+
 ### Build
 
 - GitHub Actions workflow builds the release package (Win32, MSVC) for every `v*` tag.

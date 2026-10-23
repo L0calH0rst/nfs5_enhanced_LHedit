@@ -55,6 +55,7 @@ Unlike the original mod which intentionally kept vanilla visuals unchanged, **LH
 - [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) installed as `dinput.dll` in the game folder
 - [SDL3](https://github.com/libsdl-org/SDL) (`SDL3.dll`) for gamepad support
 - **LFSP** (`lfsp.asi` and `lfsp.ini` next to `Porsche.exe`) for the lighting and water features: dx11z reads their settings from `lfsp.ini` and asks `lfsp.asi` for the render queue list (water reflections), lamp data, model year tint and high beam. Without LFSP these features stay off or fall back to plain behaviour.
+- Optional **nfsp_texpool** (`nfsp_texpool.asi` and `nfsp_texpool.ini` next to `Porsche.exe`) for HD textures: enlarges the in-race texture pool `DTEX` from 24 MB to `TexturePoolMB` (default 256). The game crashes when that pool runs full, a 1024x1024 texture with mips takes 5.6 MB.
 
 ---
 
@@ -64,7 +65,7 @@ Unlike the original mod which intentionally kept vanilla visuals unchanged, **LH
 Unzip the release package into a folder.
 
 ### 2. Copy into game folder
-Copy `nfs5_enhanced.asi`, `nfs5_enhanced.ini`, `lfsp.asi` (from `lfsp/`), `lfsp.ini` (from `config/`) and `SDL3.dll` next to `Porsche.exe`, and `dx11z.dll` into the `Drivers` directory of the game.
+Copy `nfs5_enhanced.asi`, `nfs5_enhanced.ini`, `lfsp.asi` (from `lfsp/`), `lfsp.ini` (from `config/`), optionally `nfsp_texpool.asi` (from `texpool/`) and `nfsp_texpool.ini` (from `config/`), and `SDL3.dll` next to `Porsche.exe`, and `dx11z.dll` into the `Drivers` directory of the game.
 
 ### 3. Play
 Run `Porsche.exe`. Options are configured in `nfs5_enhanced.ini`.
