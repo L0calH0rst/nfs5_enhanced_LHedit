@@ -30,7 +30,7 @@ jobs:
           $log = Get-Content CHANGELOG.md -Raw
           $m = [regex]::Match($log, "(?s)## $([regex]::Escape($v)) \([^)]*\)\s*(.*?)(?=\n## )")
           $notes = $m.Groups[1].Value.Trim()
-          $notes += "`n`n---`n`n### Installation`n1. ``nfs5_enhanced.asi``, ``nfs5_enhanced.ini`` and ``SDL3.dll`` next to ``Porsche.exe``.`n2. ``Drivers/dx11z.dll`` into the game's ``Drivers`` folder.`n3. Needs the USA release with the official **v3.5** patch and [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) as ``dinput.dll``. Lighting/water features additionally need **LFSP** (``lfsp.asi``/``lfsp.ini``, not included)."
+          $notes += "`n`n---`n`n### Installation`n1. ``nfs5_enhanced.asi``, ``nfs5_enhanced.ini``, ``lfsp.asi``, ``lfsp.ini`` and ``SDL3.dll`` next to ``Porsche.exe``.`n2. ``Drivers/dx11z.dll`` into the game's ``Drivers`` folder.`n3. Optional for HD textures: ``nfsp_texpool.asi`` and ``nfsp_texpool.ini`` next to ``Porsche.exe`` (larger in-race texture pool).`n4. Needs the USA release with the official **v3.5** patch and [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) as ``dinput.dll``."
           Set-Content -Path release_notes.md -Value $notes -Encoding utf8
           $global:LASTEXITCODE = 0
         env:
@@ -50,6 +50,8 @@ jobs:
           Copy-Item build/Release/nfs5_enhanced.asi $pkg/
           Copy-Item build/Release/SDL3.dll $pkg/
           Copy-Item config/nfs5_enhanced.ini $pkg/
+          Copy-Item build/lfsp/Release/lfsp.asi, config/lfsp.ini $pkg/
+          Copy-Item build/texpool/Release/nfsp_texpool.asi, config/nfsp_texpool.ini $pkg/
           Copy-Item build/drivers/dx11/Release/dx11z.dll "$pkg/Drivers/"
           Copy-Item README.md, CHANGELOG.md, LICENSE $pkg/
           Copy-Item external/SDL3/LICENSE.txt "$pkg/SDL3-LICENSE.txt"
@@ -62,8 +64,8 @@ jobs:
           name: nfs5_enhanced_LHedit_${{ env.TAG }}
           path: ${{ env.ZIP }}
 
+      # Also runs when the release exists: notes and the package are replaced.
       - name: Publish release
-        if: env.RELEASE_EXISTS == 'False' || github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
