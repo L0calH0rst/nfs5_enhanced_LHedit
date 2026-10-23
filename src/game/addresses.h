@@ -708,7 +708,7 @@ namespace nfs5::game
         inline constexpr int FORMAT_ARGB4444 = 7;
     }
 
-    // Front end lists, scrolled by the mouse wheel and the arrow keys (LHedit, from LFSP v7j, doc/MENU.md 1).
+    // Front end lists, scrolled by the mouse wheel and the arrow keys.
     // Lists are 'FEComboBox' [drop down, 'NFS5.ComboBoxSlider': cars, paints, tracks] or 'FEListBox'
     // [always open]. The game turns 'WM_MOUSEWHEEL' into events of type 9, but the control dispatcher
     // 'sub_525F80' has no case for them, and the key slot [+10h] of both classes is 'sub_4D1B40' [not handled].

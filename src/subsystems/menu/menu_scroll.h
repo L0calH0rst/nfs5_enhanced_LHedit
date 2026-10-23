@@ -1,6 +1,6 @@
 #pragma once
 
-// Front end lists scrolled by the mouse wheel and the arrow keys (LHedit, from LFSP v7j).
+// Front end lists scrolled by the mouse wheel and the arrow keys.
 // Lists only move by dragging the scroll bar in the original. The game reads the wheel, but no
 // control ever receives it, and both list classes leave keys unhandled. The list under the mouse
 // is remembered from its mouse move slot, and its scroll accessor is moved the way the arrow

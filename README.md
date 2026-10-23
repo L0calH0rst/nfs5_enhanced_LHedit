@@ -87,7 +87,7 @@ Everything is set in `nfs5_enhanced.ini`, and every setting is explained in the 
 | `[IO]`, `[Loading]` | Read chunk size, free space cache, CPU clock check. |
 | `[HudScaling]` | HUD size, text, gauge style, loading screen. |
 | `[Text]` | Sharp text, enlargement factor and edge sharpness. |
-| `[Detail]` | Draw distance, far clip, distant wheels. |
+| `[Detail]` | Draw distance, far clip, distant wheels, occlusion range. |
 | `[Controller]` | SDL3 gamepads, rumble, dead zones, default bindings. |
 | `[Menu]` | Mouse wheel and key scrolling of the menu lists. |
 

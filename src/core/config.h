@@ -195,7 +195,7 @@ namespace nfs5
         bool m_TriggerBindings = true;
     };
 
-    // Front end lists scrolled by the mouse wheel and the arrow keys (LHedit).
+    // Front end lists scrolled by the mouse wheel and the arrow keys.
     struct MenuSettings
     {
         bool m_Scroll = true;

@@ -1,8 +1,9 @@
 # Changelog
 
-## 1.2.0-LH.1 (2026-10-22)
+## 1.3.0-LH.1 (2026-10-23)
 
-LHedit build on top of upstream 1.2.0.
+LHedit build on top of upstream 1.3.0 (menu scrolling, Hor+ culling, `OcclusionRange`, wheel
+suspension at LOD 0 and the lamp glow depth fix are now part of upstream).
 
 ### Direct3D 11 renderer (dx11z)
 
@@ -12,25 +13,39 @@ LHedit build on top of upstream 1.2.0.
 - The racer list is read through `LfspCarList`.
 - Distance measure log.
 
-### Widescreen
-
-- Hor+ culling: the half FOV used for sky and world culling is widened, so ground, objects and
-  sky at the screen edges are no longer culled on wide displays.
-
 ### Detail
 
-- Nearby objects that the occlusion walls would hide are drawn, and the sides of distant objects
-  are tested against the occlusion walls (no more missing scenery behind walls).
-- Wheels keep their suspension at LOD 0 with `FullCarDetail`.
-
-### Menu
-
-- Menu lists (cars, paints, tracks) scroll with the mouse wheel and the arrow, page and home/end
-  keys; the wheel over a closed drop down list picks the next or previous entry (`[Menu]`).
+- The sides of distant objects are tested against the occlusion walls as well
+  (`OcclusionEdge`, `OcclusionEdgeRange`), no more single track pieces floating in gaps.
 
 ### Build
 
 - GitHub Actions workflow builds the release package (Win32, MSVC) for every `v*` tag.
+
+## 1.3.0 (2026-10-23)
+
+- Menu lists (cars, paints, tracks and others) scroll with the mouse wheel over the list, and with
+  the arrow keys, `Page Up`, `Page Down` and `Home`, `End`. The game only moved them by dragging the scroll
+  bar. New `[Menu]` section: `Scroll`, `WheelRows` (rows per wheel notch, default `3`) and
+  `WheelSelect` (the wheel over a closed drop down list picks the next or previous entry).
+
+### Fixes
+
+- Sky and track chunks were culled with the narrow 4:3 field of view even with `HorPlus` on, so
+  ground and sky near the screen edges could be missing on wide monitors. Culling now uses the
+  same widened field of view as the picture.
+- Ground pieces close to the car were dropped by the occlusion test against the track's walls.
+  That test runs in the top view without height, so from a slightly raised spot nearby ground was
+  hidden although it is in plain sight. New `OcclusionRange` (`[Detail]`, default 220m) keeps
+  objects closer than that drawn. `0` restores the original test everywhere.
+- Wheels never received their suspension travel at LOD 0, the model `FullCarDetail` selects, and
+  stayed fixed to the rolling body instead, sinking into the ground on the outside of a bend and
+  lifting on the inside.
+- Lamp glow sprites (headlights, tail lights) round their depth bias to 0 beyond about 90m and
+  z-fight with the lamp lens of the car model, turning part of the glow black; this also happens
+  in the stock game.
+
+  Thanks to [L0calH0rst](https://github.com/L0calH0rst) for the contribution.
 
 ## 1.2.0 (2026-10-19)
 
