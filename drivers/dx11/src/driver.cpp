@@ -3664,9 +3664,15 @@ namespace dx11z
         }
 
         // Rasterizer, D3D7 culls by screen winding like D3D11 with clockwise front faces.
+        // Projected headlight overlays share depth with the underlying road geometry.
+        const bool projected_candidate = render[rs::ZENABLE] != 0 &&
+            render[rs::ZWRITEENABLE] != 0 && render[rs::ALPHABLENDENABLE] != 0 &&
+            render[rs::ZFUNC] == 4 && render[rs::STENCILENABLE] == 0 &&
+            m_Bound[0] != nullptr && m_Bound[1] == nullptr &&
+            m_Bound[0]->m_Width == 64 && m_Bound[0]->m_Height == 64;
         const std::uint64_t raster_key = static_cast<std::uint64_t>(render[rs::CULLMODE] & 3) |
-            (static_cast<std::uint64_t>(render[rs::FILLMODE] == 2) << 2);
-
+            (static_cast<std::uint64_t>(render[rs::FILLMODE] == 2) << 2) |
+            (static_cast<std::uint64_t>(projected_candidate) << 3);
         if (m_RasterCache == nullptr || m_RasterKey != raster_key)
         {
             auto & raster = m_Rasters[raster_key];
@@ -3679,6 +3685,7 @@ namespace dx11z
                 desc.CullMode = cull == 2 ? D3D11_CULL_FRONT : (cull == 3 ? D3D11_CULL_BACK : D3D11_CULL_NONE);
                 desc.FrontCounterClockwise = FALSE;
                 desc.DepthClipEnable = TRUE;
+                desc.DepthBias = projected_candidate ? -8 : 0;
                 desc.ScissorEnable = TRUE;
                 m_Device->CreateRasterizerState( &desc, raster.Put() );
             }
