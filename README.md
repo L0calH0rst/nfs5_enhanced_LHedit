@@ -10,6 +10,7 @@ For general errors, base setup explanations, or core troubleshooting, please ref
 
 ### LHedit Enhancements (`nfs5_enhanced_LHedit`)
 Unlike the original mod which intentionally kept vanilla visuals unchanged, **LHedit** actively expands the visual and features of the game. Built on top of NFS5 Enhanced v1.2.0, LHedit enhances `dx11z.dll` with real-time player and opponent headlight illumination (including high beams), tail/brake/signal light glows, real-time water reflections, special alpha edge (`B4`) and back-face geometry (`B8`) passes, as well as extended Hor+ widescreen sky and world culling hooks.
+For new features, the additional "Love for Speed Porsche" lfsp.asi is used. This one is exclusive for the nfs5_enhanced_LHedit version.
 
 > [!NOTE]
 > **Pipeline Architecture Note:** LHedit intentionally bypasses the v1.2.0 performance state-caching and ring-buffer streaming rewrite for pipeline execution (`ApplyPipeline` / `Flush`). Because LHedit's extra rendering passes (headlights, light glows, water reflections, B4 alpha edge, B8 back-face) bind state and buffers outside of the v1.2.0 state cache assumptions, LHedit uses full state rebinding and per-draw buffer discards to guarantee render state correctness and stability across all custom passes.
@@ -54,8 +55,8 @@ Unlike the original mod which intentionally kept vanilla visuals unchanged, **LH
 - **Need for Speed: Porsche Unleashed**, USA release plus official **v3.5** patch applied over
 - [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) installed as `dinput.dll` in the game folder
 - [SDL3](https://github.com/libsdl-org/SDL) (`SDL3.dll`) for gamepad support
-- **LFSP** (`lfsp.asi` and `lfsp.ini` next to `Porsche.exe`) for the lighting and water features: dx11z reads their settings from `lfsp.ini` and asks `lfsp.asi` for the render queue list (water reflections), lamp data, model year tint and high beam. Without LFSP these features stay off or fall back to plain behaviour.
-- Optional **nfsp_texpool** (`nfsp_texpool.asi` and `nfsp_texpool.ini` next to `Porsche.exe`) for HD textures: enlarges the in-race texture pool `DTEX` from 24 MB to `TexturePoolMB` (default 256). The game crashes when that pool runs full, a 1024x1024 texture with mips takes 5.6 MB.
+- **LFSP**(included in LHedit) (`lfsp.asi` and `lfsp.ini` next to `Porsche.exe`) for the lighting and water features: dx11z reads their settings from `lfsp.ini` and asks `lfsp.asi` for the render queue list (water reflections), lamp data, model year tint and high beam. Without LFSP these features stay off or fall back to plain behaviour.
+- Optional **nfsp_texpool** (included in LHedit) (`nfsp_texpool.asi` and `nfsp_texpool.ini` next to `Porsche.exe`) for HD textures: enlarges the in-race texture pool `DTEX` from 24 MB to `TexturePoolMB` (default 256). The game crashes when that pool runs full, a 1024x1024 texture with mips takes 5.6 MB.
 
 ---
 
