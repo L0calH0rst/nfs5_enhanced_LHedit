@@ -1452,7 +1452,7 @@ namespace dx11z
             m_ConfigReflections = std::clamp( std::atoi( water_value( "Reflections", "1" ).c_str() ), 0, 1 );
             m_ConfigReflectionStrength = std::clamp( static_cast<float>(std::atof( water_value( "ReflectionStrength", "0.6" ).c_str() )), 0.0f, 1.0f );
             m_ConfigReflectionTint = static_cast<std::uint32_t>(std::strtoul( water_value( "ReflectionTint", "FFFFFF" ).c_str(), nullptr, 16 )) & 0xFFFFFFu;
-            m_ConfigGuardBand = ::GetPrivateProfileIntA( "World", "GuardBand", 1, lights_ini.c_str() ) != 0;
+            m_ConfigGuardBand = ::GetPrivateProfileIntA( "World", "GuardBand", 0, lights_ini.c_str() ) != 0;
             {
                 char bias[32] = {};
                 ::GetPrivateProfileStringA( "World", "SkidDepthBias", "0.003", bias, sizeof( bias ), lights_ini.c_str() );

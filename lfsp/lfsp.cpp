@@ -564,7 +564,7 @@ namespace
         g_trackDiag = GetPrivateProfileIntA("World", "TrackDiag", 0, ini);
         g_trackDiagKey = ReadKey(ini, "TrackDiagKey", "G", "World");
         g_clipDiag = GetPrivateProfileIntA("World", "ClipDiag", 0, ini);
-        g_guardBand = GetPrivateProfileIntA("World", "GuardBand", 1, ini) != 0;
+        g_guardBand = GetPrivateProfileIntA("World", "GuardBand", 0, ini) != 0;
         {
             char scale[32] = {};
             GetPrivateProfileStringA("World", "CullRadiusScale", "2.0", scale, sizeof(scale), ini);
