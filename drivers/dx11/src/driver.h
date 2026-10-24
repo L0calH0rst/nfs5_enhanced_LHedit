@@ -195,6 +195,7 @@ namespace dx11z
         float m_RearViewToLight[16][16];
         // Test switches (BUGS.md B21): x vertex alpha forced to 1.
         float m_Test[4];
+        float m_Clip[4]; // clip rectangle of the game in game pixels: left, top, right, bottom
     };
 
     struct Texture

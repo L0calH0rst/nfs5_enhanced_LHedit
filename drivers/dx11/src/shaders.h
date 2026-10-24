@@ -9,7 +9,7 @@ namespace dx11z::shaders
     inline constexpr char SCENE[] = R"hlsl(
 cbuffer DrawConstants : register( b0 )
 {
-    float4 g_Target; // width, height, 1 / width, 1 / height
+    float4 g_Target; // vertex offset in game pixels (x, y), 1 / width, 1 / height of the game
     int4 g_ColorOp[2]; // op, arg1, arg2, unused
     int4 g_AlphaOp[2];
     float4 g_Factor;
@@ -32,6 +32,7 @@ cbuffer DrawConstants : register( b0 )
     float4 g_RearRight[16];
     row_major float4x4 g_RearViewToLight[16];
     float4 g_Test; // test switches (BUGS.md B21): x '[Dx11] TestVertexAlpha'
+    float4 g_Clip; // clip rectangle of the game in game pixels: left, top, right, bottom
 };
 
 Texture2D g_Texture0 : register( t0 );
@@ -67,10 +68,20 @@ PixelIn MainVS( VertexIn input )
     float rhw = input.m_Position.w;
     float w = ( rhw > 0.0 && rhw < 1e30 ) ? 1.0 / rhw : 1.0;
 
-    // D3D7 pixel centers sit on integers, D3D11 ones on halves.
+    // Game pixels to the render target; the offset (g_Target.xy) keeps clip edges on render pixel edges.
+    // The game clips polygons a pixel inside its clip rectangle, the frame clears all of it: a sub view (rear view
+    // mirror) kept a line of its clear colour at the edges. Corners that close to an edge go onto it.
+    float2 at = input.m_Position.xy;
+    if ( g_Clip.z > g_Clip.x + 4.0 && g_Clip.w > g_Clip.y + 4.0 )
+    {
+        at.x = at.x < g_Clip.x + 1.01 && at.x > g_Clip.x - 0.01 ? g_Clip.x : at.x;
+        at.x = at.x > g_Clip.z - 1.01 && at.x < g_Clip.z + 0.01 ? g_Clip.z : at.x;
+        at.y = at.y < g_Clip.y + 1.01 && at.y > g_Clip.y - 0.01 ? g_Clip.y : at.y;
+        at.y = at.y > g_Clip.w - 1.01 && at.y < g_Clip.w + 0.01 ? g_Clip.w : at.y;
+    }
     float2 ndc;
-    ndc.x = ( input.m_Position.x + 0.5 ) * g_Target.z * 2.0 - 1.0;
-    ndc.y = 1.0 - ( input.m_Position.y + 0.5 ) * g_Target.w * 2.0;
+    ndc.x = ( at.x + g_Target.x ) * g_Target.z * 2.0 - 1.0;
+    ndc.y = 1.0 - ( at.y + g_Target.y ) * g_Target.w * 2.0;
 
     output.m_Position = float4( ndc * w, saturate( input.m_Position.z ) * w, w );
     output.m_Diffuse = input.m_Diffuse.zyxw;
@@ -130,8 +141,8 @@ MirrorOut MirrorVS( VertexIn input )
     float3 c = mul( float4( mirrored, 1.0 ), g_ClipOfView ).xyz;
 
     // Screen x = xc / wc * fx + cx, as homogeneous coordinates so the hardware clips at the camera.
-    float sx = c.x * g_MirrorViewport.x + ( g_MirrorViewport.z + 0.5 ) * c.z;
-    float sy = c.y * g_MirrorViewport.y + ( g_MirrorViewport.w + 0.5 ) * c.z;
+    float sx = c.x * g_MirrorViewport.x + ( g_MirrorViewport.z + g_Target.x ) * c.z;
+    float sy = c.y * g_MirrorViewport.y + ( g_MirrorViewport.w + g_Target.y ) * c.z;
     output.m_Position = float4( sx * g_Target.z * 2.0 - c.z, c.z - sy * g_Target.w * 2.0, c.z - 0.05, c.z );
     output.m_Diffuse = input.m_Diffuse.zyxw;
     output.m_Specular = input.m_Specular.zyxw;

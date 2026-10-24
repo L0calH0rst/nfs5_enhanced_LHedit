@@ -4120,8 +4120,11 @@ namespace dx11z
 
         // Constants.
         DrawConstants constants = {};
-        constants.m_Target[0] = static_cast<float>(m_Width);
-        constants.m_Target[1] = static_cast<float>(m_Height);
+        // Offset of the vertices in game pixels. 0: a clip edge of the game lands on the edge of the render pixels the
+        // clip rectangle clears (ScaledClip); with +0.5 a sub view (rear view mirror) kept a line of its clear colour
+        // left and on top when the frame is drawn larger than the game sees it, and edges were half covered (MSAA).
+        constants.m_Target[0] = 0.0f;
+        constants.m_Target[1] = 0.0f;
         constants.m_Target[2] = 1.0f / static_cast<float>(std::max( m_Width, 1 ));
         constants.m_Target[3] = 1.0f / static_cast<float>(std::max( m_Height, 1 ));
 
@@ -4160,6 +4163,10 @@ namespace dx11z
         constants.m_Debug[2] = static_cast<float>(m_ConfigAlphaEdgeRef) / 255.0f;
         constants.m_Debug[3] = m_ConfigAlphaMipScale;
         constants.m_Test[0] = m_ConfigTestVertexAlpha ? 1.0f : 0.0f;
+        constants.m_Clip[0] = static_cast<float>(m_Clip.left);
+        constants.m_Clip[1] = static_cast<float>(m_Clip.top);
+        constants.m_Clip[2] = static_cast<float>(m_Clip.right);
+        constants.m_Clip[3] = static_cast<float>(m_Clip.bottom);
 
         // Other draws of the frame (cars, signs, objects) with the light of the last track mesh (PLAN.md 11.4, doc/LICHT.md 9.7):
         // only depth tested, opaque or normally alpha blended draws; additive and multiplying passes stay as they are.
