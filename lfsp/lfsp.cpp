@@ -2873,13 +2873,29 @@ namespace
     constexpr float kThirdBrakeX = 0.25f;
     std::set< const unsigned char * > g_thirdBrakeLogged;
 
+    // Vorderste Lage (kleinstes z) der Leuchten 0/1 je Modell. Seitenmarkierungen hängen ebenfalls an 0/1, liegen aber
+    // weiter hinten an der Flanke: Nur Leuchten bis kHeadlightDepth hinter der vordersten gelten als Scheinwerfer.
+    constexpr float kHeadlightDepth = 0.25f;
+    std::map< const void *, float > g_headlightZ;
+
     std::uint32_t __cdecl LampTest(int mirrored, void * model, unsigned number, const unsigned char * lamp)
     {
         RecordLamp(mirrored, model, number, lamp);
+        bool headlight = false;
+        if ((number == 0 || number == 1) && lamp)
+        {
+            const float z = reinterpret_cast<const float *>(lamp)[2];
+            const auto ins = g_headlightZ.emplace(model, z);
+            if (!ins.second && z < ins.first->second)
+            {
+                ins.first->second = z;
+            }
+            headlight = z <= ins.first->second + kHeadlightDepth;
+        }
         const std::uint32_t on = reinterpret_cast<std::uint32_t (__thiscall *)(void *, unsigned)>(kLampTest)(model, number);
         // 9.10f: Der Glow dieser Leuchte folgt gleich (0x43DA77 → 0x43CDD0); Scheinwerfer des Spielerautos bei Fernlicht heller
         g_lampBoost = 1.0f;
-        if ((number == 0 || number == 1) && g_highBeam > 0.0f && g_highGlow > 1.0f && !InFrontend())
+        if (headlight && g_highBeam > 0.0f && g_highGlow > 1.0f && !InFrontend())
         {
             auto * car = CarAt(*reinterpret_cast<const std::uint32_t *>(0x65741C));
             if (car && At<void *>(car, 0x74C) == model)

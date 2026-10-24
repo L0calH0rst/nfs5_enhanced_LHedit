@@ -651,6 +651,8 @@ Wunsch 👤: Beim 944 öffnet L die Klappscheinwerfer, K (Fernlicht der Mod) nic
 
 **Upstream (2026-10-22):** Der Tiefenversatz-Fix ist jetzt Teil von nfs5_enhanced (Detail-Subsystem, MidHook `LampGlowDepth` an `0x43D452` nach dem `FISTP`, Versatz höchstens −1, aktiv mit `[Detail] Enabled = 1`; PR aus Branch `fix/lamp-glow-depth`, in LHedit `master` per Cherry-Pick). LFSP v8f hat `LampGlowDepthFix` und den Umweg an `0x43D44C` deshalb entfernt (beide hätten dieselben Bytes geändert). In LFSP bleiben Fernlicht-Glow (`0x43D195`) und Alpha-Grenze (`0x43D3BA`).
 
+**Nachtrag (2026-10-25, 👤 Bug):** Bei Fernlicht wurden auch die vorderen Seitenmarkierungen heller. Die Lampennummer ist ein Schaltkanal (`[eintrag + 0x44] + 0xC`, Stärke je Kanal in `[model + 0x2D8]`), keine einzelne Leuchte: Manche Modelle legen die Seitenmarkierungen auf Kanal 0/1, damit sie mit dem Licht angehen. Die Prüfung `number == 0 || 1` traf sie deshalb mit. Die Farbe taugt nicht als Merkmal (Marker können weiß sein). Fix: `LampTest` merkt sich je Modell das kleinste z der Leuchten 0/1 (vorderste) und verstärkt nur Leuchten bis `kHeadlightDepth` = 0,25 m dahinter. Die Lichthupe schaltet Kanal 0/1 weiter mit an, nur ohne Verstärkung. 👤 Test offen.
+
 ## 10. HUD-Instrumente nach Lichtschalter (11.3)
 
 Wunsch 👤 (2026-10-17): Die analogen Instrumente sollen zwischen Tag- und Nachtfassung wechseln, wenn das Licht mit L geschaltet wird, nicht bei Fernlicht/Lichthupe. Bisher hängt das an der Tageszeit des Rennens.
