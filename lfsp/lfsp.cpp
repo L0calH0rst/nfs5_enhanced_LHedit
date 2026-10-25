@@ -318,6 +318,13 @@ namespace
     float g_actImpact = 1.0f;  // Stoß-Wackeln bei Aufprall und Landung, Anteil (0 = aus)
     bool g_cineKeyDown = false;
     bool g_actionKeyDown = false;
+    // Freecam zum Testen: Kamera frei bewegen (Numpad), Blick mit der Maus
+    int g_freeKey = VK_F9;     // Taste: Freecam an/aus, 0 = keine
+    float g_freeSpeed = 15.0f; // m/s, mit Umschalt × g_freeFast, mit Strg × 0,2
+    float g_freeFast = 10.0f;  // Faktor mit Umschalt
+    float g_freeFov = 75.0f;   // FOV in Grad
+    float g_freeMouse = 0.15f; // Grad je Mauspixel
+    bool g_freeKeyDown = false;
     unsigned g_windowToggles = 0;
     unsigned g_roofToggles = 0;
     bool g_windowKeyDown = false;
@@ -493,6 +500,7 @@ namespace
 
     // Auspuffrauch bei Motorschaden ([Damage], InstallExhaustSmoke)
     int g_exhaustSmoke = 1;
+    int g_lodMeasure = 0; // [Cars] LodMeasure, InstallLodMeasure
     float g_exhaustStart = 45.0f, g_exhaustFull = 200.0f, g_exhaustMin = 0.25f, g_exhaustMax = 1.0f;
     float g_exhaustBack = 0.9f, g_exhaustSide = 0.35f, g_exhaustHeight = -0.05f;
 
@@ -645,6 +653,16 @@ namespace
             g_cineInCycle, g_cineKey, g_action, g_actionKey, g_actionCams, g_actSide, g_actLook, g_actHeight, g_actBrake,
             g_actBounce, g_actFov, g_actShake);
 
+        char freeKey[64] = {};
+        GetPrivateProfileStringA("Camera", "FreeCamKey", "F9", freeKey, sizeof(freeKey), ini);
+        g_freeKey = freeKey[0] ? ParseKey(freeKey) : 0;
+        g_freeSpeed = readFloat("FreeCamSpeed", "15", 0.5f, 500.0f);
+        g_freeFast = readFloat("FreeCamFast", "10", 1.0f, 100.0f);
+        g_freeFov = readFloat("FreeCamFov", "75", 10.0f, 150.0f);
+        g_freeMouse = readFloat("FreeCamMouse", "0.15", 0.01f, 2.0f);
+        Log("Kamera: FreeCamKey 0x%02X, Speed %.1f, Fov %.0f, Mouse %.2f", g_freeKey, g_freeSpeed, g_freeFov,
+            g_freeMouse);
+
         g_highKey = ReadKey(ini, "HeadlightsHighKey", "K", "Lights");
         g_highFadeMs = GetPrivateProfileIntA("Lights", "HeadlightsHighFade", 100, ini);
         g_flashPopUps = GetPrivateProfileIntA("Lights", "HeadlightsFlashPopUps", 1, ini);
@@ -763,6 +781,7 @@ namespace
         Log("Verkehr: Measure %d, RandomModels %d, Models %u Namen (leer = alle), TrackOnly %u Namen", g_trafficMeasure,
             g_trafficRandom, static_cast<unsigned>(g_trafficPoolNames.size()),
             static_cast<unsigned>(g_trafficTrackOnly.size()));
+        g_lodMeasure = GetPrivateProfileIntA("Cars", "LodMeasure", 0, ini);
         g_exhaustSmoke = GetPrivateProfileIntA("Damage", "ExhaustSmoke", 1, ini);
         {
             auto readDamage = [ini](const char * name, const char * fallback, float lo, float hi) {
@@ -3601,12 +3620,273 @@ namespace
         g_origEngineVoice(slot, volume, pitch, a4, a5, a6, a7, a8);
     }
 
+    // ---- Freecam (Testzwecke): ersetzt Position und Drehung der fertigen Kamera ----
+    // Numpad 8/5/4/6 vor/zurück/links/rechts, Numpad 9/3 hoch/runter, Numpad 7/1 Blick hoch/runter,
+    // Numpad / und * Blick links/rechts, Maus = Blick (eingefangen, das Spiel bekommt keine Mausnachrichten),
+    // Mausrad = Tempo, Numpad + / - = FOV, Numpad 0 = zurück zur Kamera des Spiels; Umschalt schnell, Strg langsam.
+    // Das Auto fährt weiter mit den Eingaben des Spiels; der Rückspiegel bleibt beim Auto.
+    struct FreeCamState
+    {
+        bool on = false;
+        bool valid = false;
+        LARGE_INTEGER last = {};
+        float pos[3] = {};
+        float rot[9] = {};     // Zeilen wie out + 3: rechts (ggf. gespiegelt), oben, vorn
+        float sideSign = 1.0f; // Zeile 0 · tatsächliches Rechts
+        float vel[3] = {};     // geglättete Bewegung, m/s
+        float speedScale = 1.0f; // Mausrad
+        float fov = 75.0f;
+        bool captured = false;
+    } g_free;
+
+    constexpr std::uintptr_t kGameWindow = 0x6B7BF8; // HWND des Spiels
+    WNDPROC g_origWndProc = nullptr;
+    volatile LONG g_freeWheel = 0;
+
+    // Fensterprozedur des Spiels: in der Freecam erreicht die Maus das Spiel nicht (HUD verschieben, Rechtsklick =
+    // Pausenmenü); das Mausrad ändert das Tempo.
+    LRESULT CALLBACK FreeCamWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+    {
+        if (g_free.on && message >= WM_MOUSEFIRST && message <= WM_MOUSELAST)
+        {
+            if (message == WM_MOUSEWHEEL)
+            {
+                InterlockedExchangeAdd(&g_freeWheel, static_cast<short>(HIWORD(wparam)));
+            }
+            return 0;
+        }
+        if (g_free.on && message == WM_SETCURSOR && LOWORD(lparam) == HTCLIENT)
+        {
+            SetCursor(nullptr);
+            return TRUE;
+        }
+        return CallWindowProcA(g_origWndProc, window, message, wparam, lparam);
+    }
+
+    void InstallFreeCamWndProc()
+    {
+        const HWND window = *reinterpret_cast<HWND *>(kGameWindow);
+        if (g_origWndProc || !window)
+        {
+            return;
+        }
+        g_origWndProc = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrA(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&FreeCamWndProc)));
+        Log("Kamera: Freecam-Fensterprozedur %s", g_origWndProc ? "aktiv" : "fehlgeschlagen");
+    }
+
+    // Maus einfangen (unsichtbar, im Fenster gehalten) bzw. freigeben
+    void FreeCamCapture(bool on)
+    {
+        if (on == g_free.captured)
+        {
+            return;
+        }
+        g_free.captured = on;
+        const HWND window = *reinterpret_cast<HWND *>(kGameWindow);
+        if (on && window)
+        {
+            RECT rc = {};
+            GetClientRect(window, &rc);
+            MapWindowPoints(window, nullptr, reinterpret_cast<POINT *>(&rc), 2);
+            ClipCursor(&rc);
+            SetCursorPos((rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2);
+            SetCursor(nullptr);
+        }
+        else
+        {
+            ClipCursor(nullptr);
+        }
+    }
+
+    bool KeyHeld(int vk)
+    {
+        return (GetAsyncKeyState(vk) & 0x8000) != 0;
+    }
+
+    // Dreht die Zeilen a und b in ihrer Ebene: a -> a·c + b·s
+    void RotatePair(float * a, float * b, float s, float c)
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            const float x = a[i];
+            const float y = b[i];
+            a[i] = x * c + y * s;
+            b[i] = y * c - x * s;
+        }
+    }
+
+    void FreeCamView(float * out, unsigned char * view)
+    {
+        FreeCamState & f = g_free;
+        LARGE_INTEGER now = {};
+        LARGE_INTEGER freq = {};
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&freq);
+        if (!f.valid)
+        {
+            f.valid = true;
+            f.last = now;
+            std::memcpy(f.pos, out, sizeof(f.pos));
+            std::memcpy(f.rot, out + 3, sizeof(f.rot));
+            unsigned char * car = *reinterpret_cast<unsigned char **>(kCamState);
+            f.sideSign = car && Dot(f.rot, &At<float>(car, kCarRight)) < 0.0f ? -1.0f : 1.0f;
+            std::memset(f.vel, 0, sizeof(f.vel));
+            if (view)
+            {
+                f.fov = g_freeFov;
+            }
+            InterlockedExchange(&g_freeWheel, 0);
+            Log("Kamera: Freecam an bei %.1f %.1f %.1f", f.pos[0], f.pos[1], f.pos[2]);
+        }
+        const float dt =
+            std::fmin(0.1f, static_cast<float>(now.QuadPart - f.last.QuadPart) / static_cast<float>(freq.QuadPart));
+        f.last = now;
+
+        HWND fg = GetForegroundWindow();
+        DWORD pid = 0;
+        GetWindowThreadProcessId(fg, &pid);
+        const bool active = pid == GetCurrentProcessId();
+        FreeCamCapture(active); // Alt+Tab gibt die Maus frei
+        if (active && dt > 0.0f)
+        {
+            float * right = f.rot;
+            float * up = f.rot + 3;
+            float * fwd = f.rot + 6;
+            // Numpad 0: zurück an die Kamera des Spiels
+            static bool resetDown = false;
+            if (KeyPressed(VK_NUMPAD0, resetDown))
+            {
+                f.valid = false;
+                return;
+            }
+            // Blick: Gieren um die senkrechte Weltachse, Nicken um die Kamera-Querachse
+            float yaw = 0.0f;   // Grad, + = nach rechts
+            float pitch = 0.0f; // Grad, + = nach oben
+            const float turn = 90.0f * dt;
+            yaw += (KeyHeld(VK_MULTIPLY) ? turn : 0.0f) - (KeyHeld(VK_DIVIDE) ? turn : 0.0f);
+            pitch += (KeyHeld(VK_NUMPAD7) ? turn : 0.0f) - (KeyHeld(VK_NUMPAD1) ? turn : 0.0f);
+            // Maus ohne Taste: Abstand zur Fenstermitte, danach zurück in die Mitte
+            if (const HWND window = *reinterpret_cast<HWND *>(kGameWindow))
+            {
+                RECT rc = {};
+                GetClientRect(window, &rc);
+                POINT center = { (rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2 };
+                ClientToScreen(window, &center);
+                POINT cursor = {};
+                GetCursorPos(&cursor);
+                yaw += (cursor.x - center.x) * g_freeMouse;
+                pitch -= (cursor.y - center.y) * g_freeMouse;
+                SetCursorPos(center.x, center.y);
+            }
+            // Mausrad: Tempo je Raste × 1,25; Numpad + / -: FOV
+            const LONG wheel = InterlockedExchange(&g_freeWheel, 0);
+            if (wheel != 0)
+            {
+                f.speedScale = std::fmax(0.02f, std::fmin(f.speedScale * std::pow(1.25f, wheel / 120.0f), 50.0f));
+                Log("Kamera: Freecam Tempo %.1f m/s", g_freeSpeed * f.speedScale);
+            }
+            f.fov += ((KeyHeld(VK_SUBTRACT) ? 30.0f : 0.0f) - (KeyHeld(VK_ADD) ? 30.0f : 0.0f)) * dt;
+            f.fov = std::fmax(10.0f, std::fmin(f.fov, 150.0f));
+            if (yaw != 0.0f)
+            {
+                // Richtung so, dass "vorn" zum tatsächlichen Rechts wandert (Händigkeit der Engine unbekannt)
+                float probe[3] = { fwd[0], fwd[1], fwd[2] };
+                const float a = yaw * 0.0174533f;
+                Yaw(probe, std::sin(a), std::cos(a));
+                const float d[3] = { probe[0] - fwd[0], probe[1] - fwd[1], probe[2] - fwd[2] };
+                const float sign = Dot(d, right) * f.sideSign * yaw > 0.0f ? 1.0f : -1.0f;
+                const float sa = std::sin(a * sign);
+                const float ca = std::cos(a * sign);
+                for (int row = 0; row < 3; ++row)
+                {
+                    Yaw(f.rot + row * 3, sa, ca);
+                }
+            }
+            if (pitch != 0.0f)
+            {
+                // nicht über die Senkrechte hinaus nicken
+                const float cur = std::asin(std::fmax(-1.0f, std::fmin(fwd[1], 1.0f))) * 57.2958f;
+                const float next = std::fmax(-89.0f, std::fmin(cur + pitch, 89.0f));
+                const float a = (next - cur) * 0.0174533f;
+                RotatePair(fwd, up, std::sin(a), std::cos(a));
+            }
+            float speed = g_freeSpeed * f.speedScale;
+            if (KeyHeld(VK_SHIFT))
+            {
+                speed *= g_freeFast;
+            }
+            if (KeyHeld(VK_CONTROL))
+            {
+                speed *= 0.2f;
+            }
+            const float mf = (KeyHeld(VK_NUMPAD8) ? 1.0f : 0.0f) -
+                             (KeyHeld(VK_NUMPAD5) || KeyHeld(VK_NUMPAD2) ? 1.0f : 0.0f);
+            const float ms = ((KeyHeld(VK_NUMPAD6) ? 1.0f : 0.0f) - (KeyHeld(VK_NUMPAD4) ? 1.0f : 0.0f)) * f.sideSign;
+            const float mu = (KeyHeld(VK_NUMPAD9) ? 1.0f : 0.0f) - (KeyHeld(VK_NUMPAD3) ? 1.0f : 0.0f);
+            // weich anfahren und abbremsen (0,12 s)
+            for (int i = 0; i < 3; ++i)
+            {
+                const float target = (fwd[i] * mf + right[i] * ms + (i == 1 ? mu : 0.0f)) * speed;
+                Smooth(f.vel[i], target, 0.12f, dt);
+                f.pos[i] += f.vel[i] * dt;
+            }
+        }
+
+        std::memcpy(out, f.pos, sizeof(f.pos));
+        std::memcpy(out + 3, f.rot, sizeof(f.rot));
+        RebuildView(out);
+        if (view)
+        {
+            At<float>(view, 0x130) = f.fov * 0.5f;
+        }
+        const DWORD tick = GetTickCount();
+        if (g_measure && tick - g_camLogTick >= 1000)
+        {
+            g_camLogTick = tick;
+            Log("Kamera: Freecam %.1f %.1f %.1f, vorn %.2f %.2f %.2f", f.pos[0], f.pos[1], f.pos[2], f.rot[6],
+                f.rot[7], f.rot[8]);
+        }
+    }
+
     void __cdecl HookCamView(int player, float * out, int mirror)
     {
         g_origCamView(player, out, mirror);
         if (player != 0 || mirror == 1)
         {
             return; // Rückspiegel und zweiter Spieler bleiben wie im Spiel
+        }
+        if (g_freeKey && !InFrontend() && KeyPressed(g_freeKey, g_freeKeyDown))
+        {
+            g_free.on = !g_free.on;
+            g_free.valid = false;
+            g_act.valid = false;
+            if (g_free.on)
+            {
+                InstallFreeCamWndProc();
+                g_free.speedScale = 1.0f;
+            }
+            else
+            {
+                FreeCamCapture(false);
+                Log("Kamera: Freecam aus");
+            }
+        }
+        if (g_free.on && InFrontend())
+        {
+            g_free.on = false;
+            g_free.valid = false;
+            FreeCamCapture(false);
+        }
+        if (g_free.on)
+        {
+            unsigned char * view = nullptr;
+            if (const auto frame = *reinterpret_cast<unsigned char **>(kFrameViews))
+            {
+                view = At<unsigned char *>(frame, 4);
+            }
+            FreeCamView(out, view);
+            return;
         }
         unsigned char * car = *reinterpret_cast<unsigned char **>(kCamState);
         unsigned char * view = nullptr;
@@ -4829,6 +5109,45 @@ namespace
         }
     }
 
+    // ---- Messung LOD-Wahl ([Cars] LodMeasure, Lenkrad durch ferne Autos) ----
+    // FUN_00439f90 (fastcall, Objekt in ecx) wählt je Bild die Detailstufe eines Autos und legt sie in obj[0xB0] ab;
+    // obj[0x3D] ist das Auto. Geloggt wird jeder Wechsel mit Entfernung zum Spielerauto und Zahl der Stufen.
+    using LodSelectFn = unsigned char (__fastcall *)(int *);
+    LodSelectFn g_origLodSelect = nullptr;
+    std::map< int *, int > g_lodSeen;
+
+    unsigned char __fastcall HookLodSelect(int * obj)
+    {
+        const unsigned char result = g_origLodSelect(obj);
+        const int lod = obj[0xB0];
+        auto it = g_lodSeen.find(obj);
+        if (it != g_lodSeen.end() && it->second == lod)
+        {
+            return result;
+        }
+        g_lodSeen[obj] = lod;
+        const auto * car = reinterpret_cast<const unsigned char *>(obj[0x3D]);
+        const unsigned char * player = PlayerCar();
+        float dist = -1.0f;
+        if (car && player)
+        {
+            const float * a = reinterpret_cast<const float *>(car + kCarPos);
+            const float * b = reinterpret_cast<const float *>(player + kCarPos);
+            dist = std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
+        }
+        const int layers = (obj[0x2D] - obj[0x2C]) / 4;
+        Log("LOD: Objekt %p Auto %p%s Stufe %d von %d, Abstand %.1f m, Rueckgabe %d", obj, car,
+            car == player ? " (Spieler)" : "", lod, layers, dist, result);
+        return result;
+    }
+
+    void InstallLodMeasure()
+    {
+        static const unsigned char kBytes[] = { 0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x10, 0x01, 0x00, 0x00 };
+        InstallHook("LOD-Wahl Messung", 0x439F90, kBytes, sizeof(kBytes), reinterpret_cast<void *>(&HookLodSelect),
+                    reinterpret_cast<void **>(&g_origLodSelect));
+    }
+
     void InstallExhaustSmoke()
     {
         if (!g_exhaustSmoke)
@@ -4859,7 +5178,7 @@ namespace
         std::string base = path;
         base.erase(base.find_last_of('.'));
         g_log = std::fopen((base + ".log").c_str(), "w");
-        Log("LFSP v8j gestartet");
+        Log("LFSP v8k gestartet");
 
         auto * exe = reinterpret_cast<unsigned char *>(GetModuleHandleA(nullptr));
         const auto * dos = reinterpret_cast<IMAGE_DOS_HEADER *>(exe);
@@ -4883,6 +5202,10 @@ namespace
         InstallHook("Modell-Update", kModelUpdate, kUpdateBytes, sizeof(kUpdateBytes),
                     reinterpret_cast<void *>(&HookUpdate), reinterpret_cast<void **>(&g_origUpdate));
         InstallExhaustSmoke();
+        if (g_lodMeasure)
+        {
+            InstallLodMeasure();
+        }
         InstallHook("Car.Roof-Menue", kFeSetRoof, kSetRoofBytes, sizeof(kSetRoofBytes),
                     reinterpret_cast<void *>(&HookSetRoof), reinterpret_cast<void **>(&g_origSetRoof));
         static const unsigned char kBuildGeoBytes[] = { 0x83, 0xEC, 0x1C, 0x53, 0x8B, 0xD9 };

@@ -37,7 +37,6 @@ For new features, the additional "Love for Speed Porsche" lfsp.asi is used. This
 | Opponents light the scene | Opponent headlights light the track at night when their lights are on, and the headlights also light other cars and objects in the beam (`HeadlightsOpponents`, `HeadlightsObjects`). |
 | Pop-up flash & high beam glow | Pop-up headlights flash with the high beam key; the lens flare of your own headlights grows with the high beam (`HeadlightsFlashPopUps`, `HeadlightsHighGlow`). |
 | Signals & third brake light | Rear turn signals blink in sync with the front ones, the third brake light only lights when braking, damaged lamps cast no glow (`SignalsInSync`, `ThirdBrakeLightBrakingOnly`). |
-| Lamp glow depth (B23) | Headlight glow sprites no longer turn partly black beyond about 90 m (`[Detail] LampGlowDepth` in `nfs5_enhanced.ini`). |
 | Skid marks (B22) | Skid marks are drawn slightly towards the camera so they no longer vanish under the road surface (`SkidDepthBias`). |
 | Damage gauge lines (B18) | Lines are widened to the game's 640x480 pixel size, so the colour gradient of the HUD damage gauge is a solid bar at high resolutions. |
 
