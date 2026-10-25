@@ -8,3 +8,5 @@ release/
 *.7z
 *.zip
 *.rar
+# Projekt-Doku mit Spieladressen und Aufbau nur lokal (Wunsch 2026-10-25)
+doc/
