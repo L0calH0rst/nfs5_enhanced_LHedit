@@ -34,18 +34,66 @@ For new features, the additional "Love for Speed Porsche" lfsp.asi is used. This
 | Distance probe | Crosshair probe (`DistanceKey` in `lfsp.ini`, default `INSERT`) measuring depth under the cursor in game metres. |
 | Vehicle lamp detection | LFSP records lamp numbers, positions and colours as the game draws each lamp; dx11z uses them for the signal and reversing glows (needs LFSP). |
 | Diagnostic Measure Log | Detailed performance measuring and pass timing recorded in `dx11z.log` when enabled. |
+| Opponents light the scene | Opponent headlights light the track at night when their lights are on, and the headlights also light other cars and objects in the beam (`HeadlightsOpponents`, `HeadlightsObjects`). |
+| Pop-up flash & high beam glow | Pop-up headlights flash with the high beam key; the lens flare of your own headlights grows with the high beam (`HeadlightsFlashPopUps`, `HeadlightsHighGlow`). |
+| Signals & third brake light | Rear turn signals blink in sync with the front ones, the third brake light only lights when braking, damaged lamps cast no glow (`SignalsInSync`, `ThirdBrakeLightBrakingOnly`). |
+| Lamp glow depth (B23) | Headlight glow sprites no longer turn partly black beyond about 90 m (`[Detail] LampGlowDepth` in `nfs5_enhanced.ini`). |
+| Skid marks (B22) | Skid marks are drawn slightly towards the camera so they no longer vanish under the road surface (`SkidDepthBias`). |
+| Damage gauge lines (B18) | Lines are widened to the game's 640x480 pixel size, so the colour gradient of the HUD damage gauge is a solid bar at high resolutions. |
 
 ### Widescreen & Culling Enhancements
 
 | Feature | What it does |
 |---|---|
 | Hor+ Sky & World Cull Hooks | Widens the half-FOV used during skybox and world geometry culling calculations so distant terrain, objects, and sky elements do not disappear or pop at screen edges on widescreen displays. |
+| Track detail (B19) | Always uses the finest track detail level, closing cracks in distant track sections where the sky shone through (`[World] TrackDetail`, `TrackRange`). |
+| Track occlusion fixes (B20, B21) | Fixes the game's occlusion test, which hid visible meadow objects close to the car (hole in the ground) and let distant sections float in front of the panorama (`TrackOcclusion*` in `[World]`). |
+
+### Car Features (LFSP)
+
+| Feature | What it does |
+|---|---|
+| Convertible roof | Open and close the roof of convertibles and Targas live in the race (default key `V`), animated like in the showroom, with sound. Works for all cabrios, also at lower car detail levels (LOD ≥ 1). Settings `RoofKey`, `RoofTime`, `ApplyTo` in `[General]`. |
+| Side windows | Lower and raise the side windows in the race (default key `F`), animated, with sound (`WindowKey`, `WindowTime`). |
+| Engine sound with open roof | In the cockpit view the engine is louder with the roof or windows open (`EngineRoofBoost`, `EngineWindowBoost`). |
+| Instruments follow the light switch | Speedometer and rev counter switch between day and night style with the light switch instead of the time of day (`InstrumentsFollowLights`). |
+| Exhaust smoke on engine damage | A damaged engine smokes from the exhaust, more with more damage, using the game's own particle system (`[Damage] ExhaustSmoke*`). |
+
+### Camera Features (LFSP)
+
+| Feature | What it does |
+|---|---|
+| Cinematic camera | A fifth view in the game's camera cycle (`C`) that uses the trackside cameras of the replays (`[Camera] Cinematic*`). |
+| Action camera | Chase cameras react to corners, braking, jumps, ground and speed: side offset, looking into the corner, FOV changes, shake and roll (`Action*`, toggle `J`). |
+| Cockpit FOV & replay zoom limit | Own FOV for the interior views (`CockpitFov`), minimum FOV for replay cameras so distant cars are not zoomed in endlessly (`ReplayMinFov`). |
+| Free camera | Free flying camera for testing and screenshots (`FreeCamKey`, default `F9`). |
+
+### Traffic Features (LFSP)
+
+| Feature | What it does |
+|---|---|
+| More traffic | Number of traffic cars per menu level (`Light`, `Medium`, `Heavy`) and how many drive at the same time (`Active`). |
+| Model mix | Traffic models are mixed randomly from all 16 traffic models instead of a fixed set per track (`RandomModels`, `Models`). |
+| Porsches in traffic | A share of the traffic are Porsches from the car list (`Porsches`). |
+| Realistic paint | Traffic uses typical car colours with weights instead of random colours (`Colours`, `ColourRandom`). |
+| No reckless overtaking | Traffic can be kept on its side of the road, no driving side by side and no crashes with oncoming cars (`Overtake = 0`). |
+| More than 9 cars | Raises the car limit of a race up to 16 (`[Cars] MaxCars`); saved replays keep the first 9 cars. |
+
+### HD Texture Framework
+
+| Feature | What it does |
+|---|---|
+| Larger texture pool | `nfsp_texpool.asi` enlarges the in-race texture pool so large HD textures do not crash the game (`TexturePoolMB`). |
+| Texture LOD bias & forced mips | Against shimmering of fine textures at grazing angles: `[World] TextureLodBias` and `ForceMips` in `lfsp.ini`. |
+
+The HD textures themselves and the tools to make them are not part of this repository.
 
 ### Menu Enhancements
 
 | Feature | What it does |
 |---|---|
 | Menu list scrolling | Lists in the menus (cars, paints, tracks) scroll with the mouse wheel over the list and with the arrow, page and home/end keys. The wheel over a closed drop down list picks the next or previous entry. Settings in `[Menu]`. |
+| Roof key in the showroom | The roof key can also open and close the roof in the menu (`RoofKeyInMenu`). |
 
 ---
 
@@ -93,7 +141,20 @@ Everything is set in `nfs5_enhanced.ini`, and every setting is explained in the 
 | `[Controller]` | SDL3 gamepads, rumble, dead zones, default bindings. |
 | `[Menu]` | Mouse wheel and key scrolling of the menu lists. |
 
-The LHedit lighting and water settings are in `lfsp.ini` of LFSP, sections `[Lights]`, `[Water]` and `[World]`. A `[Lights]` key missing there is still read from `[Dx11]` of `nfs5_enhanced.ini`.
+The LHedit settings are in `lfsp.ini` of LFSP, every setting is explained in the file:
+
+| Section | Contents |
+|---|---|
+| `[General]` | Roof and window keys, timing, sounds, which cars react. |
+| `[Lights]` | Headlights, high beam, tail/brake/signal glows, model year colour, instruments. |
+| `[World]` | Track detail and occlusion fixes, distance probe, skid marks, texture LOD bias. |
+| `[Water]` | Water reflections. |
+| `[Camera]` | Cinematic, Action, cockpit FOV, replay zoom, free camera, engine sound with open roof. |
+| `[Traffic]` | Amount, models, Porsches, paint and overtaking of traffic. |
+| `[Cars]` | Car limit of a race. |
+| `[Damage]` | Exhaust smoke on engine damage. |
+
+ A `[Lights]` key missing there is still read from `[Dx11]` of `nfs5_enhanced.ini`.
 
 
 ---
