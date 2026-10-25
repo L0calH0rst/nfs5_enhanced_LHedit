@@ -4403,6 +4403,12 @@ namespace dx11z
         m_Context->OMSetDepthStencilState( depth.Get(), water_stencil != 0 ? (water_stencil == 2 ? 1u : (depth_write ? 2u : 6u)) : render[rs::STENCILREF] & 0xFF );
 
         // Rasterizer, D3D7 culls by screen winding like D3D11 with clockwise front faces.
+        // Projected headlight overlays share depth with the underlying road geometry (upstream caaa305).
+        const bool projected_candidate = !m_BackPass && render[rs::ZENABLE] != 0 &&
+            render[rs::ZWRITEENABLE] != 0 && render[rs::ALPHABLENDENABLE] != 0 &&
+            render[rs::ZFUNC] == 4 && render[rs::STENCILENABLE] == 0 &&
+            m_Bound[0] != nullptr && m_Bound[1] == nullptr &&
+            m_Bound[0]->m_Width == 64 && m_Bound[0]->m_Height == 64;
         std::uint32_t cull_mode = render[rs::CULLMODE];
 
         if (m_BackPass)
@@ -4413,7 +4419,8 @@ namespace dx11z
 
         const bool wireframe = render[rs::FILLMODE] == 2 || m_ConfigTestDraw == 2;
         const std::uint64_t raster_key = static_cast<std::uint64_t>(cull_mode & 3) |
-            (static_cast<std::uint64_t>(wireframe) << 2) | (static_cast<std::uint64_t>(m_BackPass) << 3);
+            (static_cast<std::uint64_t>(wireframe) << 2) | (static_cast<std::uint64_t>(m_BackPass) << 3) |
+            (static_cast<std::uint64_t>(projected_candidate) << 4);
 
         auto & raster = m_Rasters[raster_key];
 
@@ -4425,6 +4432,7 @@ namespace dx11z
             desc.CullMode = cull == 2 ? D3D11_CULL_FRONT : (cull == 3 ? D3D11_CULL_BACK : D3D11_CULL_NONE);
             desc.FrontCounterClockwise = FALSE;
             desc.DepthClipEnable = TRUE;
+            desc.DepthBias = projected_candidate ? -8 : 0;
             desc.ScissorEnable = TRUE;
 
             if (m_BackPass)
