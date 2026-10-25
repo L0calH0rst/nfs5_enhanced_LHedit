@@ -187,6 +187,7 @@ namespace
         std::vector< Layer > layers;
         std::vector< std::pair< int, int > > roofSaved; // Teil, Original-Variante
         float roofStartValue = -1.0f;                    // Stellung nach dem Einschalten (offen/geschlossen)
+        bool roofStartChecked = false;                   // Rennen: starres Start-Verdeck schon ersetzt?
         int jiggle = 0;                                  // 2: nach Neuaufbau Animationen verstellen, 1: zurückstellen
         float jiggleFrom[8] = {};
         float jiggleTo[8] = {};
@@ -490,6 +491,11 @@ namespace
         return names;
     }
 
+    // Auspuffrauch bei Motorschaden ([Damage], InstallExhaustSmoke)
+    int g_exhaustSmoke = 1;
+    float g_exhaustStart = 45.0f, g_exhaustFull = 200.0f, g_exhaustMin = 0.25f, g_exhaustMax = 1.0f;
+    float g_exhaustBack = 0.9f, g_exhaustSide = 0.35f, g_exhaustHeight = -0.05f;
+
     void LoadConfig(const std::string & iniPath)
     {
         const char * ini = iniPath.c_str();
@@ -757,6 +763,23 @@ namespace
         Log("Verkehr: Measure %d, RandomModels %d, Models %u Namen (leer = alle), TrackOnly %u Namen", g_trafficMeasure,
             g_trafficRandom, static_cast<unsigned>(g_trafficPoolNames.size()),
             static_cast<unsigned>(g_trafficTrackOnly.size()));
+        g_exhaustSmoke = GetPrivateProfileIntA("Damage", "ExhaustSmoke", 1, ini);
+        {
+            auto readDamage = [ini](const char * name, const char * fallback, float lo, float hi) {
+                char text[32] = {};
+                GetPrivateProfileStringA("Damage", name, fallback, text, sizeof(text), ini);
+                return std::fmax(lo, std::fmin(static_cast<float>(std::atof(text)), hi));
+            };
+            g_exhaustStart = readDamage("ExhaustSmokeStart", "45", 0.0f, 300.0f);
+            g_exhaustFull = readDamage("ExhaustSmokeFull", "200", 0.0f, 300.0f);
+            g_exhaustMin = readDamage("ExhaustSmokeMin", "0.25", 0.0f, 4.0f);
+            g_exhaustMax = readDamage("ExhaustSmokeMax", "1.0", 0.0f, 4.0f);
+            g_exhaustBack = readDamage("ExhaustBack", "0.9", -3.0f, 3.0f);
+            g_exhaustSide = readDamage("ExhaustSide", "0.35", -1.5f, 1.5f);
+            g_exhaustHeight = readDamage("ExhaustHeight", "-0.05", -1.0f, 1.0f);
+        }
+        Log("Schaden: Auspuffrauch %d ab %.0f, voll ab %.0f, Staerke %.2f..%.2f, Lage %.2f/%.2f/%.2f", g_exhaustSmoke,
+            g_exhaustStart, g_exhaustFull, g_exhaustMin, g_exhaustMax, g_exhaustBack, g_exhaustSide, g_exhaustHeight);
         Log("Konfig:Measure=%d WindowKey=0x%02X RoofKey=0x%02X RoofTime=%d RebuildMode=%d ApplyTo=%d, "
             "%u Fenster-Eintraege",
             g_measure, g_windowKey, g_roofKey, g_roofTimeMs, g_rebuildMode, g_applyTo,
@@ -1145,6 +1168,44 @@ namespace
         }
     }
 
+    // Ab LOD 2 (Schicht 3, 356_1: 28 statt 62 Teile) fehlt das animierte Verdeck-Teil. Mit den Menü-Varianten
+    // (Teil 41 aus) fehlte dort das ganze Heck, sichtbar ohne FullCarDetail. Diese Schichten mit den Rennteilen bauen.
+    void RebuildLodsWithoutRoof(void * model, ModelState & st)
+    {
+        auto * car = At<unsigned char *>(model, kModelCar);
+        if (st.roofSaved.empty() || !car)
+        {
+            return;
+        }
+        auto * table = reinterpret_cast<int *>(car + kCarPartTable);
+        for (const auto & l : st.layers)
+        {
+            bool hasRoof = false;
+            ForAnimatedEntries(l.layer, [&](unsigned char *, int slot) {
+                hasRoof |= slot == kAnimSlotRoof;
+            });
+            if (hasRoof)
+            {
+                continue;
+            }
+            std::vector< std::pair< int, int > > menu;
+            for (const auto & s : st.roofSaved)
+            {
+                menu.emplace_back(s.first, table[s.first]);
+                table[s.first] = s.second;
+            }
+            const auto poses = SavePoses(l.layer);
+            g_origBuildGeo(l.layer, l.crp);
+            RestorePoses(l.layer, poses);
+            for (const auto & m : menu)
+            {
+                table[m.first] = m.second;
+            }
+            Log("  Schicht %p Id 0x%X: ohne animiertes Verdeck, mit Rennteilen aufgebaut", l.layer,
+                At<unsigned>(l.layer, 8));
+        }
+    }
+
     void RebuildGeometry(void * model, ModelState & st)
     {
         // Der Aufbau gibt Eintrag + 0x40 selbst frei und legt die Puffer aus der .crp neu an
@@ -1207,6 +1268,7 @@ namespace
             ++rebuilt;
             ++it;
         }
+        RebuildLodsWithoutRoof(model, st);
         for (int s = 0; s < kAnimSlotCount; ++s)
         {
             reinterpret_cast<SetAnimSlotFn>(kSetAnimSlot)(model, s, slotValues[s]);
@@ -1495,6 +1557,28 @@ namespace
             Log("Verdeck: Modell %p '%s': Startstellung %s (Bild %.2f)", model, st.name.c_str(),
                 value > 0.0f ? "offen" : "geschlossen", value);
         }
+    }
+
+    // Im Rennen zeigt das Spiel das starre Verdeck Teil 41 (offen z. B. 356_1 = 2, geschlossen 356a = 6). Beide Varianten
+    // malen einen Teil des Verdecks flach auf den Lack (👤, 2026-10-25); das animierte Menü-Teil hat den Fehler nicht.
+    // Deshalb gleich beim ersten Bild auf das animierte Teil umschalten, wie es sonst erst das erste V tut.
+    void ReplaceStartRoof(void * model, ModelState & st)
+    {
+        st.roofStartChecked = true;
+        auto * car = At<unsigned char *>(model, kModelCar);
+        if (!car || !st.roofSaved.empty() || SlotMax(model, kAnimSlotRoof) > 0.0f || !g_animParts.count(st.name))
+        {
+            return;
+        }
+        const int * table = reinterpret_cast<int *>(car + kCarPartTable);
+        const int race41 = table[kPartStaticRoof];
+        if (race41 == 0)
+        {
+            return;
+        }
+        Log("Verdeck: Modell %p '%s': Rennstart (Teil %d = %d) -> animiertes Verdeck", model, st.name.c_str(),
+            kPartStaticRoof, race41);
+        EnableRoofParts(model, st);
     }
 
     void ToggleRoof(void * model, ModelState & st)
@@ -2332,6 +2416,10 @@ namespace
                 {
                     ToggleRoof(model, st);
                 }
+            }
+            if (target && !st.roofStartChecked && !InFrontend())
+            {
+                ReplaceStartRoof(model, st);
             }
             AnimateRoof(model, st);
             if (st.reapplyShift && !st.shiftAnimating)
@@ -4540,6 +4628,230 @@ namespace
                     reinterpret_cast<void *>(&HookSimAiConfig), reinterpret_cast<void **>(&g_origSimAiConfig));
     }
 
+    // ---- Auspuffrauch bei Motorschaden (doc/knowledge.md) ----
+    // Jedes Auto hat einen Partikel-Satz (FUN_0043ee10, car + 0x704) mit 11 fest verdrahteten Emittern (Reifenrauch,
+    // Funken, Wasser, Staub). Er wird je Bild in FUN_0043ef80 gefüllt und in eine Menge eingetragen; FUN_0043f6e0
+    // zeichnet (vtable +4), FUN_0043f660 rechnet weiter (vtable +8) und leert die Menge. LFSP legt je Satz einen
+    // zwölften Emitter mit dem System "VehicleExhaust" aus GameData/Render/particle.dat (Tag VEXH) an und hängt
+    // ihn an dieselben drei Stellen. Motorschaden = FUN_004938a0(car), 0..300 (Leistung x (1 - Schaden / 300)).
+    constexpr std::uintptr_t kPartSetUpdate = 0x43EF80; // thiscall(set, char an), ret 4
+    constexpr std::uintptr_t kPartSetDtor   = 0x43EF20; // thiscall(set, flags), ret 4
+    constexpr std::uintptr_t kPartDrawAll   = 0x43F6E0;
+    constexpr std::uintptr_t kPartTickAll   = 0x43F660;
+    constexpr std::uintptr_t kEmitterCtor   = 0x454250; // thiscall(emitter, 0, record, prime), ret 0xC
+    constexpr std::uintptr_t kGameNew       = 0x59EF90; // cdecl(size)
+    constexpr std::uintptr_t kEngineDamage  = 0x4938A0; // cdecl(car) -> float
+    constexpr std::uint32_t kExhaustTag     = 0x48584556; // VEXH
+
+    struct ExhaustEmitter
+    {
+        unsigned char * emitter = nullptr;
+        float record[12] = {}; // +0 Lage, +0xC Boden-y, +0x10 Achse x, +0x1C Achse y, +0x28 Tag
+        bool live = false;     // in diesem Bild vom Spiel gefüllt
+    };
+
+    std::map<void *, ExhaustEmitter> g_exhaust;
+    bool g_exhaustBroken = false;
+    float g_exhaustLogged = -100.0f;
+
+    using PartSetFn = void *(__fastcall *)(void *, void *, int);
+    using VoidFn = void (*)();
+    PartSetFn g_origPartSetUpdate = nullptr;
+    PartSetFn g_origPartSetDtor = nullptr;
+    VoidFn g_origPartDrawAll = nullptr;
+    VoidFn g_origPartTickAll = nullptr;
+
+    void DestroyExhaust(ExhaustEmitter & e)
+    {
+        if (e.emitter)
+        {
+            using DtorFn = void *(__fastcall *)(void *, void *, int);
+            reinterpret_cast<DtorFn>(**reinterpret_cast<void ***>(e.emitter))(e.emitter, nullptr, 1);
+            e.emitter = nullptr;
+        }
+    }
+
+    // Auspuff hinter der Mitte der Hinterachse: Räder car + 0x7F8 + i * 0xC4, vorwärts car + 0x37C (x, y, z),
+    // y = oben. Hinterräder = die zwei mit der kleinsten Lage entlang vorwärts.
+    void ExhaustPosition(const unsigned char * car, float * out)
+    {
+        const float * pos = reinterpret_cast<const float *>(car + 0x330);
+        const float * fwd = reinterpret_cast<const float *>(car + 0x37C);
+        const float * wheel[4];
+        float along[4];
+        for (int i = 0; i < 4; ++i)
+        {
+            wheel[i] = reinterpret_cast<const float *>(car + 0x7F8 + i * 0xC4);
+            along[i] = (wheel[i][0] - pos[0]) * fwd[0] + (wheel[i][1] - pos[1]) * fwd[1] + (wheel[i][2] - pos[2]) * fwd[2];
+        }
+        int a = 0;
+        int b = 1;
+        if (along[b] < along[a])
+        {
+            std::swap(a, b);
+        }
+        for (int i = 2; i < 4; ++i)
+        {
+            if (along[i] < along[a])
+            {
+                b = a;
+                a = i;
+            }
+            else if (along[i] < along[b])
+            {
+                b = i;
+            }
+        }
+        float side[3] = { wheel[b][0] - wheel[a][0], 0.0f, wheel[b][2] - wheel[a][2] };
+        const float len = std::sqrt(side[0] * side[0] + side[2] * side[2]);
+        if (len > 0.01f)
+        {
+            side[0] /= len;
+            side[2] /= len;
+        }
+        for (int c = 0; c < 3; ++c)
+        {
+            out[c] = (wheel[a][c] + wheel[b][c]) * 0.5f - fwd[c] * g_exhaustBack + side[c] * g_exhaustSide;
+        }
+        out[1] += g_exhaustHeight;
+    }
+
+    void * __fastcall HookPartSetUpdate(void * set, void *, int enable)
+    {
+        void * result = g_origPartSetUpdate(set, nullptr, enable);
+        if (!g_exhaustSmoke || g_exhaustBroken || *reinterpret_cast<int *>(0x6197E0) == 0)
+        {
+            return result;
+        }
+        auto * car = *reinterpret_cast<unsigned char **>(static_cast<unsigned char *>(set) + 0x34);
+        if (!car)
+        {
+            return result;
+        }
+        const float damage = reinterpret_cast<float (__cdecl *)(void *)>(kEngineDamage)(car);
+        const bool smoke = (enable & 0xFF) != 0 && damage > g_exhaustStart;
+        auto it = g_exhaust.find(set);
+        if (!smoke && it == g_exhaust.end())
+        {
+            return result;
+        }
+        ExhaustEmitter & e = g_exhaust[set];
+
+        float where[3] = {};
+        ExhaustPosition(car, where);
+        e.record[0] = where[0];
+        e.record[1] = where[1];
+        e.record[2] = where[2];
+        e.record[3] = where[1] - 1.0f;
+        if (!e.emitter)
+        {
+            e.record[4] = 1.0f; // Achse x
+            e.record[8] = 1.0f; // Achse y (oben)
+            reinterpret_cast<std::uint32_t *>(e.record)[10] = kExhaustTag;
+            void * mem = reinterpret_cast<void *(__cdecl *)(unsigned)>(kGameNew)(0x58);
+            if (!mem)
+            {
+                g_exhaust.erase(set);
+                return result;
+            }
+            using CtorFn = void *(__fastcall *)(void *, void *, unsigned, void *, int);
+            reinterpret_cast<CtorFn>(kEmitterCtor)(mem, nullptr, 0, e.record, 1);
+            e.emitter = static_cast<unsigned char *>(mem);
+            // Fehlt das System, nimmt FUN_00454250 irgendeins; der Schlüssel steht 4 Byte vor der Definition.
+            const auto * def = *reinterpret_cast<unsigned char **>(e.emitter + 0x24);
+            if (*reinterpret_cast<const std::uint32_t *>(def - 4) != kExhaustTag)
+            {
+                Log("Auspuffrauch: System VehicleExhaust nicht geladen, aus");
+                DestroyExhaust(e);
+                g_exhaust.erase(set);
+                g_exhaustBroken = true;
+                return result;
+            }
+            Log("Auspuffrauch: Emitter fuer Auto %08X, Motorschaden %.0f", static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(car)),
+                damage);
+        }
+
+        const float t = std::fmin(1.0f, std::fmax(0.0f, (damage - g_exhaustStart) / std::fmax(1.0f, g_exhaustFull - g_exhaustStart)));
+        const float dx = where[0] - *reinterpret_cast<float *>(0x627EA4);
+        const float dy = where[1] - *reinterpret_cast<float *>(0x627EA8);
+        const float dz = where[2] - *reinterpret_cast<float *>(0x627EAC);
+        e.emitter[0x2C] = smoke ? 1 : 0;
+        *reinterpret_cast<float *>(e.emitter + 0x44) = g_exhaustMin + (g_exhaustMax - g_exhaustMin) * t;
+        *reinterpret_cast<int *>(e.emitter + 0x08) = 100;
+        *reinterpret_cast<float *>(e.emitter + 0x10) = dx * dx + dy * dy + dz * dz;
+        e.live = true;
+
+        if (car == *reinterpret_cast<unsigned char **>(CarAddr(0x5E8B34)) && std::fabs(damage - g_exhaustLogged) >= 10.0f)
+        {
+            g_exhaustLogged = damage;
+            Log("Auspuffrauch: Spieler Motorschaden %.0f, Rauch %s %.2f", damage, smoke ? "an" : "aus",
+                *reinterpret_cast<float *>(e.emitter + 0x44));
+        }
+        return result;
+    }
+
+    void * __fastcall HookPartSetDtor(void * set, void *, int flags)
+    {
+        const auto it = g_exhaust.find(set);
+        if (it != g_exhaust.end())
+        {
+            DestroyExhaust(it->second);
+            g_exhaust.erase(it);
+        }
+        return g_origPartSetDtor(set, nullptr, flags);
+    }
+
+    void CallEmitters(int slot)
+    {
+        for (auto & entry : g_exhaust)
+        {
+            if (entry.second.live && entry.second.emitter)
+            {
+                auto ** vtbl = *reinterpret_cast<void ***>(entry.second.emitter);
+                reinterpret_cast<void (__fastcall *)(void *)>(vtbl[slot])(entry.second.emitter);
+            }
+        }
+    }
+
+    void HookPartDrawAll()
+    {
+        g_origPartDrawAll();
+        CallEmitters(1);
+    }
+
+    void HookPartTickAll()
+    {
+        g_origPartTickAll();
+        CallEmitters(2);
+        for (auto & entry : g_exhaust)
+        {
+            entry.second.live = false;
+        }
+    }
+
+    void InstallExhaustSmoke()
+    {
+        if (!g_exhaustSmoke)
+        {
+            return;
+        }
+        static const unsigned char kUpdate[] = { 0xA1, 0xE0, 0x97, 0x61, 0x00 };
+        static const unsigned char kDtor[]   = { 0x53, 0x56, 0x57, 0x8B, 0xF9 };
+        static const unsigned char kDraw[]   = { 0xA1, 0xC0, 0x15, 0x61, 0x00 };
+        static const unsigned char kTick[]   = { 0x83, 0xEC, 0x08, 0xA1, 0xC0, 0x15, 0x61, 0x00 };
+        // Erst Abbau, Zeichnen und Takt: ohne sie darf kein Emitter entstehen.
+        if (InstallHook("Partikel-Satz Abbau", kPartSetDtor, kDtor, sizeof(kDtor), reinterpret_cast<void *>(&HookPartSetDtor),
+                        reinterpret_cast<void **>(&g_origPartSetDtor)) &&
+            InstallHook("Partikel zeichnen", kPartDrawAll, kDraw, sizeof(kDraw), reinterpret_cast<void *>(&HookPartDrawAll),
+                        reinterpret_cast<void **>(&g_origPartDrawAll)) &&
+            InstallHook("Partikel Takt", kPartTickAll, kTick, sizeof(kTick), reinterpret_cast<void *>(&HookPartTickAll),
+                        reinterpret_cast<void **>(&g_origPartTickAll)))
+        {
+            InstallHook("Partikel-Satz Auto", kPartSetUpdate, kUpdate, sizeof(kUpdate), reinterpret_cast<void *>(&HookPartSetUpdate),
+                        reinterpret_cast<void **>(&g_origPartSetUpdate));
+        }
+    }
+
     void Init(HMODULE self)
     {
         char path[MAX_PATH] = {};
@@ -4547,7 +4859,7 @@ namespace
         std::string base = path;
         base.erase(base.find_last_of('.'));
         g_log = std::fopen((base + ".log").c_str(), "w");
-        Log("LFSP v8f gestartet");
+        Log("LFSP v8j gestartet");
 
         auto * exe = reinterpret_cast<unsigned char *>(GetModuleHandleA(nullptr));
         const auto * dos = reinterpret_cast<IMAGE_DOS_HEADER *>(exe);
@@ -4570,6 +4882,7 @@ namespace
                     reinterpret_cast<void *>(&HookLoad), reinterpret_cast<void **>(&g_origLoad));
         InstallHook("Modell-Update", kModelUpdate, kUpdateBytes, sizeof(kUpdateBytes),
                     reinterpret_cast<void *>(&HookUpdate), reinterpret_cast<void **>(&g_origUpdate));
+        InstallExhaustSmoke();
         InstallHook("Car.Roof-Menue", kFeSetRoof, kSetRoofBytes, sizeof(kSetRoofBytes),
                     reinterpret_cast<void *>(&HookSetRoof), reinterpret_cast<void **>(&g_origSetRoof));
         static const unsigned char kBuildGeoBytes[] = { 0x83, 0xEC, 0x1C, 0x53, 0x8B, 0xD9 };

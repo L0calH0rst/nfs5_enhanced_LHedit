@@ -20,17 +20,18 @@
 | Win11/DX11 | `nfs5_enhanced` (ASI) + `dx11z.dll` | `Game CD/` | ✅ installiert, läuft (`MOD.md`) |
 | `dx11z.dll` bauen | MSVC BuildTools 18 (x86) | `work/patches/dx11z/build_dx11z.cmd` | ✅ |
 | HLSL offline prüfen | `fxc` | `C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\fxc.exe` (die x64-Version; die arm64-Version läuft hier nicht) | ✅ |
-| Kantenzeilen von Alpha-Texturen prüfen (B7) | `edge_scan.py` | `work/hd/edge_scan.py` (`python -I edge_scan.py <extract_dir>`) | ✅ |
-| Alpha-Lücken an Atlas-Zellgrenzen setzen (B7) | `atlas_gutter.py` | `work/hd/atlas_gutter.py` (`python -I atlas_gutter.py <dir> <objekt> <x0>:<x1>:<zellen> …`) | ✅ |
+| Kantenzeilen von Alpha-Texturen prüfen (B7) | `edge_scan.py` | `tools/hd/edge_scan.py` (`python edge_scan.py <extract_dir>`) | ✅ |
+| Alpha-Lücken an Atlas-Zellgrenzen setzen (B7) | `atlas_gutter.py` | `tools/hd/atlas_gutter.py` (`python atlas_gutter.py <dir> <objekt> <x0>:<x1>:<zellen> …`) | ✅ |
 | QFS/RefPack entpacken und packen (z. B. `.crp`) | `qfs.py` | `work/track/qfs.py` (`python -I qfs.py <ein> <aus>`; `compress()` als Funktion) | ✅ alle 15 Strecken-`.crp`, Packen per Rück-Entpacken geprüft |
 | Trak-Container als Baum auflisten | `trak.py` | `work/track/trak.py` (`python -I trak.py <strecke.crp> [tiefe]`) | ✅ |
 | Objekt als neues Objekt kopieren (Test) | `trak_clone.py` | `work/track/trak_clone.py <crp> <neu.crp> <nummer>:<dx>,<dy>,<dz>[:<modell.obj>[:<material>]] …`, Suche `--list TEXT` | ✅ Kopien im Spiel (Schilder); Modell offline ✅ |
 | Fahrbahn: SimD und LOD 1/2 gegen LOD 0 messen | `simd_vs_mesh.py` | `work/track/simd_vs_mesh.py <crp> […]` | ✅ alle Strecken (`work/track/out/simd_vs_mesh.txt`) |
 | Bild als neue Textur in eine `.fsh` (ARGB8888 + Mips) | `fsh_add.py` | `work/track/fsh_add.py <fsh> <neu.fsh> <name4> <bild.png\|bmp>`, Liste `--list` | offline ✅ |
 | Strecken-Geometrie ↔ Blender (OBJ) | `trak_obj.py` | `work/track/trak_obj.py export <crp> <obj> [--lod N] [--only TEXT]` / `import <crp> <obj> <neu.crp> [--uv]` | ✅ Round-Trip byte-genau; 👤 bearbeitete coastal lädt im Spiel |
-| Messlog-Hash einer Textur zuordnen | `texture_hash.py` | `work/hd/texture_hash.py` (`python -I texture_hash.py <extract_dir> [hash …]`) | ✅ |
-| Multiscale-Objekt verdoppeln (Test 2.0) | `upscale_mbp.py` | `work/hd/upscale_mbp.py` (`python -I upscale_mbp.py <extract_dir> <objekt> [--mark]`) | ✅ |
-| KI-Upscaling (Option für Phase 2) | Real-ESRGAN / waifu2x | 👤 lokal | noch nicht eingerichtet |
+| Messlog-Hash einer Textur zuordnen | `texture_hash.py` | `tools/hd/texture_hash.py` (`python texture_hash.py <extract_dir> [hash …]`) | ✅ |
+| Multiscale-Objekt verdoppeln (Test 2.0) | `upscale_mbp.py` | `tools/hd/upscale_mbp.py` (`python upscale_mbp.py <extract_dir> <objekt> [--mark]`) | ✅ |
+| HD-Texturen: Ablauf prep → chaiNNer → finish → pack → install | `hd_pipeline.py` (+ `hd_prep.py`, `hd_finish.py`, `hd_config.ini`) | `tools/hd/` (`python hd_pipeline.py status`), Anleitung `HD-TEXTUREN.md` | ✅ getestet (Lanczos statt Modell) |
+| KI-Upscaling | chaiNNer | `G:\NFSP\work\hd\Texture_Upscaling_Tools\chaiNNer.exe`, Modelle in `work\hd\models` | 👤 eingerichtet, Modelle fehlen noch |
 | W2 (OpenNFS, nur optional) | Vulkan-Renderer, Loader für NFS2–4, **kein NFS5-Loader** | `OpenNFS-0.3-sourcecode/src/` | nicht in Arbeit |
 
 **Weitere Bestände im Workspace:**

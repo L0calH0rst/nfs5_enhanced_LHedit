@@ -55,6 +55,14 @@ Das Modell-Objekt (vtable `0x5B3620`, Größe `0x1038`) hat zwei Arten von Anima
 - **Im Rennen fasst die Engine Slot 1 nicht an.** Ein Plugin kann die Verdeck-Animation deshalb selbst abspielen, indem es `FUN_004380d0(Modell, 1, Wert)` Bild für Bild aufruft. Im Menü klappt das (8.3b ✅).
 - **Im Rennen hat Slot 1 kein Bild (`max = 0`, 8.3b).** Die Bildanzahl setzt `0x43C1B0` nur für Teile, die die Varianten-Tabelle auswählt. Das animierte Verdeck-Teil hat im Rennen also eine andere Variante als im Menü. v3 sucht im Teile-Katalog die Varianten mit Animation 1, schaltet sie ein und baut neu auf.
 
+### 3.2 Verdeck bei LOD ≥ 1 (LFSP v8i, 2026-10-25)
+
+**Fehler (👤, `FullCarDetail = 0`):** Öffnet man im Rennen das Verdeck des 356 Cabrio, verschwindet in der Verfolgerkamera das Heck. Mit `FullCarDetail = 1` tritt das nicht auf.
+
+**Ursache (Log v8h):** Die Schichten 1–7 des Modells sind die LOD-Stufen (356_1: 62, 62, 28, 28, 23, 12, 6 Teile). Beim ersten Druck auf die Verdeck-Taste schaltet LFSP Teil 37 (animiertes Verdeck) von 0 auf 1 und Teil 41 (starres Verdeck, im Rennen Variante 2 = offen mit Heck) wie im Menü auf 0. Danach baut es alle Schichten neu auf. Ab Schicht 3 hat die `.crp` kein animiertes Teil 37. Dort bleibt dann weder ein Verdeck noch das Heckteil übrig. Ohne `FullCarDetail` zeichnet das Spiel das eigene Auto auch in der Verfolgerkamera mit einer dieser Stufen. Der fehlende HD-Innenraum dort ist dagegen Originalverhalten: Er steckt nur in LOD 0.
+
+**Fix v8i:** `RebuildLodsWithoutRoof` baut nach jedem Neuaufbau jede Schicht ohne Eintrag mit Animation 1 nochmals mit den Rennvarianten (`roofSaved`) auf. In diesen Stufen zeigt Teil 41 den Stand vom Rennstart, bis `RestoreRaceRoof` am Ende der Animation die passende Variante setzt. Log: `Schicht … ohne animiertes Verdeck, mit Rennteilen aufgebaut`. 👤 Test offen.
+
 ## 4. Mausklick auf die Scheibe
 
 Im Rennen ist der Mauszeiger aus, und die Engine kennt keine Auswahl von Fahrzeugteilen per Klick. Nötig wären: Zeiger einblenden, Klickposition gegen die Scheiben-Geometrie prüfen (Strahl gegen Dreiecke). dx11z sieht nur Bildschirm-Vertices ohne Teil-Nummer (`knowledge.md` §3), die Prüfung gehört also in den Engine-Hook. Aufwand deutlich höher als die Taste. Vorschlag: erst Taste, Maus als Erweiterung.
@@ -344,3 +352,11 @@ Ab v6 übernimmt die ASI auch die fahrzeugbezogenen Teile des Lichts (Aufteilung
 **v7i** (MD5 `caff8158…`, installiert, v7h in `Game CD/_backup/`): Scroll-Grenze = Anzahl − 1 des Scroll-Accessors wie beim Ziehen der Leiste; v7g/v7h zogen die letzte Seite doppelt ab (`MENU.md` §1.5).
 
 **v7j** (MD5 `4ff6880a…`, installiert, v7i in `Game CD/_backup/`): Mausrad über einer zugeklappten Liste wählt den nächsten/vorherigen Eintrag (`[Menu] WheelSelect`, 10.2, `MENU.md` §1.6).
+
+**Befund (👤, 2026-10-25):** Startet das Rennen mit offenem Verdeck (356_1: Teil 41 = 2), malt diese Variante einen Teil des Verdecks flach auf den Lack hinter den Sitzen. Nach dem ersten `V` (animiertes Teil 37, Teil 41 aus) ist das weg und bleibt weg. Das offene animierte Teil sieht auch im Menü so aus. (Eine kurze v8h schaltete am Ende der Animation zurück auf 41 = 2; verworfen, weil gerade das den Fehler zurückbringt.)
+
+**v8i** (MD5 `b587e204…`, liegt als `Game CD/lfsp.asi.v8i` bereit, Spiel lief): Ist im Rennen beim ersten Bild Teil 41 auf einer offenen Variante (≠ 0 und ≠ `[styleN]`-Wert bzw. 1), schaltet LFSP sofort auf das animierte Verdeck in offener Stellung (`EnableRoofParts`). Log: „Rennstart offen … -> animiertes Verdeck“. Voraussetzung wie bisher: Auto vorher im Menü angesehen. 👤 noch nicht getestet.
+
+**Ergebnis v8i (👤):** Beim 356A mit geschlossenem Start (Teil 41 = 6) ist das Verdeck ebenfalls aufgemalt; v8i griff dort nicht, weil es nur offene Starts ersetzte. Auch die geschlossene Variante von Teil 41 hat den Fehler.
+
+**v8j** (MD5 `b3b52776…`, installiert, v8i in `Game CD/_backup/`): Ersetzt Teil 41 bei jedem Rennstart (≠ 0) durch das animierte Verdeck; offen/geschlossen bestimmt `EnableRoofParts` wie bisher. Log: „Rennstart (Teil 41 = …) -> animiertes Verdeck“. 👤 noch nicht getestet.

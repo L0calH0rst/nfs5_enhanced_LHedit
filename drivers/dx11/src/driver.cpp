@@ -1457,7 +1457,10 @@ namespace dx11z
                 char bias[32] = {};
                 ::GetPrivateProfileStringA( "World", "SkidDepthBias", "0.003", bias, sizeof( bias ), lights_ini.c_str() );
                 m_ConfigSkidBias = std::clamp( static_cast<float>(std::atof( bias )), 0.0f, 0.1f );
+                ::GetPrivateProfileStringA( "World", "TextureLodBias", "0", bias, sizeof( bias ), lights_ini.c_str() );
+                m_ConfigTextureLodBias = std::clamp( static_cast<float>(std::atof( bias )), -2.0f, 4.0f );
             }
+            m_ConfigForceMips = ::GetPrivateProfileIntA( "World", "ForceMips", 0, lights_ini.c_str() ) != 0;
             m_ConfigReflectionDebug = std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Water", "ReflectionDebug", 0, lights_ini.c_str() )), 0, 4 );
             m_ConfigReflectionTwoSided = std::clamp( std::atoi( water_value( "ReflectionTwoSided", "1" ).c_str() ), 0, 1 );
             m_ConfigReflectionWaves = std::clamp( static_cast<float>(std::atof( water_value( "ReflectionWaves", "3" ).c_str() )), 0.0f, 20.0f );
@@ -1539,6 +1542,7 @@ namespace dx11z
         }
 
         Log( "Config SkidDepthBias %.4f", m_ConfigSkidBias );
+        Log( "Config TextureLodBias %.2f ForceMips %d", m_ConfigTextureLodBias, m_ConfigForceMips ? 1 : 0 );
         if (m_ConfigSkidBias > 0.0f)
         {
             InstallSkidHook();
@@ -4066,7 +4070,8 @@ namespace dx11z
             const bool anisotropic = s[tss::MAGFILTER] == 5 || s[tss::MINFILTER] == 3 || (m_ConfigAnisotropy > 1 && s[tss::MINFILTER] >= 2);
             const bool mag_linear = s[tss::MAGFILTER] >= 2;
             const bool min_linear = s[tss::MINFILTER] >= 2;
-            const std::uint32_t mip = s[tss::MIPFILTER];
+            const std::uint32_t game_mip = s[tss::MIPFILTER];
+            const std::uint32_t mip = m_ConfigForceMips && min_linear && game_mip <= 1 ? 3u : game_mip;
 
             D3D11_SAMPLER_DESC desc = {};
             if (anisotropic)
@@ -4100,13 +4105,20 @@ namespace dx11z
             desc.AddressU = ToAddress( s[tss::ADDRESSU] );
             desc.AddressV = ToAddress( s[tss::ADDRESSV] );
             desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-            desc.MipLODBias = AsFloat( s[tss::MIPMAPLODBIAS] );
+            // Fine textures shimmer at grazing angles (HD-TEXTUREN.md): the extra bias only applies where mips are sampled.
+            desc.MipLODBias = AsFloat( s[tss::MIPMAPLODBIAS] ) + (mip >= 2 ? m_ConfigTextureLodBias : 0.0f);
             desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
             desc.MinLOD = 0.0f;
 
             // Mip filter none samples the top level only.
             desc.MaxLOD = mip <= 1 || m_ConfigTestNoMips ? 0.0f : D3D11_FLOAT32_MAX;
             m_Device->CreateSamplerState( &desc, cached.Put() );
+
+            if (m_ConfigMeasure > 0 && m_MeasureSamplers[key]++ == 0)
+            {
+                Log( "M3T sampler mag %u min %u mip %u (game %u) bias %.2f aniso %u address %u/%u", s[tss::MAGFILTER], s[tss::MINFILTER], mip, game_mip,
+                    desc.MipLODBias, anisotropic ? desc.MaxAnisotropy : 0u, s[tss::ADDRESSU], s[tss::ADDRESSV] );
+            }
         }
 
         m_SamplerKeys[index] = key;
@@ -4491,6 +4503,69 @@ namespace dx11z
     }
 
 
+    // Lines are one pixel wide at any resolution, while the game spaces them for 640x480 scaled up: the
+    // damage gauge's gradient, drawn as stacked lines, falls apart into thin stripes (BUGS.md B18). The same
+    // happens when the frame is rendered larger than the game's. Each line becomes a quad across its minor
+    // axis, as wide as one pixel of 640x480.
+    void Driver::WidenLines()
+    {
+        const float width = std::max( 1.0f, static_cast<float>(m_Height) / 480.0f );
+
+        if (width <= 1.0f && m_ScaleX <= 1.0f && m_ScaleY <= 1.0f)
+            return;
+
+        const std::size_t lines = m_BatchIndices.size() / 2;
+
+        if (lines * 4 > std::min<std::size_t>( RAW_VERTICES, 0xFFFF ) || lines * 6 > RAW_INDICES)
+            return;
+
+        // Wound so the game's cull mode keeps the quad: 2 removes clockwise, 3 counter-clockwise (y down).
+        const std::uint32_t cull = m_D3D.m_Render[rs::CULLMODE];
+        std::vector<TlVertex> vertices;
+        std::vector<std::uint16_t> indices;
+        vertices.reserve( lines * 4 );
+        indices.reserve( lines * 6 );
+
+        for (std::size_t i = 0; i < lines; ++i)
+        {
+            const TlVertex & a = m_BatchVertices[m_BatchIndices[i * 2]];
+            const TlVertex & b = m_BatchVertices[m_BatchIndices[i * 2 + 1]];
+            const bool flat = std::fabs( b.m_X - a.m_X ) >= std::fabs( b.m_Y - a.m_Y );
+            const float dx = flat ? 0.0f : 0.5f * width;
+            const float dy = flat ? 0.5f * width : 0.0f;
+
+            const auto base = static_cast<std::uint16_t>(vertices.size());
+            TlVertex corner = a;
+            corner.m_X -= dx;
+            corner.m_Y -= dy;
+            vertices.push_back( corner );
+            corner.m_X += 2.0f * dx;
+            corner.m_Y += 2.0f * dy;
+            vertices.push_back( corner );
+            corner = b;
+            corner.m_X -= dx;
+            corner.m_Y -= dy;
+            vertices.push_back( corner );
+            corner.m_X += 2.0f * dx;
+            corner.m_Y += 2.0f * dy;
+            vertices.push_back( corner );
+
+            const TlVertex * v = &vertices[base];
+            const float winding = (v[1].m_X - v[0].m_X) * (v[2].m_Y - v[0].m_Y) - (v[1].m_Y - v[0].m_Y) * (v[2].m_X - v[0].m_X);
+            const bool reverse = (cull == 2 && winding > 0.0f) || (cull == 3 && winding < 0.0f);
+
+            static constexpr int ORDER[2][6] = { { 0, 1, 2, 2, 1, 3 }, { 0, 2, 1, 2, 3, 1 } };
+
+            for (const int k : ORDER[reverse ? 1 : 0])
+                indices.push_back( static_cast<std::uint16_t>(base + k) );
+        }
+
+        m_BatchVertices.assign( vertices.begin(), vertices.end() );
+        m_BatchIndices.assign( indices.begin(), indices.end() );
+        m_BatchPrimitive = Primitive::TRIANGLES;
+    }
+
+
     void Driver::Flush()
     {
         if (m_BatchIndices.empty() || m_BatchVertices.empty() || !m_FrameView)
@@ -4499,6 +4574,9 @@ namespace dx11z
             m_BatchIndices.clear();
             return;
         }
+
+        if (m_BatchPrimitive == Primitive::LINES)
+            WidenLines();
 
         m_MeasureSuspect = false;
 

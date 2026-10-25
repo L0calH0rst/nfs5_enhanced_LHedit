@@ -80,10 +80,10 @@ Voraussetzungen erfüllt (Gate 1, Gate 3T). Weg: FSH-Repack mit `fshtool`.
 | ID | Wer | Aufgabe | Ergebnis | Abnahme | Status |
 |---|---|---|---|---|---|
 | **2.0** | 🤖+👤 | **Größengrenze prüfen:** eine Strecken-Textur mit Alpha als FSH-Typ `0x7D` in 512×512 mit voller Mip-Kette und **verändertem Alpha** repacken; mit `Measure = 1` fahren | `FSH-REPACK.md` §11 | belegt, ob > 256² geht (`talloc`-Größe, Absturz, Verkleinerung) und ob der neue Alpha-Inhalt ankommt. Bei harter Grenze entscheidet 👤: Grenze per Hook aufheben oder HD auf 256² beschränken | ✅ Teil A: 512×512 wird genutzt (§11.5). ✅ Teil B: `RaceColorDepth` ohne Wirkung; Strecke `7D` → 8888, Fahrzeuge `7B` → 4444 (§11.3, §11.6). Offen: veränderter Alpha-Inhalt |
-| **2.0b** | 🤖+👤 | **Speicherbedarf messen, bevor ein Memory-Patch erwogen wird:** dx11z-Messlog um Prozess-Speicher (virtueller Adressraum, Private Bytes) je Bericht erweitern; Fahrt mit Original-Satz vs. Strecke mit allen Texturen verdoppelt | Messwerte in `FSH-REPACK.md` §12 | Entscheidung LAA-Flag ja/nein auf Basis der Zahlen | 🔄 Lauf 1: max. 817 / 2048 MB Adressraum, Texturen 30 MB → für 512er-Satz kein LAA nötig; Lauf 2 (alle Texturen verdoppelt) offen |
-| 2.1 | 👤 | Kunstentscheidung: Faktor, Methode (Nearest / KI-Upscaler), Reihenfolge (Strecke, Auto, HUD) | `work/hd/SPEC.md` | Spezifikation liegt vor | ⏳ |
-| 2.2 | 🤖 | Pipeline BMP → Upscale → FSH; Alpha-Masken von Fahrzeugtexturen ohne Interpolation (`knowledge.md` §1); transparente Lücken an Atlas-Zellgrenzen (`BUGS.md` §9.4, B7) | `work/hd/pipeline.py` + eine Test-Textur | Rück-Extraktion korrekt | ⏳ |
-| 2.3 | 👤 | Eine HD-Textur im Spiel prüfen | Screenshot + Rückmeldung | „sieht gut aus“ oder Problemliste | ⏳ |
+| **2.0b** | 🤖+👤 | **Speicherbedarf messen, bevor ein Memory-Patch erwogen wird:** dx11z-Messlog um Prozess-Speicher (virtueller Adressraum, Private Bytes) je Bericht erweitern; Fahrt mit Original-Satz vs. Strecke mit allen Texturen verdoppelt | Messwerte in `FSH-REPACK.md` §12 | Entscheidung LAA-Flag ja/nein auf Basis der Zahlen | ✅ Lauf 1: 1047 MB Adressraum, Texturen 26–30 MB. Lauf 2 (coastal komplett HD, Faktor 4): 1176 von 2048 MB, Texturen 225 MB → kein LAA nötig; für Faktor 8 LAA vorsehen (`FSH-REPACK.md` §12.1) |
+| 2.1 | 👤 | Kunstentscheidung: Faktor, Methode (Nearest / KI-Upscaler), Reihenfolge (Strecke, Auto, HUD) | `HD-TEXTUREN.md` | Spezifikation liegt vor | 🔄 Methode chaiNNer, Faktor 4 vorgegeben; Modelle je Kategorie offen |
+| 2.2 | 🤖 | Pipeline BMP → Upscale → FSH; Alpha-Masken von Fahrzeugtexturen ohne Interpolation (`knowledge.md` §1); transparente Lücken an Atlas-Zellgrenzen (`BUGS.md` §9.4, B7) | `tools/hd/hd_pipeline.py`, `HD-TEXTUREN.md` | Rück-Extraktion korrekt | ✅ 2026-10-23 (Lanczos-Test, 186 Objekte); Eingaben für coastal liegen bereit |
+| 2.3 | 👤 | Eine HD-Textur im Spiel prüfen | Screenshot + Rückmeldung | „sieht gut aus“ oder Problemliste | 🔄 1024er-street-Test läuft (Pool-Absturz behoben, `nfsp_texpool.asi`); Flimmern auch im Original; Test mit echtem Modell offen |
 | 2.4 | 🤖 | Pipeline verfeinern und auf alle priorisierten Texturen anwenden | kompletter HD-Satz | Liste gepackt + Log | ⏳ |
 | 2.5 | 👤 | HD-Satz im Spiel durchspielen | Freigabe | schriftliche Freigabe (= Gate 2) | ⏳ |
 
@@ -242,6 +242,7 @@ Feature-Plan vom 2026-10-17. Nur aufgenommen, noch nicht untersucht oder prioris
 | 11.8 | 🤖+👤 | **Durchdrehende Reifen/Burnout:** das Spiel scheint einen echten Burnout zu verhindern; dieses Verhalten anpassen | 👤: Burnout möglich, Fahrverhalten sonst unverändert | ⏳ nur aufgenommen |
 | 11.9 | 🤖+👤 | **Besserer Autoschatten:** der Bodenschatten ist kein Echtzeitschatten, sondern heute ein Rechteck. Ist er eine Textur, eine realistischere Form erstellen (Kandidat: `GameData/CarModel/Shadow.fsh`) | 👤: Schatten passt zur Autoform | ⏳ nur aufgenommen |
 | 11.10 | 🤖+👤 | **Live-Reflexionen auf Auto, Fenstern und Spiegeln:** bereits in Phase 9 geplant. Zusatzidee: an Gebäuden spiegelnde Bereiche (Fenster) über die Alpha-Map der Textur markieren | 👤: Fenster an Gebäuden spiegeln, Wände nicht | ⏳ nur aufgenommen |
+| 11.11 | 🤖+👤 | **Auspuffrauch bei Motorschaden** (Wunsch 2026-10-23): beschädigter Motor qualmt etwas aus dem Auspuff | `knowledge.md` | 👤: Auto mit Motorschaden zieht leichten Rauch hinter sich her, unbeschädigt kein Rauch | 🔄 11.11a (LFSP v8g, installiert, v8f als `lfsp.asi.v8f.bak`): zwölfter Emitter je Partikel-Satz mit System VehicleExhaust, Stärke nach Motorschaden `FUN_004938a0`, `[Damage]` in `lfsp.ini`; Test 👤 offen |
 
 ### Phase 12 – Verkehr: mehr und vielfältiger (Feature-Request) 🔄
 
@@ -292,7 +293,7 @@ Auftrag 👤 2026-10-21 (`plan_pvs_haze_1.md`). Abgleich mit dem Projektstand un
 
 Vom Nutzer auf Win11 bestätigt:
 1. Startet und läuft **stabil unter Windows 11**.
-2. Zeigt **hochauflösende Texturen** nach `work/hd/SPEC.md`, ohne Artefakte.
+2. Zeigt **hochauflösende Texturen** nach `HD-TEXTUREN.md`, ohne Artefakte.
 3. Läuft in **HD-Auflösung** mit korrektem HUD und akzeptabler Performance.
 
 ---
@@ -300,7 +301,7 @@ Vom Nutzer auf Win11 bestätigt:
 ## 6. Offene Punkte für 👤
 
 1. **B1–B3:** Freigabe für 3C.2 (`gimme.dll`-Analyse) oder Fallback (DDS fixieren + `.scn`-Priorisierung).
-2. **2.1:** Kunstentscheidung (`work/hd/SPEC.md`).
+2. **2.1:** Kunstentscheidung (`HD-TEXTUREN.md`).
 3. **Belege B1–B3, B5, B6:** Screenshots liegen nur beim Nutzer; bitte nach `doc/screenshots/` legen.
 4. **Ghidra-Lücken:** an den 11 Adressen aus `GHIDRA.md` §3 Funktionen anlegen und neu exportieren (vor 3C.2 sinnvoll).
 5. ~~`coastal.fsh` unbekannter Stand~~ → geklärt: stammt aus den 512er-Versuchen des Nutzers, gesichert als `coastal.fsh.usertry`; Basis ist das Original `coastal - Kopie.fsh`.

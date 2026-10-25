@@ -218,3 +218,20 @@ Nebenbefund: Die Engine meldet bei `talloc` eine Mip-Stufe weniger als die Kette
 - Dazu kommen die Kopien des Spiels im eigenen Speicher (FSH-Daten, umgerechnete Texturen) in ähnlicher Größenordnung.
 
 Für einen 512er-Satz ist **kein LAA-Patch nötig**. Für 1024er-Sätze wird es knapp, dann wäre das LAA-Flag eine sinnvolle Vorsorge. Lauf 2 bestätigt oder widerlegt die Hochrechnung.
+
+### 12.1 Lauf 2: kompletter HD-Satz coastal (2026-10-24)
+
+`dx11z.log` vom 2026-10-24 00:24, Rennen auf coastal mit dem kompletten Satz: 178 Texturen mit Faktor 4 (128² → 512², 256² → 1024², `talloc ARGB8888 512x512 levels 9` / `1024x1024 levels 10`), `nfsp_texpool.asi` mit 256 MB.
+
+| Phase | Adressraum | Private Bytes | Arbeitsspeicher | Texturen in dx11z |
+|---|---|---|---|---|
+| Menü | 1021 MB | 532 MB | 279 MB | 0 |
+| Rennen | **1172–1176 MB** von 2048 | 519 MB (Spitze **673** beim Laden) | 495 MB (Spitze 719) | **225 MB** |
+| Vergleich: Rennen mit Originaltexturen (anderer Lauf, 2026-10-24) | 1047 MB | 543 MB Spitze | 309 MB Spitze | 26 MB |
+
+**Ergebnis:** Der Satz mit Faktor 4 kostet nur rund **+130 MB Adressraum**. Im Rennen bleiben **~870 MB frei**, ein LAA-Patch ist dafür **nicht nötig**.
+- Die 215 MB große `.fsh` wird nur während des Ladens gehalten (Spitze der Private Bytes).
+- Der Texturpool ist mit `VirtualAlloc` angelegt und belegt im Adressraum nur, was er reserviert.
+
+**Hochrechnung Faktor 8** (~800 MB Texturdaten): grob +500 bis +600 MB, also rund 1,7–1,8 GB. Das ist zu knapp, dafür vorher das LAA-Flag setzen.
+

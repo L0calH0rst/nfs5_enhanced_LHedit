@@ -26,7 +26,7 @@
 | **B15** | Spiegelung im Wasser ungenau: gespiegelte Objekte (Boot) erscheinen als graue, fast texturlose Silhouette statt in ihren Farben | Ursache geklärt (Original-Asset), Fix-Weg offen | §12 | `screenshots/b15_water_reflection_boat.png` |
 | **B16** | Boxster: Überrollbügel von vorn rot mit Netz, von hinten schwarz und ohne Netz; `ForceTwoSided` hilft nicht | nein; auch im Originalspiel | §13 | `screenshots/b16_boxster_rollbar_*.png`, `work/logs/b16-measure2/` |
 | **B17** | Scheinwerferlicht beleuchtet nicht jede Geometrie: Felswand vor dem Auto rechts beleuchtet, links daneben nicht (harte Kante) | offen | §14 | `screenshots/b17_headlight_cliff_partial.webp` |
-| **B18** | HUD-Schadensanzeige: der Farbverlauf Grün → Rot unter dem Auto-Piktogramm erscheint als mehrere dünne parallele Linien statt als durchgehende Fläche | offen; vermutlich Folge der höheren Auflösung (Nutzer) | §15 | `screenshots/b18_hud_damage_gradient_lines.png` |
+| **B18** | HUD-Schadensanzeige: der Farbverlauf Grün → Rot unter dem Auto-Piktogramm erscheint als mehrere dünne parallele Linien statt als durchgehende Fläche | ✅ behoben (dx11z `WidenLines`) | §15 | `screenshots/b18_hud_damage_gradient_lines.png` |
 | **B19** | Kleine Risse in der Map in mittlerer Entfernung (Straßenrand/Grünstreifen), Himmelsfarbe scheint durch; teils fehlt ein ganzes Dreieck. Beim Näherkommen verschwinden sie | nein (auch bei DDS = 1, FarClip = 1) | §16 | `screenshots/b19/` |
 | **B20** | Alpen-Strecke: ein weit entfernter Streckenabschnitt (Straße, Hecke, Gelände) schwebt frei vor dem Bergpanorama | offen; auch ohne LFSP-Strecken-Patches und bei DDS = 1 | §17 | `screenshots/b20_*.webp` |
 | **B21** | Loch im Boden nahe vor dem Auto, mittig im Bild (Alpen-Strecke, Wiese hinter dem Zaun) | offen; auch ohne LFSP-Strecken-Patches und bei DDS = 1 | §18 | `screenshots/b21_ground_hole_near.webp` |
@@ -749,7 +749,15 @@ Zusatzfrage für H-B10b: Ist bei fehlendem Profil die Liste kürzer (Eintrag feh
 
 **Symptom** (`doc/screenshots/b18_hud_damage_gradient_lines.png`): Im HUD-Element „damage“ liegt zwischen „0%“ und „100%“ ein Farbverlauf von Grün nach Rot. Er sollte eine durchgehende Fläche sein, erscheint aber als mehrere dünne parallele Linien mit Lücken dazwischen.
 
-**Stand:** nur aufgenommen, auf Wunsch des Nutzers noch nicht untersucht. Vermutung des Nutzers: Folge der höheren Auflösung.
+**Befund (2026-10-23):**
+- Der Verlauf ist keine Textur: `GameData/DashHud/car.fsh` enthält nur die Teile des Autos (`C1`–`C6`, `CarN`), `FEData/Art/hud.fsh` und `hud.psh` (PlayStation-Bilder) haben keinen Balken. Er wird also als Linien-Primitive gezeichnet (`THRASH_drawline`/`drawlinestrip`, Zeiger `0x6BD950`/`0x6BD93C`).
+- Linien sind in dx11z (`D3D11_PRIMITIVE_TOPOLOGY_LINELIST`) wie im Original immer genau 1 Pixel dick. Das Spiel verteilt die Linien aber mit der Auflösung (Basis 640×480). Im Rennen läuft es laut `dx11z.log` mit 2560×1440 und Faktor 1 ohne Supersampling, also mit 3 Pixel Abstand: eine Linie, zwei Pixel Lücke. Dasselbe gilt für Menüs mit 640×480, die in 1920×1440 gerendert werden.
+
+**Fix (dx11z, `Driver::WidenLines` in `Flush`):** Jede Linie wird als Viereck gezeichnet, quer zur Hauptrichtung `max(1, Höhe/480)` Spielpixel breit (bei 1440: 3 Pixel). Die Dreiecke werden passend zum Cull-Modus des Spiels gewunden. Nur aktiv, wenn die Höhe über 480 liegt oder Supersampling läuft. Kein Schalter (Renderer-Fix). Installiert `Game CD/Drivers/dx11z.dll` (MD5 `325d91a2fbdbbcac4aa2c1f21e8bb6bd`), vorher `dx11z.dll.pre-b18`.
+
+**Ergebnis 👤 (2026-10-23):** Der Balken ist eine durchgehende Fläche ✅.
+
+**Beobachten:** Mögliche Nebenwirkung: andere Linien (falls das Spiel z. B. auf der Karte welche nutzt) werden ebenfalls dicker. Bei nicht ganzzahligem Faktor (1080 → 2,25) überlappen benachbarte Linien leicht; bei halbtransparentem Verlauf könnten feine hellere Streifen bleiben.
 
 ## 16. B19 – Risse in der Strecke aus der Ferne (gemeldet 2026-10-17)
 

@@ -911,6 +911,9 @@ namespace dx11z
         int m_ConfigRemoveBaked = 1;
         bool m_ConfigGuardBand = true;
         float m_ConfigSkidBias = 0.003f; // '[World] SkidDepthBias' (BUGS.md B22): skid marks moved towards the camera, share of the distance
+        float m_ConfigTextureLodBias = 0.0f; // '[World] TextureLodBias' (HD-TEXTUREN.md): added to the game's mip bias, > 0 = blurrier, less shimmer
+        bool m_ConfigForceMips = false; // '[World] ForceMips': sample mip levels even where the game turns the mip filter off
+        std::unordered_map<std::uint64_t, int> m_MeasureSamplers; // sampler states logged once each with Measure
         int m_ConfigReflectionDebug = 0;
         std::vector<std::uint32_t> m_ConfigWaterTextures;
         std::vector<std::uint32_t> m_ConfigShoreTextures; // water part (low alpha) joins the water mask
@@ -1059,6 +1062,8 @@ namespace dx11z
         );
 
         void Flush();
+
+        void WidenLines();
 
         void BeginBatch(
             Primitive primitive,
