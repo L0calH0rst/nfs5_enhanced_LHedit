@@ -5110,15 +5110,16 @@ namespace
     }
 
     // ---- Messung LOD-Wahl ([Cars] LodMeasure, Lenkrad durch ferne Autos) ----
-    // FUN_00439f90 (fastcall, Objekt in ecx) wählt je Bild die Detailstufe eines Autos und legt sie in obj[0xB0] ab;
-    // obj[0x3D] ist das Auto. Geloggt wird jeder Wechsel mit Entfernung zum Spielerauto und Zahl der Stufen.
-    using LodSelectFn = unsigned char (__fastcall *)(int *);
+    // FUN_00439f90 (thiscall, Objekt in ecx, ein float auf dem Stack, ret 4) wählt je Bild die Detailstufe eines Autos
+    // und legt sie in obj[0xB0] ab; obj[0x3D] ist das Auto. Geloggt wird jeder Wechsel mit Entfernung zum Spielerauto
+    // und Zahl der Stufen. Der Stackparameter muss durchgereicht werden, sonst stimmt der Stack nach ret 4 nicht mehr.
+    using LodSelectFn = unsigned char (__fastcall *)(int *, int, float);
     LodSelectFn g_origLodSelect = nullptr;
     std::map< int *, int > g_lodSeen;
 
-    unsigned char __fastcall HookLodSelect(int * obj)
+    unsigned char __fastcall HookLodSelect(int * obj, int edx, float size)
     {
-        const unsigned char result = g_origLodSelect(obj);
+        const unsigned char result = g_origLodSelect(obj, edx, size);
         const int lod = obj[0xB0];
         auto it = g_lodSeen.find(obj);
         if (it != g_lodSeen.end() && it->second == lod)
