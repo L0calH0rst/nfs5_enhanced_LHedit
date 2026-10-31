@@ -5,7 +5,9 @@
 
 #include <windows.h>
 #include <mmsystem.h>
+#include <tlhelp32.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdarg>
@@ -501,6 +503,18 @@ namespace
     // Auspuffrauch bei Motorschaden ([Damage], InstallExhaustSmoke)
     int g_exhaustSmoke = 1;
     int g_lodMeasure = 0; // [Cars] LodMeasure, InstallLodMeasure
+    // [SimTrace]: Zugriffe auf carSpecs-Felder per Hardware-Haltepunkt (StartSimTrace)
+    int g_simTrace = 0;
+    int g_simTraceFields[4] = {};
+    int g_simTraceFieldCount = 0;
+    int g_simTraceCar = 0;       // 0 = Spielerauto, n = Platz n in der Liste der Rennautos
+    int g_simTraceDumpSec = 10;
+    // [Debug] ForceCops: Polizei in jedem Rennen (Test der .cop-Dateien, InstallForceCops)
+    int g_forceCops = 0;
+    // [Debug] WeatherLog: Zustand der Scheibentropfen jede Sekunde ins Log (StartWeatherLog)
+    int g_weatherLog = 0;
+    // [Debug] StateLog: Menü- und Modusvariablen bei jeder Änderung ins Log (StartStateLog)
+    int g_stateLog = 0;
     float g_exhaustStart = 45.0f, g_exhaustFull = 200.0f, g_exhaustMin = 0.25f, g_exhaustMax = 1.0f;
     float g_exhaustBack = 0.9f, g_exhaustSide = 0.35f, g_exhaustHeight = -0.05f;
 
@@ -782,6 +796,47 @@ namespace
             g_trafficRandom, static_cast<unsigned>(g_trafficPoolNames.size()),
             static_cast<unsigned>(g_trafficTrackOnly.size()));
         g_lodMeasure = GetPrivateProfileIntA("Cars", "LodMeasure", 0, ini);
+        g_simTrace = GetPrivateProfileIntA("SimTrace", "Enabled", 0, ini);
+        if (g_simTrace)
+        {
+            char list[128] = {};
+            GetPrivateProfileStringA("SimTrace", "Fields", "0x134,0x138,0x13C,0x144", list, sizeof(list), ini);
+            for (const char * p = list; *p;)
+            {
+                char * end = nullptr;
+                const long off = std::strtol(p, &end, 0);
+                if (end == p)
+                {
+                    ++p;
+                    continue;
+                }
+                p = end;
+                if (off < 0 || off >= 0x1C4 || (off & 3) != 0)
+                {
+                    Log("SimTrace: Feld 0x%lX ungueltig (0..0x1C0, durch 4 teilbar), uebergangen", off);
+                }
+                else if (g_simTraceFieldCount == 4)
+                {
+                    Log("SimTrace: mehr als 4 Felder, 0x%lX uebergangen", off);
+                }
+                else
+                {
+                    g_simTraceFields[g_simTraceFieldCount++] = static_cast<int>(off);
+                }
+            }
+            g_simTraceCar = GetPrivateProfileIntA("SimTrace", "Car", 0, ini);
+            g_simTraceDumpSec = GetPrivateProfileIntA("SimTrace", "DumpSeconds", 10, ini);
+            g_simTraceDumpSec = g_simTraceDumpSec < 1 ? 1 : g_simTraceDumpSec;
+            Log("SimTrace: an, %d Felder, Car %d, DumpSeconds %d", g_simTraceFieldCount, g_simTraceCar,
+                g_simTraceDumpSec);
+            if (g_simTraceFieldCount == 0)
+            {
+                g_simTrace = 0;
+            }
+        }
+        g_forceCops = GetPrivateProfileIntA("Debug", "ForceCops", 0, ini);
+        g_weatherLog = GetPrivateProfileIntA("Debug", "WeatherLog", 0, ini);
+        g_stateLog = GetPrivateProfileIntA("Debug", "StateLog", 0, ini);
         g_exhaustSmoke = GetPrivateProfileIntA("Damage", "ExhaustSmoke", 1, ini);
         {
             auto readDamage = [ini](const char * name, const char * fallback, float lo, float hi) {
@@ -4408,6 +4463,13 @@ namespace
     void __cdecl RaceSetupBefore(int *)
     {
         Log("Verkehr: Rennaufbau beginnt, Spielart %d", *reinterpret_cast<int *>(kFeMode));
+        if (g_forceCops)
+        {
+            // [Debug] ForceCops: Cheat 5 (Maske 0x65B940) macht aus dem Einzelrennen (Spielart 0) eine Verfolgungsjagd:
+            // kRaceSetup legt dann 4 Polizeiautos (Modelle Strecke +0x8A) an und schreibt COPS = 1 (Befehl 0x15)
+            *reinterpret_cast<unsigned *>(0x65B940) |= 1u << 5;
+            Log("ForceCops: Cheat 5 gesetzt (Verfolgungsjagd im Einzelrennen)");
+        }
         LogModelList();
     }
 
@@ -5172,6 +5234,562 @@ namespace
         }
     }
 
+    // ---- carSpecs-Tracer ([SimTrace], Phase 14 Stufe 2, doc/TOOLS.md) ----
+    // Bis zu 4 Felder der carSpecs eines Rennautos ([car + 0x760] + Offset) als Daten-Haltepunkte DR0–DR3
+    // (Lesen/Schreiben, 4 Byte) auf allen Threads des Spiels. Der Exception-Handler zählt nur: je Feld und EIP,
+    // getrennt nach "Wert danach unverändert" (Lesen oder Schreiben desselben Werts) und "Wert geändert" (Schreiben).
+    // Ein eigener Thread setzt die Haltepunkte im Rennen, erneuert sie jede Sekunde (neue Threads), entfernt sie beim
+    // Verlassen des Rennens und schreibt die Tabelle alle DumpSeconds nach lfsp_simtrace.log.
+    // EIP ist der Befehl NACH dem Zugriff (Daten-Haltepunkte sind Traps).
+    constexpr int kTraceSlots = 2048; // je Feld, offene Adressierung über EIP
+    struct TraceHit
+    {
+        volatile LONG eip;
+        volatile LONG same;
+        volatile LONG changed;
+    };
+    TraceHit g_traceHits[4][kTraceSlots] = {};
+    volatile LONG g_traceLost = 0;   // Treffer, für die kein Platz mehr frei war
+    volatile LONG g_traceTotal = 0;
+    volatile LONG g_traceArmed = 0;  // 1 = Adressen gültig, Treffer zählen
+    std::uintptr_t g_traceAddr[4] = {};
+    std::uintptr_t g_tracePrev[4] = {};  // Adressen des vorigen Rennens (gelten nicht als fremd)
+    volatile LONG g_traceValue[4] = {}; // letzter gesehener Wert je Feld
+    std::string g_tracePath;
+    DWORD g_traceSelfBase = 0;  // Abbild von lfsp.asi (Treffer durch den Handler selbst erkennen)
+    DWORD g_traceSelfSize = 0;
+
+    void TraceCount(int field, std::uintptr_t eip, bool changed)
+    {
+        TraceHit * table = g_traceHits[field];
+        const LONG key = static_cast<LONG>(eip);
+        unsigned i = static_cast<unsigned>((eip * 2654435761u) >> 21) & (kTraceSlots - 1);
+        for (int probe = 0; probe < kTraceSlots; ++probe, i = (i + 1) & (kTraceSlots - 1))
+        {
+            const LONG seen = table[i].eip;
+            if (seen == key || (seen == 0 && (InterlockedCompareExchange(&table[i].eip, key, 0) == 0 || table[i].eip == key)))
+            {
+                InterlockedIncrement(changed ? &table[i].changed : &table[i].same);
+                return;
+            }
+        }
+        InterlockedIncrement(&g_traceLost);
+    }
+
+    // Debug-Register Nr. slot aus einem Kontext
+    DWORD & TraceDr(CONTEXT & c, int slot)
+    {
+        DWORD * dr[4] = { &c.Dr0, &c.Dr1, &c.Dr2, &c.Dr3 };
+        return *dr[slot];
+    }
+
+    LONG CALLBACK SimTraceVeh(EXCEPTION_POINTERS * info)
+    {
+        if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP)
+        {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        CONTEXT & c = *info->ContextRecord;
+        // Der Handler liest das Feld selbst, dabei löst derselbe Haltepunkt erneut aus (DR7 bleibt während der
+        // Ausnahme aktiv). Treffer aus LFSP selbst nur quittieren, sonst ruft sich der Handler endlos auf.
+        if (c.Eip - g_traceSelfBase < g_traceSelfSize && (c.Dr6 & ((1u << g_simTraceFieldCount) - 1)) != 0)
+        {
+            c.Dr6 = 0;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        const bool hasDr = (c.ContextFlags & CONTEXT_DEBUG_REGISTERS) == CONTEXT_DEBUG_REGISTERS;
+        bool mine = false;
+        for (int i = 0; i < g_simTraceFieldCount; ++i)
+        {
+            // nur Treffer auf eigenen Slots mit eigener Adresse (dx11z benutzt DR0 für seinen Mess-Snapshot)
+            if ((c.Dr6 & (1u << i)) == 0 ||
+                (hasDr && ((c.Dr7 & (3u << (2 * i))) == 0 ||
+                           (TraceDr(c, i) != g_traceAddr[i] && TraceDr(c, i) != g_tracePrev[i]))))
+            {
+                continue;
+            }
+            mine = true;
+            if (!g_traceArmed || (hasDr && TraceDr(c, i) != g_traceAddr[i]))
+            {
+                // nach dem Entfernen: der Kontext dieser Exception setzte den Slot sonst beim Fortsetzen wieder
+                if (hasDr)
+                {
+                    c.Dr7 &= ~(3u << (2 * i));
+                }
+                continue;
+            }
+            LONG now = 0;
+            __try
+            {
+                now = *reinterpret_cast<volatile LONG *>(g_traceAddr[i]);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                continue;
+            }
+            const LONG before = InterlockedExchange(&g_traceValue[i], now);
+            TraceCount(i, c.Eip, now != before);
+            InterlockedIncrement(&g_traceTotal);
+        }
+        if (!mine)
+        {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        c.Dr6 = 0;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    // DR0..DR(n-1)/DR7 auf allen Threads des Spiels außer dem eigenen setzen (arm) bzw. die eigenen Slots löschen.
+    // foreign: Threads mit fremdem Haltepunkt auf einem unserer Slots (dort setzt LFSP nichts).
+    struct TraceApply
+    {
+        int threads = 0;
+        int changed = 0;
+        int foreign = 0;
+        int failed = 0;
+    };
+
+    TraceApply SimTraceApply(bool arm)
+    {
+        TraceApply r;
+        const DWORD pid = GetCurrentProcessId();
+        const DWORD self = GetCurrentThreadId();
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snap == INVALID_HANDLE_VALUE)
+        {
+            r.failed = -1;
+            return r;
+        }
+        THREADENTRY32 te = {};
+        te.dwSize = sizeof(te);
+        for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te))
+        {
+            if (te.th32OwnerProcessID != pid || te.th32ThreadID == self)
+            {
+                continue;
+            }
+            HANDLE t = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+            if (!t)
+            {
+                ++r.failed;
+                continue;
+            }
+            ++r.threads;
+            // zwischen Suspend und Resume nichts, was Sperren nimmt (kein Log, kein Speicher)
+            if (SuspendThread(t) != static_cast<DWORD>(-1))
+            {
+                CONTEXT c = {};
+                c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                if (GetThreadContext(t, &c))
+                {
+                    DWORD dr7 = c.Dr7;
+                    bool foreign = false;
+                    for (int i = 0; i < g_simTraceFieldCount; ++i)
+                    {
+                        if ((c.Dr7 & (3u << (2 * i))) != 0 && TraceDr(c, i) != g_traceAddr[i] &&
+                            TraceDr(c, i) != g_tracePrev[i])
+                        {
+                            foreign = true;
+                        }
+                    }
+                    if (foreign)
+                    {
+                        ++r.foreign;
+                    }
+                    else
+                    {
+                        for (int i = 0; i < g_simTraceFieldCount; ++i)
+                        {
+                            dr7 &= ~((3u << (2 * i)) | (0xFu << (16 + 4 * i)));
+                            if (arm)
+                            {
+                                dr7 |= (1u << (2 * i)) | (0xFu << (16 + 4 * i)); // L, RW = 11, LEN = 11 (4 Byte)
+                            }
+                        }
+                        bool change = dr7 != c.Dr7;
+                        for (int i = 0; arm && i < g_simTraceFieldCount; ++i)
+                        {
+                            change = change || TraceDr(c, i) != g_traceAddr[i];
+                            TraceDr(c, i) = static_cast<DWORD>(g_traceAddr[i]);
+                        }
+                        if (change)
+                        {
+                            c.Dr7 = dr7;
+                            if (SetThreadContext(t, &c))
+                            {
+                                ++r.changed;
+                            }
+                            else
+                            {
+                                ++r.failed;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    ++r.failed;
+                }
+                ResumeThread(t);
+            }
+            else
+            {
+                ++r.failed;
+            }
+            CloseHandle(t);
+        }
+        CloseHandle(snap);
+        return r;
+    }
+
+    // carSpecs des beobachteten Autos im Rennen, sonst nullptr
+    unsigned char * SimTraceSpecs()
+    {
+        __try
+        {
+            if (!InRace())
+            {
+                return nullptr;
+            }
+            unsigned char * car = nullptr;
+            if (g_simTraceCar <= 0)
+            {
+                car = PlayerCar();
+            }
+            else
+            {
+                // Liste aller Autos (mit Gegnern), nicht kCars: dort stehen nur die Spielerautos
+                car = CarAt(static_cast<std::uint32_t>(g_simTraceCar - 1));
+            }
+            return car ? *reinterpret_cast<unsigned char **>(car + kCarSpecs) : nullptr;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return nullptr;
+        }
+    }
+
+    // Name und Ausgangswerte der Felder lesen; false, wenn die carSpecs nicht lesbar sind
+    bool SimTraceRead(const unsigned char * specs, char (&name)[32])
+    {
+        __try
+        {
+            std::memcpy(name, specs, sizeof(name) - 1);
+            name[sizeof(name) - 1] = 0;
+            for (int i = 0; i < g_simTraceFieldCount; ++i)
+            {
+                g_traceValue[i] = *reinterpret_cast<const volatile LONG *>(specs + g_simTraceFields[i]);
+            }
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    void SimTraceDump(int races, const std::string & names)
+    {
+        FILE * f = std::fopen(g_tracePath.c_str(), "w");
+        if (!f)
+        {
+            return;
+        }
+        std::fprintf(f, "; LFSP SimTrace: Zugriffe auf carSpecs (= [Auto + 0x760], .sim bis 0x147), Daten-Haltepunkte "
+                        "Lesen/Schreiben\n");
+        std::fprintf(f, "; EIP = Befehl NACH dem Zugriff. Art R = Wert danach unveraendert (Lesen oder Schreiben desselben "
+                        "Werts), W = Wert geaendert (Schreiben)\n");
+        std::fprintf(f, "; Funktionsnamen: python simtrace_report.py lfsp_simtrace.log function_map.csv\n");
+        std::fprintf(f, "; Car %d, Felder", g_simTraceCar);
+        for (int i = 0; i < g_simTraceFieldCount; ++i)
+        {
+            std::fprintf(f, " 0x%03X", g_simTraceFields[i]);
+        }
+        std::fprintf(f, "\n; Rennen %d (%s), Treffer %ld, ohne Platz %ld, Stand %lu ms\n", races, names.c_str(),
+                     g_traceTotal, g_traceLost, GetTickCount());
+        std::fprintf(f, "; Feld  EIP         Art  Anzahl\n");
+        for (int i = 0; i < g_simTraceFieldCount; ++i)
+        {
+            std::vector<std::pair<LONG, std::pair<std::uint32_t, char>>> rows;
+            for (const TraceHit & h : g_traceHits[i])
+            {
+                if (h.eip && h.same)
+                {
+                    rows.push_back({ h.same, { static_cast<std::uint32_t>(h.eip), 'R' } });
+                }
+                if (h.eip && h.changed)
+                {
+                    rows.push_back({ h.changed, { static_cast<std::uint32_t>(h.eip), 'W' } });
+                }
+            }
+            std::sort(rows.begin(), rows.end(), [](const auto & a, const auto & b) { return a.first > b.first; });
+            if (rows.empty())
+            {
+                std::fprintf(f, "; 0x%03X ohne Zugriff\n", g_simTraceFields[i]);
+            }
+            for (const auto & row : rows)
+            {
+                std::fprintf(f, "0x%03X 0x%08X  %c  %ld\n", g_simTraceFields[i], row.second.first, row.second.second,
+                             row.first);
+            }
+        }
+        std::fclose(f);
+    }
+
+    DWORD WINAPI SimTraceThread(void *)
+    {
+        unsigned char * specs = nullptr; // beobachtete carSpecs, nullptr = nicht gesetzt
+        bool vehAdded = false;
+        int races = 0;
+        std::string names;
+        DWORD lastApply = 0;
+        DWORD lastDump = GetTickCount();
+        LONG dumpedTotal = 0;
+        for (;;)
+        {
+            Sleep(100);
+            unsigned char * now = SimTraceSpecs();
+            const DWORD tick = GetTickCount();
+            if (specs && now != specs)
+            {
+                g_traceArmed = 0;
+                const TraceApply r = SimTraceApply(false);
+                Log("SimTrace: Haltepunkte entfernt (%d Threads, %d geaendert, %d Fehler), Treffer bisher %ld", r.threads,
+                    r.changed, r.failed, g_traceTotal);
+                for (int i = 0; i < g_simTraceFieldCount; ++i)
+                {
+                    g_tracePrev[i] = g_traceAddr[i];
+                }
+                specs = nullptr;
+                SimTraceDump(races, names);
+                dumpedTotal = g_traceTotal;
+            }
+            char name[32] = {};
+            if (!specs && now && SimTraceRead(now, name))
+            {
+                if (!vehAdded)
+                {
+                    // erst jetzt: ein später angemeldeter Handler steht vorn in der Kette (vor dem von dx11z)
+                    AddVectoredExceptionHandler(1, &SimTraceVeh);
+                    vehAdded = true;
+                }
+                for (int i = 0; i < g_simTraceFieldCount; ++i)
+                {
+                    g_traceAddr[i] = reinterpret_cast<std::uintptr_t>(now) + g_simTraceFields[i];
+                }
+                g_traceArmed = 1;
+                const TraceApply r = SimTraceApply(true);
+                specs = now;
+                ++races;
+                names += names.empty() ? "" : "; ";
+                names += name;
+                lastApply = tick;
+                Log("SimTrace: Rennen %d, '%s', carSpecs %p: Haltepunkte auf %d Threads (%d gesetzt, %d fremd belegt, %d "
+                    "Fehler)", races, name, now, r.threads, r.changed, r.foreign, r.failed);
+                if (r.foreign)
+                {
+                    Log("SimTrace: WARNUNG %d Threads haben schon Haltepunkte auf DR0-DR%d, dort wird nicht gemessen",
+                        r.foreign, g_simTraceFieldCount - 1);
+                }
+            }
+            else if (specs && tick - lastApply >= 1000)
+            {
+                // neue Threads (Laden, Ton) und verlorene DR7 nachziehen
+                const TraceApply r = SimTraceApply(true);
+                lastApply = tick;
+                if (r.changed || r.foreign)
+                {
+                    Log("SimTrace: Haltepunkte erneuert auf %d von %d Threads (%d fremd belegt)", r.changed, r.threads,
+                        r.foreign);
+                }
+            }
+            if (specs && tick - lastDump >= static_cast<DWORD>(g_simTraceDumpSec) * 1000u)
+            {
+                lastDump = tick;
+                if (g_traceTotal != dumpedTotal)
+                {
+                    dumpedTotal = g_traceTotal;
+                    SimTraceDump(races, names);
+                }
+            }
+        }
+    }
+
+    // ---- Polizei erzwingen ([Debug] ForceCops) ----
+    // Das Spiel lädt die Polizei-Stellen (.cop) und setzt Polizei nur, wenn COPS (0x657414) beim Rennstart gesetzt ist.
+    // Polizeiautos legt der Rennaufbau (kRaceSetup) an: im Einzelrennen nur mit Cheat 5, sonst in einzelnen
+    // Veranstaltungen. ForceCops setzt Cheat 5 in RaceSetupBefore und zur Sicherheit COPS = 1 am Anfang von
+    // Sim_RaceInit (0x414DB0, vor AI_LoadCopFile).
+    constexpr std::uintptr_t kSimRaceInit = 0x414DB0;
+    constexpr std::uintptr_t kGameCops    = 0x657414;
+    void * g_origSimRaceInit = nullptr;
+
+    void __cdecl ForceCopsBefore()
+    {
+        int & cops = *reinterpret_cast<int *>(kGameCops);
+        Log("ForceCops: Rennstart, COPS %d -> 1", cops);
+        cops = 1;
+    }
+
+    __declspec(naked) void HookSimRaceInit()
+    {
+        __asm {
+            pushad
+            pushfd
+            call ForceCopsBefore
+            popfd
+            popad
+            jmp  g_origSimRaceInit
+        }
+    }
+
+    // ---- Scheibentropfen messen ([Debug] WeatherLog) ----
+    // Wetterobjekt [0x627E08], Tropfenobjekt dort +0xC (R_WindshieldDrops*, doc/re/13-VIDEO.md). Je Sekunde: Menge +0,
+    // Anzahl +4 / Soll +8, Tempo +0x66F4, Merker schnell +0x66F8 / Schnee +0x66FA, Lage und Tempo von Tropfen 0,
+    // Lage der aktiven Ansicht (RENDER_CONTEXT 0x628130 +0x10, +0x10C/+0x110/+0x114), aus der das Spiel das Tempo schätzt.
+    void WeatherLogOnce()
+    {
+        __try
+        {
+            const auto * w = *reinterpret_cast<unsigned char * const *>(0x627E08);
+            const auto * d = w ? *reinterpret_cast<unsigned char * const *>(w + 0xC) : nullptr;
+            const auto * ctx = *reinterpret_cast<unsigned char * const *>(0x628130);
+            const auto * view = ctx ? *reinterpret_cast<unsigned char * const *>(ctx + 0x10) : nullptr;
+            if (!d || !view)
+            {
+                return;
+            }
+            const auto f = [](const unsigned char * b, int o) { return *reinterpret_cast<const float *>(b + o); };
+            const auto n = [](const unsigned char * b, int o) { return *reinterpret_cast<const int *>(b + o); };
+            Log("WeatherLog: Menge %.2f, Tropfen %d/%d, Tempo %.2f, schnell %d, Schnee %d, Tropfen0 %.3f %.3f %.3f v %.3f, "
+                "Ansicht %.1f %.1f %.1f",
+                f(d, 0), n(d, 4), n(d, 8), f(d, 0x66F4), d[0x66F8], d[0x66FA], f(d, 0xC), f(d, 0x10), f(d, 0x14),
+                f(d, 0x60A0), f(view, 0x10C), f(view, 0x110), f(view, 0x114));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+    }
+
+    DWORD WINAPI WeatherLogThread(void *)
+    {
+        for (;;)
+        {
+            Sleep(1000);
+            if (InRace())
+            {
+                WeatherLogOnce();
+            }
+        }
+    }
+
+    // ---- Menü- und Modusvariablen mitschreiben ([Debug] StateLog) ----
+    // Alle 100 ms lesen, jede Änderung ins Log (doc/re/OFFEN.md Prüfzeilen 10, 11, 14): FEGAME_TYPE, RACE_TYPE,
+    // Rückgabe des Menüs, Ergebnis PlayGame, Car Chrome, Car Detail, Modus kFeMode.
+    struct StateVar
+    {
+        const char * name;
+        uintptr_t addr;
+    };
+    const StateVar kStateVars[] = {
+        { "FEGAME_TYPE 0x6573E8", 0x6573E8 }, { "RACE_TYPE 0x6573EC", 0x6573EC },
+        { "Menue-Code 0x5DC1C0", 0x5DC1C0 },  { "PlayGame 0x699FC8", 0x699FC8 },
+        { "CarChrome 0x657D60", 0x657D60 },   { "CarDetail 0x657D68", 0x657D68 },
+        { "COPS 0x657414", 0x657414 },
+    };
+
+    DWORD WINAPI StateLogThread(void *)
+    {
+        int last[sizeof(kStateVars) / sizeof(kStateVars[0])];
+        bool have = false;
+        for (;;)
+        {
+            for (size_t i = 0; i < sizeof(kStateVars) / sizeof(kStateVars[0]); ++i)
+            {
+                int v = 0;
+                __try
+                {
+                    v = *reinterpret_cast<const int *>(kStateVars[i].addr);
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER)
+                {
+                    v = -1;
+                }
+                if (!have || v != last[i])
+                {
+                    Log("StateLog: %s = %d (0x%X)%s", kStateVars[i].name, v, v, InRace() ? " im Rennen" : "");
+                    last[i] = v;
+                }
+            }
+            have = true;
+            Sleep(100);
+        }
+        return 0;
+    }
+
+    void StartStateLog()
+    {
+        if (!g_stateLog)
+        {
+            return;
+        }
+        HANDLE t = CreateThread(nullptr, 0, &StateLogThread, nullptr, 0, nullptr);
+        Log("StateLog: Thread %s", t ? "gestartet" : "fehlgeschlagen");
+        if (t)
+        {
+            CloseHandle(t);
+        }
+    }
+
+    void StartWeatherLog()
+    {
+        if (!g_weatherLog)
+        {
+            return;
+        }
+        HANDLE t = CreateThread(nullptr, 0, &WeatherLogThread, nullptr, 0, nullptr);
+        Log("WeatherLog: Thread %s", t ? "gestartet" : "fehlgeschlagen");
+        if (t)
+        {
+            CloseHandle(t);
+        }
+    }
+
+    void InstallForceCops()
+    {
+        if (!g_forceCops)
+        {
+            return;
+        }
+        static const unsigned char kBytes[] = { 0x56, 0x57, 0xBE, 0x01, 0x00, 0x00, 0x00 }; // push esi; push edi; mov esi, 1
+        InstallHook("Polizei erzwingen", kSimRaceInit, kBytes, sizeof(kBytes), reinterpret_cast<void *>(&HookSimRaceInit),
+                    &g_origSimRaceInit);
+    }
+
+    void StartSimTrace(const std::string & base)
+    {
+        if (!g_simTrace)
+        {
+            return;
+        }
+        g_tracePath = base + "_simtrace.log";
+        HMODULE self = nullptr;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(&SimTraceVeh), &self))
+        {
+            const auto * dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(self);
+            const auto * nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(reinterpret_cast<const char *>(self) + dos->e_lfanew);
+            g_traceSelfBase = reinterpret_cast<DWORD>(self);
+            g_traceSelfSize = nt->OptionalHeader.SizeOfImage;
+        }
+        HANDLE t = CreateThread(nullptr, 0, &SimTraceThread, nullptr, 0, nullptr);
+        Log("SimTrace: Thread %s, Ausgabe %s", t ? "gestartet" : "fehlgeschlagen", g_tracePath.c_str());
+        if (t)
+        {
+            CloseHandle(t);
+        }
+    }
+
     void Init(HMODULE self)
     {
         char path[MAX_PATH] = {};
@@ -5179,7 +5797,7 @@ namespace
         std::string base = path;
         base.erase(base.find_last_of('.'));
         g_log = std::fopen((base + ".log").c_str(), "w");
-        Log("LFSP v8k gestartet");
+        Log("LFSP v8t gestartet");
 
         auto * exe = reinterpret_cast<unsigned char *>(GetModuleHandleA(nullptr));
         const auto * dos = reinterpret_cast<IMAGE_DOS_HEADER *>(exe);
@@ -5193,6 +5811,10 @@ namespace
         LoadConfig(base + ".ini");
         // 12.4: vor allen anderen Eingriffen und bevor das Spiel die Tabellen benutzt
         InstallCarLimit();
+        StartSimTrace(base);
+        InstallForceCops();
+        StartWeatherLog();
+        StartStateLog();
         g_soundDir = base.substr(0, base.find_last_of("\\/") + 1);
 
         static const unsigned char kLoadBytes[]    = { 0x81, 0xEC, 0xB4, 0x00, 0x00, 0x00 };
@@ -5214,7 +5836,7 @@ namespace
                     reinterpret_cast<void *>(&HookBuildGeo), reinterpret_cast<void **>(&g_origBuildGeo));
 
         // Phase 12: Verkehr messen
-        if (g_trafficMeasure)
+        if (g_trafficMeasure || g_forceCops)
         {
             InstallTrafficMeasure();
         }
