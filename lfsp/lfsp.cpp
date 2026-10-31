@@ -25,6 +25,11 @@
 #include "windows_table.h"
 #include "carlimit_table.h"
 
+namespace lfsp_weather
+{
+    void Install(const char * ini, void (*log)(const char *, ...)); // weather.cpp
+}
+
 namespace
 {
     // ---- Adressen Porsche.exe v3.5 ----
@@ -327,6 +332,12 @@ namespace
     float g_freeFov = 75.0f;   // FOV in Grad
     float g_freeMouse = 0.15f; // Grad je Mauspixel
     bool g_freeKeyDown = false;
+    // Menükamera: rechte Maustaste halten = Kamera im 3D-Raum des Menüs frei bewegen
+    int g_menuCam = 1;            // 1 = an
+    float g_menuCamSpeed = 2.0f;  // m/s mit W/A/S/D/Q/E, mit Umschalt × 4, mit Strg × 0,2
+    float g_menuCamMouse = 0.2f;  // Grad je Mauspixel (negativ = Blick links/rechts umgekehrt)
+    int g_menuCamStopSpin = 1;    // 1 = Drehscheibe (Auto, Licht, Händler-Bühne) hält an, solange die Kamera frei ist
+    int g_menuCamKeep = 0;        // 1 = Kamera bleibt beim Menüwechsel im selben 3D-Raum stehen
     unsigned g_windowToggles = 0;
     unsigned g_roofToggles = 0;
     bool g_windowKeyDown = false;
@@ -676,6 +687,13 @@ namespace
         g_freeMouse = readFloat("FreeCamMouse", "0.15", 0.01f, 2.0f);
         Log("Kamera: FreeCamKey 0x%02X, Speed %.1f, Fov %.0f, Mouse %.2f", g_freeKey, g_freeSpeed, g_freeFov,
             g_freeMouse);
+        g_menuCam = GetPrivateProfileIntA("Camera", "MenuCam", 1, ini);
+        g_menuCamSpeed = readFloat("MenuCamSpeed", "2", 0.1f, 100.0f);
+        g_menuCamMouse = readFloat("MenuCamMouse", "0.2", -2.0f, 2.0f);
+        g_menuCamStopSpin = GetPrivateProfileIntA("Camera", "MenuCamStopSpin", 1, ini);
+        g_menuCamKeep = GetPrivateProfileIntA("Camera", "MenuCamKeep", 0, ini);
+        Log("Kamera: MenuCam %d, Speed %.1f, Mouse %.2f, StopSpin %d, Keep %d", g_menuCam, g_menuCamSpeed,
+            g_menuCamMouse, g_menuCamStopSpin, g_menuCamKeep);
 
         g_highKey = ReadKey(ini, "HeadlightsHighKey", "K", "Lights");
         g_highFadeMs = GetPrivateProfileIntA("Lights", "HeadlightsHighFade", 100, ini);
@@ -3698,10 +3716,136 @@ namespace
     WNDPROC g_origWndProc = nullptr;
     volatile LONG g_freeWheel = 0;
 
-    // Fensterprozedur des Spiels: in der Freecam erreicht die Maus das Spiel nicht (HUD verschieben, Rechtsklick =
-    // Pausenmenü); das Mausrad ändert das Tempo.
-    LRESULT CALLBACK FreeCamWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+    // ---- Menükamera (doc/KAMERA.md §6) ----
+    // Das Frontend zeichnet seinen 3D-Raum (Garage = Hauptmenü, Händler, Streckenwahl …) in FUN_004d2f30 mit der
+    // View FRONT_END + 0xFC. Deren Kamerablock (+0xB8, Aufbau wie bei Game_ViewSetRotation/-Position) setzt das Spiel
+    // im Menü nicht je Bild; LFSP schreibt dort die eigene Kamera hinein. Rechte Maustaste halten: Maus = Blick,
+    // W/A/S/D vor/zurück/seitlich, E/Q hoch/runter, Mausrad vor/zurück; Umschalt schnell, Strg langsam. Losgelassen
+    // bleibt die Kamera stehen. Mittlere Maustaste oder ein neuer 3D-Raum: zurück zur Kamera des Spiels.
+    constexpr std::uintptr_t kFeDraw = 0x4D2F30;
+    constexpr std::size_t kFeRoom = 0xE8;  // aktiver 3D-Raum (FE3DRoom), 0 = keiner
+    constexpr std::size_t kFeView = 0xFC;  // View des 3D-Raums
+    constexpr std::size_t kViewCam = 0xB8; // Kamerablock: +0 Drehung transponiert, +0x24 Verschiebung, +0x30 Drehung
+                                           // (Zeilen rechts, oben, vorn), +0x54 Lage
+
+    struct MenuCamState
     {
+        bool dragging = false; // rechte Maustaste gehalten
+        bool active = false;   // eigene Kamera im Kamerablock
+        bool reset = false;    // mittlere Maustaste
+        POINT anchor = {};     // Mauszeiger beim Drücken (Bildschirm), bleibt während des Ziehens dort
+        void * view = nullptr;
+        void * room = nullptr;
+        void * screen = nullptr; // aktuelles Menü (FeScreen)
+        float saved[24] = {};  // Kamerablock des Spiels
+        float pos[3] = {};
+        float yaw = 0.0f;      // Grad, um die Welt-Hochachse
+        float pitch = 0.0f;    // Grad
+        float sideSign = 1.0f; // Zeile 0 des Spiels · berechnetes Rechts
+        float vel[3] = {};     // geglättete Bewegung, m/s
+        LARGE_INTEGER last = {};
+    } g_menu;
+    volatile LONG g_menuWheel = 0;
+
+    unsigned char * FeApp()
+    {
+        return *reinterpret_cast<unsigned char **>(kFeGlobal);
+    }
+
+    // Ziehen beginnen/beenden: Mauszeiger unsichtbar, im Fenster gehalten und am Ende an die Stelle des Drückens
+    void MenuCamDrag(bool on)
+    {
+        if (on == g_menu.dragging)
+        {
+            return;
+        }
+        g_menu.dragging = on; // vor ReleaseCapture: WM_CAPTURECHANGED kommt sofort zurück
+        const HWND window = *reinterpret_cast<HWND *>(kGameWindow);
+        if (on)
+        {
+            GetCursorPos(&g_menu.anchor);
+            InterlockedExchange(&g_menuWheel, 0);
+            if (window)
+            {
+                SetCapture(window);
+                RECT rc = {};
+                GetClientRect(window, &rc);
+                MapWindowPoints(window, nullptr, reinterpret_cast<POINT *>(&rc), 2);
+                ClipCursor(&rc);
+            }
+            ShowCursor(FALSE);
+        }
+        else
+        {
+            ClipCursor(nullptr);
+            if (window && GetCapture() == window)
+            {
+                ReleaseCapture();
+            }
+            SetCursorPos(g_menu.anchor.x, g_menu.anchor.y);
+            ShowCursor(TRUE);
+        }
+    }
+
+    // Nachrichten im Menü mit 3D-Raum; true = verwerfen (das Menü sieht rechte und mittlere Maustaste nie,
+    // während des Ziehens auch keine Mausbewegung, kein Rad und keine Tastendrücke)
+    bool MenuCamMessage(UINT message, WPARAM wparam)
+    {
+        unsigned char * app = FeApp();
+        if (!app || !At<void *>(app, kFeRoom))
+        {
+            MenuCamDrag(false);
+            return false;
+        }
+        switch (message)
+        {
+        case WM_RBUTTONDOWN:
+        case WM_RBUTTONDBLCLK:
+            MenuCamDrag(true);
+            return true;
+        case WM_RBUTTONUP:
+            MenuCamDrag(false);
+            return true;
+        case WM_MBUTTONDOWN:
+        case WM_MBUTTONDBLCLK:
+            g_menu.reset = true;
+            return true;
+        case WM_MBUTTONUP:
+            return true;
+        case WM_CAPTURECHANGED:
+        case WM_KILLFOCUS:
+            MenuCamDrag(false);
+            return false;
+        case WM_ACTIVATEAPP:
+            if (!wparam)
+            {
+                MenuCamDrag(false);
+            }
+            return false;
+        default:
+            break;
+        }
+        if (!g_menu.dragging)
+        {
+            return false;
+        }
+        if (message == WM_MOUSEWHEEL)
+        {
+            InterlockedExchangeAdd(&g_menuWheel, static_cast<short>(HIWORD(wparam)));
+            return true;
+        }
+        // Tastenloslassen geht durch, sonst bliebe eine vor dem Ziehen gedrückte Taste im Menü hängen
+        return (message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) || message == WM_KEYDOWN || message == WM_CHAR;
+    }
+
+    // Fensterprozedur des Spiels: in der Freecam erreicht die Maus das Spiel nicht (HUD verschieben, Rechtsklick =
+    // Pausenmenü); das Mausrad ändert das Tempo. Im Menü die Nachrichten der Menükamera.
+    LRESULT CALLBACK GameWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+    {
+        if (g_menuCam && !g_free.on && MenuCamMessage(message, wparam))
+        {
+            return 0;
+        }
         if (g_free.on && message >= WM_MOUSEFIRST && message <= WM_MOUSELAST)
         {
             if (message == WM_MOUSEWHEEL)
@@ -3718,7 +3862,7 @@ namespace
         return CallWindowProcA(g_origWndProc, window, message, wparam, lparam);
     }
 
-    void InstallFreeCamWndProc()
+    void InstallGameWndProc()
     {
         const HWND window = *reinterpret_cast<HWND *>(kGameWindow);
         if (g_origWndProc || !window)
@@ -3726,8 +3870,8 @@ namespace
             return;
         }
         g_origWndProc = reinterpret_cast<WNDPROC>(
-            SetWindowLongPtrA(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&FreeCamWndProc)));
-        Log("Kamera: Freecam-Fensterprozedur %s", g_origWndProc ? "aktiv" : "fehlgeschlagen");
+            SetWindowLongPtrA(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&GameWndProc)));
+        Log("Kamera: Fensterprozedur (Freecam/Menuekamera) %s", g_origWndProc ? "aktiv" : "fehlgeschlagen");
     }
 
     // Maus einfangen (unsichtbar, im Fenster gehalten) bzw. freigeben
@@ -3904,6 +4048,202 @@ namespace
         }
     }
 
+    // Drehscheibe im Menü: FECar3DControl::Update dreht das Auto nach der Zeit (FUN_0053c2e0 an 0x4C086C), die Räume
+    // drehen Licht/Schatten (FESpinning3DRoom 0x4EA0AE) bzw. die Bühne des Händlers (0x4E8CF5) mit. Diese drei Aufrufe
+    // holen die Zeit hier: solange die Menükamera aktiv ist, steht sie still, danach läuft sie ohne Sprung weiter.
+    constexpr std::uintptr_t kTimerNow = 0x6B7C7C; // Zeit des Spiels (FUN_0053c2e0 liest nur diesen Wert)
+    bool g_spinStopped = false;
+    int g_spinFrozen = 0; // Drehzeit beim Anhalten
+    int g_spinOffset = 0; // insgesamt angehaltene Zeit
+
+    int __cdecl MenuSpinTime()
+    {
+        const int now = *reinterpret_cast<int *>(kTimerNow);
+        const bool stop = g_menu.active && g_menuCamStopSpin;
+        if (stop && !g_spinStopped)
+        {
+            g_spinStopped = true;
+            g_spinFrozen = now - g_spinOffset;
+        }
+        else if (!stop && g_spinStopped)
+        {
+            g_spinStopped = false;
+            g_spinOffset = now - g_spinFrozen;
+        }
+        return stop ? g_spinFrozen : now - g_spinOffset;
+    }
+
+    // Ersatz für CALL FUN_0053c2e0: das Original ändert nur EAX
+    __declspec(naked) void MenuSpinTimeDetour()
+    {
+        __asm
+        {
+            push ecx
+            push edx
+            call MenuSpinTime
+            pop edx
+            pop ecx
+            ret
+        }
+    }
+
+    // Aktuelles Menü der untersten Ebene (FRONT_END + 0xD8: vector der Ebenen, Ebene +0 = aktuelles Menü);
+    // Dialoge liegen in eigenen Ebenen darüber
+    void * FeScreen(unsigned char * app)
+    {
+        const auto * layers = At<std::uintptr_t *>(app, 0xD8); // {Anfang, Ende, Kapazität}
+        if (!layers || layers[0] == layers[1])
+        {
+            return nullptr;
+        }
+        const auto * layer = *reinterpret_cast<std::uintptr_t **>(layers[0]);
+        return layer ? reinterpret_cast<void *>(layer[0]) : nullptr;
+    }
+
+    // Je Bild vor dem Zeichnen des Menüs: Kamerablock der Menü-View setzen
+    void MenuCamFrame(unsigned char * app)
+    {
+        MenuCamState & m = g_menu;
+        unsigned char * view = At<unsigned char *>(app, kFeView);
+        void * room = At<void *>(app, kFeRoom);
+        // derselbe Raum bleibt über mehrere Menüs bestehen (👤: Kamera blieb beim Menüwechsel stehen)
+        void * screen = g_menuCamKeep ? nullptr : FeScreen(app);
+        float * cam = view ? reinterpret_cast<float *>(view + kViewCam) : nullptr;
+        if (view != m.view || room != m.room || screen != m.screen || m.reset)
+        {
+            if (m.active && view == m.view && cam)
+            {
+                std::memcpy(cam, m.saved, sizeof(m.saved));
+                Log("Menuekamera: zurueck zur Kamera des Spiels (%s)",
+                    m.reset ? "mittlere Maustaste" : room != m.room ? "neuer 3D-Raum" : "anderes Menue");
+            }
+            m.active = false;
+            m.reset = false;
+            m.view = view;
+            m.room = room;
+            m.screen = screen;
+        }
+        if (!cam || !room)
+        {
+            MenuCamDrag(false);
+            return;
+        }
+        InstallGameWndProc();
+
+        LARGE_INTEGER now = {};
+        LARGE_INTEGER freq = {};
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&freq);
+        const float dt = m.last.QuadPart ? std::fmin(0.1f, static_cast<float>(now.QuadPart - m.last.QuadPart) /
+                                                                static_cast<float>(freq.QuadPart))
+                                         : 0.0f;
+        m.last = now;
+
+        if (m.dragging)
+        {
+            // Loslassen verpasst (Nachricht ging woanders hin) oder Alt+Tab
+            HWND fg = GetForegroundWindow();
+            DWORD pid = 0;
+            GetWindowThreadProcessId(fg, &pid);
+            if (pid != GetCurrentProcessId() || !KeyHeld(VK_RBUTTON))
+            {
+                MenuCamDrag(false);
+            }
+        }
+        if (m.dragging && !m.active)
+        {
+            // Start an der Kamera des Spiels (im Menü sonst fest: Lage 0, Blick +z)
+            std::memcpy(m.saved, cam, sizeof(m.saved));
+            std::memcpy(m.pos, cam + 0x15, sizeof(m.pos));
+            const float * right = cam + 0xC;
+            const float * fwd = cam + 0x12;
+            m.yaw = std::atan2(fwd[0], fwd[2]) * 57.2958f;
+            m.pitch = std::asin(std::fmax(-1.0f, std::fmin(fwd[1], 1.0f))) * 57.2958f;
+            const float a = m.yaw * 0.0174533f;
+            const float r[3] = { std::cos(a), 0.0f, -std::sin(a) };
+            m.sideSign = Dot(right, r) < 0.0f ? -1.0f : 1.0f;
+            std::memset(m.vel, 0, sizeof(m.vel));
+            m.active = true;
+            Log("Menuekamera an bei %.2f %.2f %.2f, Blick %.1f / %.1f Grad, Seite %.0f", m.pos[0], m.pos[1], m.pos[2],
+                m.yaw, m.pitch, m.sideSign);
+        }
+        if (!m.active)
+        {
+            return;
+        }
+
+        float mf = 0.0f; // vor
+        float ms = 0.0f; // rechts
+        float mu = 0.0f; // hoch
+        float step = 0.0f; // Mausrad: Sprung nach vorn, m
+        float speed = g_menuCamSpeed;
+        if (m.dragging)
+        {
+            POINT cursor = {};
+            GetCursorPos(&cursor);
+            m.yaw += (cursor.x - m.anchor.x) * g_menuCamMouse * m.sideSign;
+            m.pitch = std::fmax(-89.0f, std::fmin(m.pitch - (cursor.y - m.anchor.y) * std::fabs(g_menuCamMouse), 89.0f));
+            if (cursor.x != m.anchor.x || cursor.y != m.anchor.y)
+            {
+                SetCursorPos(m.anchor.x, m.anchor.y);
+            }
+            if (KeyHeld(VK_SHIFT))
+            {
+                speed *= 4.0f;
+            }
+            if (KeyHeld(VK_CONTROL))
+            {
+                speed *= 0.2f;
+            }
+            mf = (KeyHeld('W') ? 1.0f : 0.0f) - (KeyHeld('S') ? 1.0f : 0.0f);
+            ms = (KeyHeld('D') ? 1.0f : 0.0f) - (KeyHeld('A') ? 1.0f : 0.0f);
+            mu = (KeyHeld('E') ? 1.0f : 0.0f) - (KeyHeld('Q') ? 1.0f : 0.0f);
+            step = InterlockedExchange(&g_menuWheel, 0) / 120.0f * speed * 0.15f;
+        }
+
+        const float a = m.yaw * 0.0174533f;
+        const float p = m.pitch * 0.0174533f;
+        const float fwd[3] = { std::sin(a) * std::cos(p), std::sin(p), std::cos(a) * std::cos(p) };
+        const float right[3] = { std::cos(a), 0.0f, -std::sin(a) };
+        const float up[3] = { fwd[1] * right[2] - fwd[2] * right[1], fwd[2] * right[0] - fwd[0] * right[2],
+                              fwd[0] * right[1] - fwd[1] * right[0] };
+        // weich anfahren und abbremsen (0,12 s), nach dem Loslassen gleitet die Kamera aus
+        for (int i = 0; i < 3; ++i)
+        {
+            const float target = (fwd[i] * mf + right[i] * ms + (i == 1 ? mu : 0.0f)) * speed;
+            Smooth(m.vel[i], target, 0.12f, dt);
+            m.pos[i] += m.vel[i] * dt + fwd[i] * step;
+        }
+
+        float rot[9] = {};
+        for (int i = 0; i < 3; ++i)
+        {
+            rot[i] = right[i] * m.sideSign;
+            rot[3 + i] = up[i];
+            rot[6 + i] = fwd[i];
+        }
+        reinterpret_cast<SetRotFn>(0x466280)(cam, rot);
+        reinterpret_cast<SetPosFn>(0x466220)(cam, m.pos);
+        const DWORD tick = GetTickCount();
+        if (g_measure && m.dragging && tick - g_camLogTick >= 1000)
+        {
+            g_camLogTick = tick;
+            Log("Menuekamera %.2f %.2f %.2f, Blick %.1f / %.1f Grad", m.pos[0], m.pos[1], m.pos[2], m.yaw, m.pitch);
+        }
+    }
+
+    using FeDrawFn = void (__fastcall *)(void *);
+    FeDrawFn g_origFeDraw = nullptr;
+
+    void __fastcall HookFeDraw(void * app)
+    {
+        if (app)
+        {
+            MenuCamFrame(static_cast<unsigned char *>(app));
+        }
+        g_origFeDraw(app);
+    }
+
     void __cdecl HookCamView(int player, float * out, int mirror)
     {
         g_origCamView(player, out, mirror);
@@ -3918,7 +4258,7 @@ namespace
             g_act.valid = false;
             if (g_free.on)
             {
-                InstallFreeCamWndProc();
+                InstallGameWndProc();
                 g_free.speedScale = 1.0f;
             }
             else
@@ -5813,6 +6153,7 @@ namespace
         InstallCarLimit();
         StartSimTrace(base);
         InstallForceCops();
+        lfsp_weather::Install((base + ".ini").c_str(), &Log);
         StartWeatherLog();
         StartStateLog();
         g_soundDir = base.substr(0, base.find_last_of("\\/") + 1);
@@ -5895,6 +6236,26 @@ namespace
                         reinterpret_cast<void *>(&HookCamView), reinterpret_cast<void **>(&g_origCamView));
             InstallHook("Kamerataste", kCamCycle, kCamCycleBytes, sizeof(kCamCycleBytes),
                         reinterpret_cast<void *>(&HookCamCycle), reinterpret_cast<void **>(&g_origCamCycle));
+        }
+
+        // Menükamera: Zeichnen des Menüs (FUN_004d2f30, fastcall FRONT_END)
+        if (g_menuCam)
+        {
+            static const unsigned char kFeDrawBytes[] = { 0x83, 0xEC, 0x0C, 0x53, 0x56 };
+            InstallHook("Menue zeichnen (Menuekamera)", kFeDraw, kFeDrawBytes, sizeof(kFeDrawBytes),
+                        reinterpret_cast<void *>(&HookFeDraw), reinterpret_cast<void **>(&g_origFeDraw));
+            // Drehscheibe: Auto (FECar3DControl), Licht/Schatten der Räume, Bühne des Händlers
+            for (std::uintptr_t site : { 0x4C086Cu, 0x4EA0AEu, 0x4E8CF5u })
+            {
+                unsigned char expected[5] = { 0xE8 };
+                unsigned char replacement[5] = { 0xE8 };
+                const auto rel = static_cast<std::int32_t>(0x53C2E0 - (site + 5));
+                const auto relHook =
+                    static_cast<std::int32_t>(reinterpret_cast<std::uintptr_t>(&MenuSpinTimeDetour) - (site + 5));
+                std::memcpy(expected + 1, &rel, 4);
+                std::memcpy(replacement + 1, &relHook, 4);
+                PatchBytes("Menue-Drehscheibe (Menuekamera)", site, expected, replacement, sizeof(expected));
+            }
         }
 
         // 11.3: HUD-Instrumente nach Lichtschalter (Aufbau an beiden Aufrufstellen, Abbau an beiden Destruktoren)
