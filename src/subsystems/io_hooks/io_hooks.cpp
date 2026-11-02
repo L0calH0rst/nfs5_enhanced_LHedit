@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <array>
+#include <string_view>
 
 #include "../../core/log.h"
 
@@ -24,6 +26,169 @@ namespace nfs5
         return instance;
     }
 
+    namespace
+    {
+        std::string LowerGamePath( std::string value )
+        {
+            std::replace( value.begin(), value.end(), '/', '\\' );
+            std::transform( value.begin(), value.end(), value.begin(), [] ( unsigned char c )
+            {
+                return static_cast<char>( std::tolower( c ) );
+            } );
+            return value;
+        }
+
+        bool IsGameplayAssetPath( std::string_view relative )
+        {
+            return relative.starts_with( "fedata\\" ) || relative.starts_with( "gamedata\\" );
+        }
+    }
+
+    namespace
+    {
+        struct PendingGameplayOpen
+        {
+            std::string original;
+            std::string replacement;
+            bool redirected = false;
+            bool failed = false;
+        };
+
+        thread_local PendingGameplayOpen * t_PendingGameplayOpen = nullptr;
+
+        struct ScopedGameplayOpen
+        {
+            PendingGameplayOpen * previous = nullptr;
+            explicit ScopedGameplayOpen( PendingGameplayOpen * pending ) noexcept
+                : previous( t_PendingGameplayOpen )
+            {
+                t_PendingGameplayOpen = pending;
+            }
+            ~ScopedGameplayOpen() { t_PendingGameplayOpen = previous; }
+            ScopedGameplayOpen( const ScopedGameplayOpen & ) = delete;
+            ScopedGameplayOpen & operator=( const ScopedGameplayOpen & ) = delete;
+        };
+
+        // Canonical comparison for a single game's directory only; no filesystem edits.
+        std::string RelativeGameOpenName( const char * name, const std::string & game_root )
+        {
+            if (name == nullptr)
+                return {};
+            std::string value = LowerGamePath( name );
+            const std::string root = LowerGamePath( game_root );
+            if (!root.empty() && value.starts_with( root ))
+                value.erase( 0, root.size() );
+            while (value.starts_with( ".\\" ))
+                value.erase( 0, 2 );
+            return value;
+        }
+    }
+
+    HANDLE WINAPI IoHooks::CreateFileHook(
+        LPCSTR name, DWORD desired_access, DWORD share_mode, LPSECURITY_ATTRIBUTES security,
+        DWORD disposition, DWORD attributes, HANDLE template_file )
+    {
+        IoHooks & self = GetInstance();
+        const auto original = self.m_CreateFilePatch.GetOriginal< decltype(&::CreateFileA) >();
+        auto * pending = t_PendingGameplayOpen;
+        const DWORD write_access = GENERIC_ALL | GENERIC_WRITE | FILE_WRITE_DATA | FILE_APPEND_DATA |
+            FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA | DELETE | WRITE_DAC | WRITE_OWNER;
+        if (self.m_Settings.m_GameplayRedirect && name != nullptr && disposition == OPEN_EXISTING &&
+            (desired_access & write_access) == 0 && (attributes & FILE_FLAG_BACKUP_SEMANTICS) == 0)
+        {
+            // v0.7: An external CreateFileA can occur outside FILE_LAYER_OPEN. Resolve
+            // exactly the same allowlisted override for both entry paths. Retain the EA
+            // original filename/handle bookkeeping inside FILE_LAYER_OPEN.
+            const bool pending_match = pending != nullptr &&
+                RelativeGameOpenName( name, self.m_GameRoot ) ==
+                RelativeGameOpenName( pending->original.c_str(), self.m_GameRoot );
+            const std::string candidate = pending_match ? pending->replacement :
+                self.ResolveGameplayOverride( name );
+            if (!candidate.empty())
+            {
+                HANDLE handle = original( candidate.c_str(), desired_access, share_mode,
+                    security, disposition, attributes, template_file );
+                if (handle != INVALID_HANDLE_VALUE)
+                {
+                    if (pending_match)
+                        pending->redirected = true;
+                    else if (self.m_Settings.m_GameplayRedirectTrace)
+                        LOG_INFO( "Gameplay OS direct redirect opened: '{}' -> '{}'", name, candidate );
+                    return handle;
+                }
+                if (pending_match)
+                    pending->failed = true;
+                else if (self.m_Settings.m_GameplayRedirectTrace)
+                    LOG_WARN( "Gameplay OS direct redirect failed; using original: '{}'", name );
+            }
+        }
+        return original( name, desired_access, share_mode, security, disposition, attributes, template_file );
+    }
+
+    DWORD WINAPI IoHooks::GetFileAttributesHook( LPCSTR name )
+    {
+        IoHooks & self = GetInstance();
+        const auto original = self.m_AttributesPatch.GetOriginal< decltype(&::GetFileAttributesA) >();
+        if (self.m_Settings.m_GameplayRedirect && name != nullptr)
+        {
+            const std::string candidate = self.ResolveGameplayOverride( name );
+            if (!candidate.empty())
+            {
+                const DWORD attributes = original( candidate.c_str() );
+                if (attributes != INVALID_FILE_ATTRIBUTES)
+                {
+                    if (self.m_Settings.m_GameplayRedirectTrace)
+                        LOG_INFO( "Gameplay OS attributes redirected: '{}' -> '{}'", name, candidate );
+                    return attributes;
+                }
+            }
+        }
+        return original( name );
+    }
+
+    std::string IoHooks::ResolveGameplayOverride( const char * file_name ) const
+    {
+        if (file_name == nullptr || m_OverrideRoot.empty() || m_GameRoot.empty())
+            return {};
+
+        std::string relative( file_name );
+        std::replace( relative.begin(), relative.end(), '/', '\\' );
+        std::string folded = LowerGamePath( relative );
+        const std::string game_root_folded = LowerGamePath( m_GameRoot );
+
+        // Accept absolute paths only when they are inside this game's directory.
+        if (relative.size() >= 2 && relative[1] == ':')
+        {
+            if (!folded.starts_with( game_root_folded ))
+                return {};
+            relative.erase( 0, m_GameRoot.size() );
+            folded.erase( 0, m_GameRoot.size() );
+        }
+        else if (!relative.empty() && relative[0] == '\\')
+        {
+            // No rooted paths or network shares.
+            return {};
+        }
+        else
+        {
+            while (folded.starts_with( ".\\" ))
+            {
+                relative.erase( 0, 2 );
+                folded.erase( 0, 2 );
+            }
+        }
+
+        // Prevent traversal and redirection outside FEData / GameData.
+        if (!IsGameplayAssetPath( folded ) || folded.find( ".." ) != std::string::npos ||
+            folded.find( ':' ) != std::string::npos)
+            return {};
+
+        const std::string override_file = m_OverrideRoot + relative;
+        const DWORD attributes = ::GetFileAttributesA( override_file.c_str() );
+        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            return {};
+        return override_file;
+    }
     int __cdecl IoHooks::FileOpenHook(
         const char * file_name,
         std::uint32_t flags,
@@ -36,7 +201,34 @@ namespace nfs5
 
         // Unbuffered handles need sector sized transfers, those are left untouched.
         const bool read_only = (flags & ff::READ) != 0 && (flags & ff::WRITE) == 0 && (flags & ff::NO_BUFFERING) == 0;
-        const int result = self.m_OpenHook->ccall< int >( file_name, flags, block_size, out_handle );
+        if (self.m_Settings.m_GameplayRedirectTrace && file_name != nullptr)
+        {
+            const std::string folded = LowerGamePath( file_name );
+            if (folded.find( "nfs5.car" ) != std::string::npos ||
+                folded.find( "nfs5.prt" ) != std::string::npos ||
+                folded.find( "fedata" ) != std::string::npos ||
+                folded.find( "gamedata" ) != std::string::npos)
+            {
+                LOG_INFO( "Gameplay file probe: name='{}' flags={:08X} read_only={}",
+                    file_name, flags, read_only );
+            }
+        }
+
+        const std::string override_file = read_only && self.m_Settings.m_GameplayRedirect &&
+            self.m_CreateFilePatch.IsApplied() ? self.ResolveGameplayOverride( file_name ) : std::string{};
+        PendingGameplayOpen pending{ file_name == nullptr ? "" : file_name, override_file };
+        int result = 0;
+        {
+            ScopedGameplayOpen scope( override_file.empty() ? nullptr : &pending );
+            // Crucially, pass the ORIGINAL request into the EA layer.
+            result = self.m_OpenHook->ccall< int >( file_name, flags, block_size, out_handle );
+        }
+        if (pending.redirected && self.m_Settings.m_GameplayRedirectTrace)
+            LOG_INFO( "Gameplay OS redirect opened: '{}' -> '{}'", file_name, override_file );
+        else if (pending.failed)
+            LOG_WARN( "Gameplay OS redirect failed; original CreateFileA was tried: '{}'", file_name );
+        else if (!override_file.empty() && self.m_Settings.m_GameplayRedirectTrace)
+            LOG_WARN( "Gameplay OS redirect not observed (CreateFileA bypassed?): '{}'", file_name );
 
         if (result == 0 || out_handle == nullptr || !read_only)
         {
@@ -186,6 +378,27 @@ namespace nfs5
             return true;
 
         m_Settings = settings;
+        m_GameRoot.clear();
+        m_OverrideRoot.clear();
+        if (settings.m_GameplayRedirect || settings.m_GameplayRedirectTrace)
+        {
+            std::array<char, MAX_PATH> exe_path = {};
+            const DWORD length = ::GetModuleFileNameA( nullptr, exe_path.data(), static_cast<DWORD>(exe_path.size()) );
+            if (length != 0 && length < exe_path.size())
+            {
+                std::string absolute( exe_path.data(), length );
+                const auto slash = absolute.find_last_of( "\\/" );
+                if (slash != std::string::npos)
+                {
+                    m_GameRoot = absolute.substr( 0, slash + 1 );
+                    m_OverrideRoot = m_GameRoot + "GameplayFixes\\";
+                    LOG_INFO( "Gameplay override configured: enabled={} trace={} root='{}'",
+                        settings.m_GameplayRedirect, settings.m_GameplayRedirectTrace, m_OverrideRoot );
+                }
+            }
+            if (m_GameRoot.empty())
+                LOG_WARN( "Gameplay override path could not be initialized; redirect disabled" );
+        }
 
         // Not an IO change, so it does not depend on the IO switch.
         if (settings.m_FastCpuSpeedCheck)
@@ -217,6 +430,22 @@ namespace nfs5
         }
 
         bool ok = true;
+        if (settings.m_GameplayRedirect && !m_OverrideRoot.empty())
+        {
+            if (!m_CreateFilePatch.Apply( ::GetModuleHandleW( nullptr ), "KERNEL32.dll", "CreateFileA",
+                reinterpret_cast<void *>(&CreateFileHook) ))
+                LOG_WARN( "Gameplay OS redirect disabled: Porsche.exe CreateFileA import is not available" );
+        }
+        // Optional: Porsche.exe versions may not import GetFileAttributesA at all.
+        // Never assume an IAT hook worked unless installation logs confirm it.
+        if (settings.m_GameplayRedirect && !m_OverrideRoot.empty())
+        {
+            if (!m_AttributesPatch.Apply( ::GetModuleHandleW( nullptr ), "KERNEL32.dll", "GetFileAttributesA",
+                reinterpret_cast<void *>(&GetFileAttributesHook) ))
+                LOG_WARN( "Gameplay OS attribute redirect unavailable: Porsche.exe has no matching GetFileAttributesA import" );
+            else
+                LOG_INFO( "Gameplay OS attribute redirect installed for Porsche.exe" );
+        }
         m_OpenHook = hook::CreateInline( "FileOpen", game::fn::FILE_LAYER_OPEN.m_Address, game::fn::FILE_LAYER_OPEN.m_Signature,
             reinterpret_cast<void *>(&FileOpenHook) );
 
@@ -240,6 +469,8 @@ namespace nfs5
         m_CpuSpeedRdtscHook.reset();
         m_DiskSpacePatch.Restore();
         m_OpenHook.reset();
+        m_AttributesPatch.Restore();
+        m_CreateFilePatch.Restore();
         m_Installed = false;
     }
 }

@@ -297,6 +297,7 @@ namespace dx11z
         bool m_WindowPlaced = false;
         bool m_ConfigVsync = true;
         bool m_ConfigMinimize = true;
+        bool m_ConfigFogEnabled = true;
         bool m_AllowTearing = false;
         UINT m_SwapChainFlags = 0;
         WNDPROC m_OriginalWndProc = nullptr;
@@ -780,6 +781,7 @@ namespace dx11z
         ComPtr<ID3D11InputLayout> m_SceneLayout;
         ComPtr<ID3D11VertexShader> m_PresentVs;
         ComPtr<ID3D11PixelShader> m_PresentPs;
+        ComPtr<ID3D11PixelShader> m_MoviePs;
         ComPtr<ID3D11VertexShader> m_ClearVs;
         ComPtr<ID3D11PixelShader> m_ClearPs;
         ComPtr<ID3D11Buffer> m_DrawConstants;
@@ -884,6 +886,24 @@ namespace dx11z
         std::array<std::uint8_t, 256> m_FogTable = {};
         bool m_WaitVblank = true;
         float m_Brightness = 1.0f;
+
+        // Movie frame enlarged on the graphics card, see 'MovieBlit'.
+        ComPtr<ID3D11Texture2D> m_MovieTexture;
+        ComPtr<ID3D11ShaderResourceView> m_MovieView;
+        std::vector<std::uint8_t> m_MoviePixels;
+        std::int32_t m_MovieWidth = 0;
+        std::int32_t m_MovieHeight = 0;
+        float m_MovieSharpness = 0.33f;
+        bool m_ConfigMovie = true;
+
+        // Movies that span the screen width fill the window, cutting the black bars of the frame
+        // and keeping its aspect ratio. The bars are measured on the frames, the smallest
+        // seen in a movie counts, a pause of half a second starts a new movie.
+        bool m_ConfigMovieFill = true;
+        std::int32_t m_MovieBarTop = -1;
+        std::int32_t m_MovieBarBottom = -1;
+        DWORD m_MovieTick = 0;
+        bool m_MovieLogged = false;
         D3D11_RECT m_Clip = {};
         int m_SelectedWindow = 0;
 
@@ -954,12 +974,15 @@ namespace dx11z
         void ProbeBatch();
         void ProbeFlip();
         void DrawProbe();
+        // Shows what is in the back buffer.
+        void PresentBackBuffer();
 
         [[nodiscard]] bool IsFrontSelected() const
         {
             return m_SelectedWindow == 1;
         }
 
+        // 'pixel_shader' replaces the plain copy, 'shape' goes to the fourth parameter.
         void Blit(
             ID3D11ShaderResourceView * source,
             ID3D11RenderTargetView * target,
@@ -968,7 +991,9 @@ namespace dx11z
             const float * destination_rect,
             const float * source_rect,
             float brightness,
-            ID3D11SamplerState * sampler
+            ID3D11SamplerState * sampler,
+            ID3D11PixelShader * pixel_shader = nullptr,
+            float shape = 0.0f
         );
 
         [[nodiscard]] D3D11_RECT ScaledClip() const;
@@ -1370,6 +1395,18 @@ namespace dx11z
         );
 
         LockInfo * LockWindow();
+
+        // Draws a frame of the movie player, packed 4:2:2 with 7 bit components, into the front
+        // buffer at 'scale' times its size and shows it. Returns 'false' when the game has to draw the frame itself.
+        bool MovieBlit(
+            const void * pixels,
+            int pitch,
+            int width,
+            int height,
+            int x,
+            int y,
+            int scale
+        );
 
         int UnlockWindow(
             LockInfo * lock

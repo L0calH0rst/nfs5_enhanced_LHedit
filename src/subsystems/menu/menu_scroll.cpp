@@ -53,7 +53,7 @@ namespace nfs5
                 return false;
 
             const auto vtable = *static_cast<std::uintptr_t *>(pointer);
-            return vtable == menu::COMBOBOX_VTABLE || vtable == menu::LISTBOX_VTABLE;
+            return vtable == menu::COMBOBOX_VTABLE.Get() || vtable == menu::LISTBOX_VTABLE.Get();
         }
 
         bool IsOpen(
@@ -67,7 +67,7 @@ namespace nfs5
             void * control
         )
         {
-            return (reinterpret_cast<ControlTestFn>(menu::CONTROL_HIDDEN)(control) & 0xFF) != 0;
+            return (reinterpret_cast<ControlTestFn>(menu::CONTROL_HIDDEN.Get())(control) & 0xFF) != 0;
         }
 
         // Visible and open, an 'FEListBox' always is.
@@ -86,19 +86,19 @@ namespace nfs5
         )
         {
             int rect[4] = {};
-            reinterpret_cast<ControlRectFn>(menu::CONTROL_RECT)(list, rect);
+            reinterpret_cast<ControlRectFn>(menu::CONTROL_RECT.Get())(list, rect);
 
             for (std::size_t part : { menu::LIST_BOX_PART, menu::LIST_LABEL_PART })
             {
                 void * p = At<void *>( list, part );
 
-                if (p != nullptr && (reinterpret_cast<PartHitFn>(menu::PART_HIT)(p, rect, x, y) & 0xFF) != 0)
+                if (p != nullptr && (reinterpret_cast<PartHitFn>(menu::PART_HIT.Get())(p, rect, x, y) & 0xFF) != 0)
                     return true;
             }
 
             void * slider = At<void *>( list, menu::LIST_SLIDER );
             return At<char>( list, menu::LIST_HAS_SLIDER ) != 0 && slider != nullptr &&
-                (reinterpret_cast<ControlTestFn>(menu::SLIDER_HOVER)(slider) & 0xFF) != 0;
+                (reinterpret_cast<ControlTestFn>(menu::SLIDER_HOVER.Get())(slider) & 0xFF) != 0;
         }
 
         // Only the closed box [part +17Ch].
@@ -109,9 +109,9 @@ namespace nfs5
         )
         {
             int rect[4] = {};
-            reinterpret_cast<ControlRectFn>(menu::CONTROL_RECT)(list, rect);
+            reinterpret_cast<ControlRectFn>(menu::CONTROL_RECT.Get())(list, rect);
             void * label = At<void *>( list, menu::LIST_LABEL_PART );
-            return label != nullptr && (reinterpret_cast<PartHitFn>(menu::PART_HIT)(label, rect, x, y) & 0xFF) != 0;
+            return label != nullptr && (reinterpret_cast<PartHitFn>(menu::PART_HIT.Get())(label, rect, x, y) & 0xFF) != 0;
         }
 
         int MouseX()
@@ -130,16 +130,19 @@ namespace nfs5
         {
             return ListUnder( list, MouseX(), MouseY() );
         }
+
     }
 
 
     bool MenuScroll::SlotPatch::Apply(
         const char * name,
-        std::uintptr_t slot,
-        std::uintptr_t expected,
+        game::GameAddr slot_address,
+        game::GameAddr expected_address,
         void * destination
     )
     {
+        const std::uintptr_t slot = slot_address.Get();
+        const std::uintptr_t expected = expected_address.Get();
         auto * entry = reinterpret_cast<std::uintptr_t *>(slot);
 
         if (*entry != expected)
@@ -206,7 +209,7 @@ namespace nfs5
         if (At<char>( list, menu::LIST_HAS_SLIDER ) == 0 || scroll == nullptr || slider == nullptr || data == nullptr)
             return false;
 
-        if (*static_cast<std::uintptr_t *>(slider) != menu::LIST_SLIDER_VTABLE)
+        if (*static_cast<std::uintptr_t *>(slider) != menu::LIST_SLIDER_VTABLE.Get())
         {
             if (!m_SliderWarned)
             {
@@ -256,7 +259,7 @@ namespace nfs5
             // The highlight under the mouse is picked again.
             if (void * front_end = hook::Ref<void *>( menu::FRONT_END ); front_end != nullptr)
             {
-                reinterpret_cast<ControlTestFn>(menu::REFRESH_MOUSE)(front_end);
+                reinterpret_cast<ControlTestFn>(menu::REFRESH_MOUSE.Get())(front_end);
             }
         }
 
@@ -280,7 +283,7 @@ namespace nfs5
         const int items = Virtual<ThisIntFn>( data, 0x24 )(data);
         const int current = Virtual<ThisIntFn>( data, 0x28 )(data);
         void * colours = At<char>( list, menu::LIST_COLOUR_SPECIAL ) != 0
-            ? reinterpret_cast<DynamicCastFn>(menu::DYNAMIC_CAST)(data, 0, menu::TD_POSITIONABLE_ACCESSOR, menu::TD_COLOUR_ACCESSOR, 0)
+            ? reinterpret_cast<DynamicCastFn>(menu::DYNAMIC_CAST.Get())(data, 0, menu::TD_POSITIONABLE_ACCESSOR.Get(), menu::TD_COLOUR_ACCESSOR.Get(), 0)
             : nullptr;
 
         const int direction = steps > 0 ? 1 : -1;
@@ -288,7 +291,7 @@ namespace nfs5
 
         for (int left = steps * direction, i = current + direction; left > 0 && i >= 0 && i < items; i += direction)
         {
-            if (colours != nullptr && (reinterpret_cast<ThisSetIntFn>(menu::COLOUR_IS_SPECIAL)(colours, i) & 0xFF) != 0)
+            if (colours != nullptr && (reinterpret_cast<ThisSetIntFn>(menu::COLOUR_IS_SPECIAL.Get())(colours, i) & 0xFF) != 0)
                 continue;
 
             want = i;
@@ -361,7 +364,7 @@ namespace nfs5
             self.m_ListOpen = nullptr;
         }
 
-        return reinterpret_cast<ListDtorFn>(menu::LIST_DTOR)(list, flags);
+        return reinterpret_cast<ListDtorFn>(menu::LIST_DTOR.Get())(list, flags);
     }
 
 
@@ -372,7 +375,32 @@ namespace nfs5
     )
     {
         MenuScroll & self = GetInstance();
-        const int result = reinterpret_cast<ListEventFn>(menu::LIST_MOVE)(list, event);
+        const int result = reinterpret_cast<ListEventFn>(menu::LIST_MOVE.Get())(list, event);
+
+        // Issue #14: vanilla may leave the slider in drag mode after MouseUp outside
+        // the hit rectangle. Only reset the verified slider state when LMB is up.
+        if (event != nullptr && At<int>( event, 4 ) == 7 &&
+            At<char>( list, menu::LIST_HAS_SLIDER ) != 0)
+        {
+            void * slider = At<void *>( list, menu::LIST_SLIDER );
+            if (slider != nullptr &&
+                *static_cast<std::uintptr_t *>(slider) == menu::LIST_SLIDER_VTABLE.Get())
+            {
+                const int mode = At<int>( slider, 0xEC );
+                const int drag = At<int>( slider, 0xF0 );
+                const bool leftDown = (::GetAsyncKeyState( VK_LBUTTON ) & 0x8000) != 0;
+                if (!leftDown && mode == 3 && (drag == 3 || drag == 4))
+                {
+                    // A later vanilla MouseUp was observed changing +0xEC from 3 to 0.
+                    // Preserve +0xF0: vanilla itself left drag=3 immediately afterward.
+                    At<int>( slider, 0xEC ) = 0;
+                }
+            }
+        }
+
+        // With enhanced scrolling disabled, only the vanilla drag fix runs.
+        if (!self.m_Settings.m_Scroll)
+            return result;
 
         const int x = At<int>( event, 8 );
         const int y = At<int>( event, 0xC );
@@ -418,7 +446,7 @@ namespace nfs5
     )
     {
         MenuScroll & self = GetInstance();
-        reinterpret_cast<PumpFn>(menu::EVENT_PUMP_POLL)(pump);
+        reinterpret_cast<PumpFn>(menu::EVENT_PUMP_POLL.Get())(pump);
 
         self.m_WheelRest += ::InterlockedExchange( &self.m_WheelRaw, 0 );
         const int notches = self.m_WheelRest / WHEEL_DELTA;
@@ -474,7 +502,7 @@ namespace nfs5
                 return;
         }
 
-        reinterpret_cast<PumpEventFn>(menu::EVENT_PUMP_DISPATCH)(pump, event);
+        reinterpret_cast<PumpEventFn>(menu::EVENT_PUMP_DISPATCH.Get())(pump, event);
     }
 
 
@@ -487,13 +515,8 @@ namespace nfs5
 
         m_Settings = settings;
 
-        if (!settings.m_Scroll)
-        {
-            LOG_INFO( "Menu scrolling disabled" );
-            return true;
-        }
-
-        // Destructor and mouse move first, without them no list is remembered.
+        // List move hooks implement the drag fix regardless of the scrolling setting.
+        // Destructor hooks also track list lifetime for enhanced scrolling.
         bool ok = m_ComboDtorPatch.Apply( "ComboBoxDtor", menu::COMBOBOX_VTABLE + menu::LIST_DTOR_SLOT, menu::LIST_DTOR,
             reinterpret_cast<void *>(&ListDtorHook) );
         ok = m_ComboMovePatch.Apply( "ComboBoxMouseMove", menu::COMBOBOX_VTABLE + menu::LIST_MOVE_SLOT, menu::LIST_MOVE,
@@ -505,9 +528,17 @@ namespace nfs5
 
         if (!ok)
         {
-            LOG_ERROR( "Menu scrolling not installed, the list classes do not match" );
+            LOG_ERROR( "Menu list hooks not installed, the list classes do not match" );
             Uninstall();
             return false;
+        }
+
+        // Do not enable wheel or keyboard scrolling when Scroll=0.
+        if (!settings.m_Scroll)
+        {
+            m_Installed = true;
+            LOG_INFO( "Menu scrollbar drag fix installed; enhanced scrolling disabled" );
+            return true;
         }
 
         m_WheelHook = hook::CreateInline( "MenuWheelMessage", menu::WHEEL_MESSAGE.m_Address, menu::WHEEL_MESSAGE.m_Signature,

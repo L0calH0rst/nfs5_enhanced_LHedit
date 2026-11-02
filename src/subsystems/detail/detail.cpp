@@ -133,8 +133,8 @@ namespace nfs5
         const float right[4] = { sphere[0] - px, sphere[1], sphere[2] - pz, sphere[3] };
 
         using WallTestFn = unsigned( __fastcall * )(void * map, void * edx, const float * point, const float * camera, int flag);
-        const auto wall_test = reinterpret_cast<WallTestFn>(game::detail::OCCLUSION_WALL_TEST);
-        void * map = *reinterpret_cast<void * const *>(game::detail::OCCLUSION_TRACK_MAP);
+        const auto wall_test = reinterpret_cast<WallTestFn>(game::detail::OCCLUSION_WALL_TEST.Get());
+        void * map = *reinterpret_cast<void * const *>(game::detail::OCCLUSION_TRACK_MAP.Get());
         const int flag = *reinterpret_cast<const std::uint8_t *>(context.esp + game::detail::OCCLUSION_FLAG);
 
         if ((wall_test( map, nullptr, left, camera, flag ) & 0xFF) != 0 || (wall_test( map, nullptr, right, camera, flag ) & 0xFF) != 0)
@@ -155,6 +155,13 @@ namespace nfs5
         }
 
         ScopedPageProtection protection( table, sizeof( STOCK_WHEEL_TABLE ) );
+
+        if (!protection.IsChanged())
+        {
+            LOG_ERROR( "Wheel LOD table could not be unprotected, distant cars keep the game wheels" );
+            return false;
+        }
+
         std::memcpy( m_OriginalWheelTable.data(), table, sizeof( STOCK_WHEEL_TABLE ) );
 
         // The two farthest body LODs take the wheels of LOD 1, wheels are placed per wheel
@@ -180,7 +187,11 @@ namespace nfs5
         auto * table = hook::Ptr<std::int32_t>( game::detail::WHEEL_LOD_TABLE );
 
         ScopedPageProtection protection( table, sizeof( STOCK_WHEEL_TABLE ) );
-        std::memcpy( table, m_OriginalWheelTable.data(), sizeof( STOCK_WHEEL_TABLE ) );
+
+        if (protection.IsChanged())
+        {
+            std::memcpy( table, m_OriginalWheelTable.data(), sizeof( STOCK_WHEEL_TABLE ) );
+        }
 
         m_WheelTablePatched = false;
     }
@@ -223,6 +234,8 @@ namespace nfs5
 
             ok &= m_ObjectLimitPatch400000.Apply( "ObjectLimit400000", site::OBJECT_LIMIT_400000.m_Address, site::OBJECT_LIMIT_400000.m_Signature,
                 site::OBJECT_LIMIT_OPERAND, limit_400000 );
+            // LHedit keeps the 0x20 objects at the extended distance, the far floating pieces are closed by
+            // 'OcclusionEdge' instead (upstream #16 keeps the stock 700 instead).
             ok &= m_ObjectLimitPatch20.Apply( "ObjectLimit20", site::OBJECT_LIMIT_20.m_Address, site::OBJECT_LIMIT_20.m_Signature,
                 site::OBJECT_LIMIT_OPERAND, limit_20 );
         }

@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.3.0-LH.2 (2026-11-02)
+
+LHedit build on top of upstream 1.3.0 plus the merged pull requests up to `8b7acf6` (#21, #23, #25 to #31).
+
+### LHedit
+
+- Exponential fog with the eye depth (#23) in the LHedit scene shader as well, the water reflection
+  fogs the reflected point.
+- Essentials V2 (#21) is included, but `GameplayRedirect = 0` in the shipped INI: LFSP reads the car
+  `.tpg` files itself and would not see the replaced ones, and the HD textures of the replaced car
+  textures are not checked yet.
+- Not taken from #16: the `0x20` objects keep the extended draw distance and `OcclusionRange` stays
+  distance minus radius; the far floating pieces are closed by `OcclusionEdge`.
+- The addresses of the occlusion edge test are `GameAddr` values (relocated image base, #28). LFSP,
+  `nfsp_texpool.asi` and the dx11z hooks still expect `Porsche.exe` at `0x00400000`.
+
+### Upstream
+
+- Intro and menu movies are enlarged once on the GPU, from the original frame, with a bicubic filter
+  (`MovieFilter`, `MovieSharpness` in `[Dx11]`). The game doubled every frame in software and the
+  graphics driver stretched the result, which left scan lines. The color of a frame is interpolated
+  instead of repeated for two pixels. A movie as wide as the screen fills the window, its black bars
+  cut and its aspect ratio kept (`MovieFill`). Needs the DX11 driver, `Upscale` in the new `[Movie]`
+  section turns it off. Not tested with `ThrashDriver = dx`, where the game keeps scaling the frames.
+
+#### Fixes
+
+- The plugin works when Windows loads `Porsche.exe` at another address than `0x00400000`, for example
+  with Mandatory ASLR (Exploit Protection, "Force randomization for images") turned on. Before, every
+  hook failed with `signature mismatch, found <unreadable>`. Game addresses are rebased at run time and
+  signatures ignore operands the loader relocated. The build is still identified by timestamp and image size.
+- Interpolation did not install on some copies of `Porsche.exe` because the signature of the
+  render call site compared the call target. The target is no longer part of the signature.
+- Exponential fog uses the eye depth again, `FogEnabled` in `[Dx11]` (#23).
+- Porsche 911 GT1 bumper camera perspective (#25), anisotropic filtering 16x by default (#26),
+  stuck scrollbar drag in the menus released (#27).
+- Optional NFS5 Essentials V2 overlay in `GameplayFixes/` with `GameplayRedirect` in `[IO]` (#21).
+- No MSVC warnings any more, `/WX` for `nfs5_enhanced` and `dx11z`, CI build for pull requests (#29, #30).
+
 ## 1.3.0-LH.1 (2026-10-23)
 
 LHedit build on top of upstream 1.3.0 (menu scrolling, Hor+ culling, `OcclusionRange`, wheel

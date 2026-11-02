@@ -42,10 +42,20 @@ namespace nfs5
         std::mutex m_DiskSpaceLock;
         std::map<std::string, DiskSpaceEntry> m_DiskSpaceCache;
         IoSettings m_Settings;
+        hook::IatPatch m_CreateFilePatch;
+        hook::IatPatch m_AttributesPatch;
+        std::string m_GameRoot;
+        std::string m_OverrideRoot;
         bool m_Installed = false;
 
         IoHooks() = default;
 
+        [[nodiscard]] std::string ResolveGameplayOverride( const char * file_name ) const;
+        static HANDLE WINAPI CreateFileHook(
+            LPCSTR name, DWORD desired_access, DWORD share_mode, LPSECURITY_ATTRIBUTES security,
+            DWORD disposition, DWORD attributes, HANDLE template_file
+        );
+        static DWORD WINAPI GetFileAttributesHook( LPCSTR name );
         static int __cdecl FileOpenHook(
             const char * file_name,
             std::uint32_t flags,

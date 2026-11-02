@@ -43,6 +43,8 @@ add_library( nfs5_enhanced SHARED
     src/subsystems/gamepad/sdl3_api.cpp
     src/subsystems/gamepad/virtual_gamepad.cpp
     src/subsystems/menu/menu_scroll.cpp
+    src/subsystems/movie/movie_upscale.cpp
+    src/subsystems/camera/gt1_camera.cpp
     src/resources/version.rc
 )
 
@@ -62,8 +64,10 @@ target_link_libraries( nfs5_enhanced PRIVATE safetyhook winmm )
 if ( MSVC )
     set( CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" )
     set_property( TARGET nfs5_enhanced Zydis safetyhook PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" )
-    target_compile_options( nfs5_enhanced PRIVATE /W4 /permissive- /Zc:__cplusplus /utf-8 )
+    target_compile_options( nfs5_enhanced PRIVATE /W4 /permissive- /Zc:__cplusplus /utf-8 /WX )
     target_link_options( nfs5_enhanced PRIVATE /SAFESEH:NO )
+    # Vendored SafetyHook drops the [[nodiscard]] result of 'vm_protect' in a destructor.
+    target_compile_options( safetyhook PRIVATE /wd4834 )
 else()
     # The game only guarantees 4 byte stack alignment on entry to hooks.
     target_compile_options( Zydis PRIVATE -mstackrealign )

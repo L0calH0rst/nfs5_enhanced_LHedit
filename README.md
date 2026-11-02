@@ -128,7 +128,7 @@ Everything is set in `nfs5_enhanced.ini`, and every setting is explained in the 
 |---|---|
 | `[General]` | Log level, coexistence with `SilentPatchNFS90s`. |
 | `[Compat]` | The SilentPatch fixes, the crash fixes, graphics driver selection and fallback. |
-| `[Dx11]` | Internal resolution, antialiasing, anisotropic filtering, window mode and size, VSync, Alt+Tab behaviour. |
+| `[Dx11]` | Internal resolution, antialiasing, anisotropic filtering, window mode and size, VSync, Alt+Tab behaviour, movie filter and fill. |
 | `[Affinity]` | Which threads are pinned and to which core. |
 | `[Timing]` | Precise game clock. |
 | `[Widescreen]` | Hor+, field of view, flares, resolution list, race resolution and color depth, car detail distance. |
@@ -139,6 +139,7 @@ Everything is set in `nfs5_enhanced.ini`, and every setting is explained in the 
 | `[Detail]` | Draw distance, far clip, distant wheels, occlusion range. |
 | `[Controller]` | SDL3 gamepads, rumble, dead zones, default bindings. |
 | `[Menu]` | Mouse wheel and key scrolling of the menu lists. |
+| `[Movie]` | Hands the movie frames to the DX11 driver, which enlarges them. |
 
 The LHedit settings are in `lfsp.ini` of LFSP, every setting is explained in the file:
 

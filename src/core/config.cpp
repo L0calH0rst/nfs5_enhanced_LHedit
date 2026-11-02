@@ -205,12 +205,17 @@ namespace nfs5
         }
         else
         {
-            int width = 0;
-            int height = 0;
-            if (std::swscanf( race_resolution.c_str(), L"%dx%d", &width, &height ) == 2 && width >= 640 && height >= 480)
+            // WIDTHxHEIGHT, text after the height is ignored.
+            const wchar_t * text = race_resolution.c_str();
+            wchar_t * width_end = nullptr;
+            const long width = std::wcstol( text, &width_end, 10 );
+            wchar_t * height_end = nullptr;
+            const long height = (width_end != text && *width_end == L'x') ? std::wcstol( width_end + 1, &height_end, 10 ) : 0;
+
+            if (height_end != nullptr && height_end != width_end + 1 && width >= 640 && height >= 480)
             {
-                s.m_Widescreen.m_RaceWidth = width;
-                s.m_Widescreen.m_RaceHeight = height;
+                s.m_Widescreen.m_RaceWidth = static_cast<int>(width);
+                s.m_Widescreen.m_RaceHeight = static_cast<int>(height);
             }
             else
             {
@@ -234,6 +239,8 @@ namespace nfs5
         s.m_Io.m_ReadChunkKB = std::clamp( ReadInt( L"IO", L"ReadChunkKB", 1024 ), 16, 65536 );
         s.m_Io.m_CacheDiskFreeSpace = ReadBool( L"IO", L"CacheDiskFreeSpace", true );
         s.m_Io.m_FastCpuSpeedCheck = ReadBool( L"Loading", L"FastCpuSpeedCheck", true );
+        s.m_Io.m_GameplayRedirect = ReadBool( L"IO", L"GameplayRedirect", false );
+        s.m_Io.m_GameplayRedirectTrace = ReadBool( L"IO", L"GameplayRedirectTrace", false );
         s.m_Hud.m_Enabled = ReadBool( L"HudScaling", L"Enabled", true );
         s.m_Hud.m_ReferenceHeight = std::clamp( ReadInt( L"HudScaling", L"ReferenceHeight", 480 ), 240, 4320 );
         s.m_Hud.m_ScaleMultiplier = std::clamp( ReadFloat( L"HudScaling", L"ScaleMultiplier", 1.0f ), 0.25f, 4.0f );
@@ -275,6 +282,8 @@ namespace nfs5
         if (s.m_Menu.m_WheelRows < 1 || s.m_Menu.m_WheelRows > 20)
             s.m_Menu.m_WheelRows = 3;
         s.m_Menu.m_WheelSelect = ReadBool( L"Menu", L"WheelSelect", true );
+
+        s.m_Movie.m_Upscale = ReadBool( L"Movie", L"Upscale", true );
     }
 
     void Config::Dump() const
@@ -303,9 +312,9 @@ namespace nfs5
         LOG_INFO( "  HudScaling Enabled={} ReferenceHeight={} ScaleMultiplier={:.2f} MinimumScale={:.2f} ScaleText={} ExclusiveGaugeStyle={} ScaleLoadingScreen={} SmoothLoadingScreen={}",
             s.m_Hud.m_Enabled, s.m_Hud.m_ReferenceHeight, s.m_Hud.m_ScaleMultiplier, s.m_Hud.m_MinimumScale, s.m_Hud.m_ScaleText,
             s.m_Hud.m_ExclusiveGaugeStyle, s.m_Hud.m_ScaleLoadingScreen, s.m_Hud.m_SmoothLoadingScreen );
-        LOG_INFO( "  IO Enabled={} ReadChunkKB={} CacheDiskFreeSpace={} FastCpuSpeedCheck={}",
+        LOG_INFO( "  IO Enabled={} ReadChunkKB={} CacheDiskFreeSpace={} FastCpuSpeedCheck={} GameplayRedirect={} GameplayRedirectTrace={}",
             s.m_Io.m_Enabled, s.m_Io.m_ReadChunkKB, s.m_Io.m_CacheDiskFreeSpace,
-            s.m_Io.m_FastCpuSpeedCheck );
+            s.m_Io.m_FastCpuSpeedCheck, s.m_Io.m_GameplayRedirect, s.m_Io.m_GameplayRedirectTrace );
         LOG_INFO( "  Detail Enabled={} DrawDistanceScale={:.2f} MinDrawDistance={:.0f} FarClipMultiplier={:.2f} KeepDistantWheels={} FullCarDetail={} TextureDetail={} OcclusionRange={:.0f} OcclusionEdge={:.2f} OcclusionEdgeRange={:.0f} LodDistanceScale={:.2f}",
             s.m_Detail.m_Enabled, s.m_Detail.m_DrawDistanceScale, s.m_Detail.m_MinDrawDistance, s.m_Detail.m_FarClipMultiplier, s.m_Detail.m_KeepDistantWheels,
             s.m_Detail.m_FullCarDetail, s.m_Detail.m_TextureDetail, s.m_Detail.m_OcclusionRange, s.m_Detail.m_OcclusionEdge, s.m_Detail.m_OcclusionEdgeRange,
@@ -316,5 +325,6 @@ namespace nfs5
             s.m_Controller.m_StickDeadzone, s.m_Controller.m_TriggerDeadzone, s.m_Controller.m_BackgroundInput,
             s.m_Controller.m_TriggerBindings );
         LOG_INFO( "  Menu Scroll={} WheelRows={} WheelSelect={}", s.m_Menu.m_Scroll, s.m_Menu.m_WheelRows, s.m_Menu.m_WheelSelect );
+        LOG_INFO( "  Movie Upscale={}", s.m_Movie.m_Upscale );
     }
 }

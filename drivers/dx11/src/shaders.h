@@ -60,6 +60,7 @@ struct PixelIn
     float m_Depth : TEXCOORD1;
     float3 m_Light : TEXCOORD2;
     float3 m_View : TEXCOORD3;
+    float m_EyeDepth : TEXCOORD4; // view depth w for the exponential fog
 };
 
 PixelIn MainVS( VertexIn input )
@@ -88,6 +89,7 @@ PixelIn MainVS( VertexIn input )
     output.m_Specular = input.m_Specular.zyxw;
     output.m_Uv = float4( input.m_Uv0, input.m_Uv1 );
     output.m_Depth = input.m_Position.z;
+    output.m_EyeDepth = w;
 
     // Headlight space of the vertex: undo the game projection (x = xv * fx / zv + cx), then the
     // camera and headlight matrices. Affine in the view, so the interpolation is exact per pixel.
@@ -124,6 +126,7 @@ struct MirrorOut
     float m_Depth : TEXCOORD1;
     float3 m_Light : TEXCOORD2;
     float3 m_View : TEXCOORD3;
+    float m_EyeDepth : TEXCOORD4;
     float m_Clip : SV_ClipDistance0;
 };
 
@@ -150,6 +153,7 @@ MirrorOut MirrorVS( VertexIn input )
     output.m_Depth = input.m_Position.z;
     output.m_Light = float3( 0.0, 0.0, -1.0 );
     output.m_View = float3( 0.0, 0.0, 0.0 );
+    output.m_EyeDepth = c.z; // the fog of the reflected point
     output.m_Clip = above;
     return output;
 }
@@ -367,11 +371,12 @@ float4 MainPS( PixelIn input ) : SV_Target
         float fog;
         int mode = (int)g_FogParams.w;
         float depth = saturate( input.m_Depth );
+        float eyeDepth = max( input.m_EyeDepth, 0.0 );
 
         if ( mode == 1 )
-            fog = exp( -g_FogParams.z * depth );
+            fog = exp( -g_FogParams.z * eyeDepth );
         else if ( mode == 2 )
-            fog = exp( -( g_FogParams.z * depth ) * ( g_FogParams.z * depth ) );
+            fog = exp( -( g_FogParams.z * eyeDepth ) * ( g_FogParams.z * eyeDepth ) );
         else if ( mode == 3 )
             fog = ( g_FogParams.y - depth ) / max( g_FogParams.y - g_FogParams.x, 1e-6 );
         else
@@ -421,6 +426,68 @@ float4 MainPS( PixelIn input ) : SV_Target
     // THRASH state 2E scales the display gamma ramp.
     color.rgb = saturate( color.rgb * g_Params.x );
     return color;
+}
+)hlsl";
+
+    // Same vertex stage as PRESENT. The pixel stage enlarges a small movie frame with a bicubic
+    // filter from the Mitchell Netravali family, B = 1 - 2 C, so C = 0.5 is Catmull Rom, 1/3 is
+    // Mitchell and 0 is the soft B spline. 'g_Params.w' is C.
+    inline constexpr char MOVIE[] = R"hlsl(
+cbuffer PresentConstants : register( b0 )
+{
+    float4 g_Rect;
+    float4 g_Params; // brightness, target width, target height, bicubic C
+    float4 g_Source; // source u, v, width, height in texture coordinates
+};
+
+Texture2D g_Texture : register( t0 );
+
+struct PixelIn
+{
+    float4 m_Position : SV_Position;
+    float2 m_Uv : TEXCOORD0;
+};
+
+float4 Weights( float t, float c )
+{
+    const float b = 1.0 - 2.0 * c;
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    const float4 w = float4(
+        ( -b / 6.0 - c ) * t3 + ( b / 2.0 + 2.0 * c ) * t2 + ( -b / 2.0 - c ) * t + b / 6.0,
+        ( 2.0 - 1.5 * b - c ) * t3 + ( -3.0 + 2.0 * b + c ) * t2 + ( 1.0 - b / 3.0 ),
+        ( -2.0 + 1.5 * b + c ) * t3 + ( 3.0 - 2.5 * b - 2.0 * c ) * t2 + ( b / 2.0 + c ) * t + b / 6.0,
+        ( b / 6.0 + c ) * t3 - c * t2 );
+    return w;
+}
+
+float4 MainPS( PixelIn input ) : SV_Target
+{
+    uint width, height;
+    g_Texture.GetDimensions( width, height );
+    const float2 size = float2( width, height );
+    const float2 position = input.m_Uv * size - 0.5;
+    const float2 base = floor( position );
+    const float2 fraction = position - base;
+    const float4 wx = Weights( fraction.x, g_Params.w );
+    const float4 wy = Weights( fraction.y, g_Params.w );
+    // Rows outside the visible part [black bars cut by the driver] are not sampled.
+    const int2 low = int2( 0, (int)round( g_Source.y * (float)height ) );
+    const int2 high = int2( (int)width - 1, (int)round( ( g_Source.y + g_Source.w ) * (float)height ) - 1 );
+    float3 color = 0.0;
+
+    [unroll]
+    for (int j = 0; j < 4; ++j)
+    {
+        [unroll]
+        for (int i = 0; i < 4; ++i)
+        {
+            const int2 texel = clamp( int2( base ) + int2( i - 1, j - 1 ), low, high );
+            color += g_Texture.Load( int3( texel, 0 ) ).rgb * ( wx[i] * wy[j] );
+        }
+    }
+
+    return float4( saturate( color * g_Params.x ), 1.0 );
 }
 )hlsl";
 

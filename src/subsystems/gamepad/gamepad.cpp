@@ -6,6 +6,7 @@
 
 #include "../../core/hook_util.h"
 #include "../../core/log.h"
+#include "../../core/string_util.h"
 
 #include "../../game/addresses.h"
 
@@ -359,15 +360,15 @@ namespace nfs5
         int device
     ) const
     {
-        const auto find_accessor = reinterpret_cast<FindAccessorFn>(gi::FIND_ACCESSOR.m_Address);
-        const auto clear_binding = reinterpret_cast<ClearBindingFn>(gi::CLEAR_BINDING.m_Address);
+        const auto find_accessor = reinterpret_cast<FindAccessorFn>(gi::FIND_ACCESSOR.m_Address.Get());
+        const auto clear_binding = reinterpret_cast<ClearBindingFn>(gi::CLEAR_BINDING.m_Address.Get());
         int applied = 0;
 
         for (const GamepadDefault & entry : GAMEPAD_DEFAULTS)
         {
             auto * accessor = static_cast<std::uint8_t *>(find_accessor( entry.m_Action ));
 
-            if (accessor == nullptr || *reinterpret_cast<const std::uintptr_t *>(accessor) != gi::INPUT_ACCESSOR_VTABLE)
+            if (accessor == nullptr || *reinterpret_cast<const std::uintptr_t *>(accessor) != gi::INPUT_ACCESSOR_VTABLE.Get())
             {
                 LOG_WARN( "Controller action '{}' not found, its gamepad default is skipped", entry.m_Action );
                 continue;
@@ -547,7 +548,7 @@ namespace nfs5
             snapshot.m_Connected = true;
 
             const char * name = m_Sdl.GetGamepadName( active->m_Handle );
-            std::strncpy( snapshot.m_Name, name != nullptr ? name : "Gamepad", sizeof( snapshot.m_Name ) - 1 );
+            CopyString( snapshot.m_Name, name != nullptr ? name : "Gamepad" );
 
             const bool readable = m_Settings.m_BackgroundInput || IsGameActive();
 
