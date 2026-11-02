@@ -477,13 +477,18 @@ extern "C"
 BOOL WINAPI DllMain(
     HINSTANCE instance,
     DWORD reason,
-    LPVOID
+    LPVOID reserved
 )
 {
     if (reason == DLL_PROCESS_ATTACH)
     {
         g_Module = instance;
         ::DisableThreadLibraryCalls( instance );
+    }
+    else if (reason == DLL_PROCESS_DETACH && reserved == nullptr)
+    {
+        // FreeLibrary by the game at exit: hooks and the exception handler must not point into the freed module.
+        dx11z::RestoreGamePatches();
     }
 
     return TRUE;

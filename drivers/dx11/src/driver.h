@@ -13,6 +13,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -261,6 +262,10 @@ namespace dx11z
         ComPtr<ID3D11ShaderResourceView> m_ResolvedView;
         ComPtr<ID3D11Texture2D> m_Depth;
         ComPtr<ID3D11DepthStencilView> m_DepthView;
+        // Stencil and depth of m_Depth as textures, where the device allows it (typeless depth): the water
+        // reflections read them without a copy. Empty: the copy in CopyStencil.
+        ComPtr<ID3D11ShaderResourceView> m_DepthStencilSrv;
+        ComPtr<ID3D11ShaderResourceView> m_DepthSrv;
 
         // Front buffer, window 1. It holds the last presented frame, the movie player
         // writes into it through locks and expects the picture to show at once.
@@ -324,6 +329,19 @@ namespace dx11z
 
         int m_ConfigMeasure = 0;
         std::unordered_map<const Texture *, MeasureUv> m_MeasureUv;
+        // Triangles per texture since the last report, and where the time of a frame goes (QPC ticks): the batches
+        // of the driver, the water reflections, Present (waiting for the GPU or VSync), the rest is the game.
+        std::unordered_map<std::uint32_t, std::uint64_t> m_MeasureTexTriangles;
+        std::uint64_t m_MeasureSkidTriangles = 0;
+        std::int64_t m_PerfFrameStart = 0;
+        std::int64_t m_PerfFrameTicks = 0;
+        std::int64_t m_PerfFlushTicks = 0;
+        std::int64_t m_PerfReflTicks = 0;
+        std::int64_t m_PerfPresentTicks = 0;
+        std::uint64_t m_PerfFrames = 0;
+        int m_PerfDepth = 0;
+        std::uint64_t m_PerfReportFlip = 0;
+        void PerfReport();
 
         void MeasureUvRange();
 
@@ -523,6 +541,115 @@ namespace dx11z
         std::uintptr_t m_LampCar = 0;
         std::array<std::uint8_t, 16> m_LampBytes = {};
         int m_LampLines = 0;
+        // Car reflections, stage 1 (PLAN.md 9, '[CarReflections] Measure' in lfsp.ini). R3DCar::SetupLighting 0x43A560
+        // puts three environment pictures of the track (<track>.env, section from Car_Env::SelectSection 0x441140) into
+        // the light block of each car, [model + 0x2DC + 0xD0 + slot * 4] (FUN_004408c0). Their game objects are logged on
+        // change, the texture handle inside is searched once, and every draw with one of them bound is counted by state.
+        struct CarEnvPass
+        {
+            int m_Id = 0;
+            std::uint64_t m_Draws = 0;
+            std::uint64_t m_Triangles = 0;
+            std::uint64_t m_Vertices = 0;
+            float m_MinU0 = 1e9f, m_MaxU0 = -1e9f, m_MinV0 = 1e9f, m_MaxV0 = -1e9f;
+            float m_MinU1 = 1e9f, m_MaxU1 = -1e9f, m_MinV1 = 1e9f, m_MaxV1 = -1e9f;
+            std::array<double, 4> m_Diffuse = {}; // sums of a, r, g, b
+            std::array<double, 3> m_Specular = {}; // sums of r, g, b
+            double m_Area = 0.0; // screen pixels, both windings
+        };
+        int m_ConfigCarEnvMeasure = 0;
+        std::array<std::uintptr_t, 3> m_CarEnvObjects = {};
+        std::array<const Texture *, 3> m_CarEnvTextures = {};
+        // Path from the game object to the texture handle: -1/-1 the object is the handle, a/-1 the handle at
+        // [object + a], a/b at [[object + a] + b]. -2 = not found yet.
+        int m_CarEnvOffset = -2;
+        int m_CarEnvOffset2 = -1;
+        std::uintptr_t m_CarEnvSection = 0;
+        int m_CarEnvLines = 0;
+        std::uint64_t m_CarEnvFrames = 0;
+        std::uint64_t m_CarEnvFramesDrawn = 0;
+        bool m_CarEnvDrawnThisFrame = false;
+        std::unordered_map<std::string, CarEnvPass> m_CarEnvPasses;
+        ULONGLONG m_CarEnvNextReport = 0;
+        void CarEnvFlip();
+        void CarEnvBatch();
+        void CarEnvReport();
+        // Car reflections, stage 2 (PLAN.md 9.12b, '[CarReflections] Reflections'): R3DCarLOD::Draw 0x43C830 (slot 2 of
+        // 0x5B36AC) is hooked, its pass mask says which parts it draws (0x50 body, 0x20 wheels, 0x30 interior). The body
+        // draws are drawn once more with the frame in the reflected direction over them (CarReflBatch).
+        struct CarReflVertex
+        {
+            float m_Position[4]; // as the game's vertex: x, y in game pixels, z, 1 / w
+            float m_View[3];
+            float m_Normal[3];
+            float m_Uv[3]; // u, v, alpha of the vertex colour
+        };
+        int m_ConfigCarRefl = 0;
+        float m_ConfigCarReflStrength = 0.8f;
+        float m_ConfigCarReflF0 = 0.15f;
+        float m_ConfigCarReflBlur = 2.0f;
+        float m_ConfigCarReflFresnel = 3.0f; // '[CarReflections] Fresnel': exponent, 5 = Schlick, smaller = softer
+        int m_ConfigCarReflGlass = 0;
+        int m_ConfigCarReflDebug = 0;
+        std::vector<std::uint32_t> m_ConfigCarReflSkip;
+        // '[CarReflections] MatteParts': part << 8 | variant (0xFF = any variant) of the .crp, e.g. cloth tops 37 and 41.
+        std::vector<std::uint32_t> m_ConfigCarReflMatte;
+        float m_ConfigCarReflGround = 0.35f; // '[CarReflections] Ground': strength of reflections below the horizon
+        int m_ConfigCarReflOnlyPart = -1; // '[CarReflections] OnlyPart': reflect this part alone, to find parts
+        bool m_CarPartMatte = false; // the part being drawn is matte (CarPartEntryHook)
+        bool m_CarPartBody = false; // the part being drawn is the body (part 1)
+        // Textures of the body (part 1), the paint pages, and where on its textures any glossy part is drawn: 64 x 64 cells
+        // of the texture, one bit each. In matte parts the triangles on cells of a paint page stay glossy. The tops of the
+        // 356 (37, 41) hold the cloth and the painted rear deck together, on the paint page; the deck shares its cells with
+        // the lids (16, 34), not with the body.
+        std::set<std::uint32_t> m_CarReflBodyTextures;
+        std::map<std::uint32_t, std::array<std::uint64_t, 64>> m_CarReflPaintCells;
+        // Mean colour (0x00RRGGBB) of the opaque texels in each of the 64 x 64 cells of a paint page, read back once; empty
+        // when it cannot be read. On the 356 the top holds the rear quarters too, on cells no glossy part covers: there
+        // the colour tells paint from cloth.
+        std::map<std::uint32_t, std::vector<std::uint32_t>> m_CarReflCellColours;
+        int m_CarPart = -1; // part << 8 | variant being drawn
+        std::vector<std::uint16_t> m_CarReflIndices;
+        std::set<std::uint64_t> m_CarReflMatteSeen;
+        std::set<std::uint32_t> m_CarReflPartsSeen;
+        std::uint32_t m_CarLodMask = 0; // pass mask of the running R3DCarLOD::Draw, 0 = outside
+        bool m_CarReflCamera = false;
+        std::array<float, 16> m_CarReflClipOfView = {};
+        std::array<float, 16> m_CarReflViewOfClip = {};
+        std::array<float, 4> m_CarReflViewport = {};
+        std::uint32_t m_CarReflCopyFlip = 0xFFFFFFFFu;
+        bool m_CarReflSourceValid = false;
+        ComPtr<ID3D11Texture2D> m_CarReflSource;
+        ComPtr<ID3D11ShaderResourceView> m_CarReflSourceView;
+        ComPtr<ID3D11VertexShader> m_CarReflVs;
+        ComPtr<ID3D11PixelShader> m_CarReflPs;
+        ComPtr<ID3D11InputLayout> m_CarReflLayout;
+        ComPtr<ID3D11Buffer> m_CarReflConstants;
+        ComPtr<ID3D11BlendState> m_CarReflBlend;
+        ComPtr<ID3D11DepthStencilState> m_CarReflDepth;
+        std::vector<CarReflVertex> m_CarReflVertices;
+        std::vector<std::uint32_t> m_CarReflOrder;
+        std::vector<std::uint32_t> m_CarReflGroup;
+        std::vector<std::array<double, 3>> m_CarReflView;
+        std::vector<std::array<double, 3>> m_CarReflNormal;
+        // Per pass mask: draws reflected, skipped as blended, skipped by texture; textures seen (logged once each).
+        struct CarReflStats
+        {
+            std::uint64_t m_Drawn = 0, m_Blended = 0, m_Skipped = 0, m_Matte = 0, m_Triangles = 0, m_MatteTriangles = 0;
+        };
+        std::map<std::uint32_t, CarReflStats> m_CarReflStats;
+        std::unordered_map<std::uint64_t, int> m_CarReflSeen;
+        std::uint64_t m_CarReflLodCalls = 0, m_CarReflNoCamera = 0, m_CarReflFrames = 0;
+        ULONGLONG m_CarReflNextReport = 0;
+        int m_CarReflLines = 0;
+        bool m_CarReflRoomLogged = false;
+        void InstallCarReflHook();
+        bool CopyCarReflSource();
+        void CarReflBatch();
+        const std::vector<std::uint32_t> & CarReflCellColours(
+            const Texture * texture
+        );
+        void CarReflReport();
         // Frame in which the day path built the player's matrix 0x0061BCCC (layout check by day, 9.11c).
         std::uint32_t m_GameMatrixFlip = 0xFFFFFFFEu;
         // High beam (PLAN.md 9.10): 'HeadlightsHighRange', 'HeadlightsHighWidth', 'HeadlightsHighStrength', 'HeadlightsHighHeight'.
@@ -977,7 +1104,28 @@ namespace dx11z
         ComPtr<ID3D11ShaderResourceView> m_ReflDepthCopyView; // depth of the stencil copy
         ComPtr<ID3D11Texture2D> m_ReflStencil;
         ComPtr<ID3D11ShaderResourceView> m_ReflStencilView;
-        ComPtr<ID3D11PixelShader> m_ReflCompositeMsPs; // the same, stencil copy multisampled
+        // Stencil and depth, sample 0, single sampled for the composite (PackStencil). It reads the stencil up to
+        // a hundred times per water pixel; from the multisampled buffer that was most of its cost.
+        ComPtr<ID3D11Texture2D> m_ReflMask;
+        ComPtr<ID3D11RenderTargetView> m_ReflMaskRtv;
+        ComPtr<ID3D11ShaderResourceView> m_ReflMaskSrv;
+        ComPtr<ID3D11Texture2D> m_ReflMaskDepth;
+        ComPtr<ID3D11RenderTargetView> m_ReflMaskDepthRtv;
+        ComPtr<ID3D11ShaderResourceView> m_ReflMaskDepthSrv;
+        ComPtr<ID3D11PixelShader> m_ReflPackPs;
+        ComPtr<ID3D11PixelShader> m_ReflPackMsPs; // the same, depth buffer multisampled
+
+        // '[Dx11] Measure': GPU time of the water reflections (mirrored scene, copies, composite), a few frames late.
+        struct ReflTiming
+        {
+            ComPtr<ID3D11Query> m_Disjoint;
+            std::array<ComPtr<ID3D11Query>, 4> m_Stamps;
+            bool m_Pending = false;
+        };
+        std::array<ReflTiming, 4> m_ReflTimings;
+        std::array<double, 3> m_ReflTimingSum = {};
+        unsigned m_ReflTimingCount = 0;
+        ReflTiming * ReflTimingBegin();
         ComPtr<ID3D11Texture2D> m_ReflDepth;
         ComPtr<ID3D11DepthStencilView> m_ReflDepthView;
         int m_ReflWidth = 0;
@@ -999,6 +1147,7 @@ namespace dx11z
 
         bool PrepareSkyImage();
         bool CopyStencil();
+        bool PackStencil();
         bool CopyFrame();
         void PrepareReflWeight();
         bool IsWaterTexture() const;
@@ -1133,8 +1282,26 @@ namespace dx11z
             bool begin
         )
         {
+            // Skid marks in batches of their own: the water reflections leave them out, Measure counts them.
+            if (m_SkidDraw != begin)
+                Flush();
             m_SkidDraw = begin;
         }
+
+        // Called around the game's car part draw R3DCarLOD::Draw 0x43C830 with its pass mask (PLAN.md 9.12b);
+        // End gets back what Begin returned. 'room': a 3D room of the menus, drawn without reflections (BUGS.md 21).
+        std::uint32_t BeginCarLodDraw(
+            std::uint32_t mask,
+            bool room
+        );
+        void EndCarLodDraw(
+            std::uint32_t previous
+        );
+        // Before each part of R3DCarLOD::Draw with its .crp part and variant (-1: unknown).
+        void OnCarPart(
+            int part,
+            int variant
+        );
 
         // First driver draw inside a day world draw: the game has updated the camera matrices by now.
         void PrepareDayPending();
@@ -1305,4 +1472,7 @@ namespace dx11z
             return m_TwoUvSets ? 40u : 32u;
         }
     };
+
+    // Puts back what the driver changed in the game and removes its exception handler (DllMain, unload).
+    void RestoreGamePatches();
 }

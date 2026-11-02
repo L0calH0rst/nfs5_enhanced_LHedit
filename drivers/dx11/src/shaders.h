@@ -445,18 +445,12 @@ SamplerState g_SkySampler : register( s1 );
 Texture2D<float> g_Weight : register( t2 ); // 1 water, 1 - alpha on the shore
 // Stencil of the frame: bit 1 water, bit 2 solid draw of the render queue; 0 = only the sky drawn there.
 // The frame before the composite and its depth (z = 1 - n / w, n in g_Size.z).
+// Stencil and depth are sample 0 of the depth buffer, single sampled by REFLECT_PACK.
 Texture2D g_Frame : register( t4 );
-#ifdef STENCIL_MS
-Texture2DMS<uint2> g_Stencil : register( t3 );
-Texture2DMS<float> g_Depth : register( t5 );
-uint StencilAt( int2 p ) { return g_Stencil.Load( p, 0 ).g; }
-float DepthAt( int2 p ) { return g_Depth.Load( p, 0 ); }
-#else
-Texture2D<uint2> g_Stencil : register( t3 );
+Texture2D<uint> g_Stencil : register( t3 );
 Texture2D<float> g_Depth : register( t5 );
-uint StencilAt( int2 p ) { return g_Stencil.Load( int3( p, 0 ) ).g; }
+uint StencilAt( int2 p ) { return g_Stencil.Load( int3( p, 0 ) ); }
 float DepthAt( int2 p ) { return g_Depth.Load( int3( p, 0 ) ); }
-#endif
 
 // The sky is far away: its reflection only depends on the direction. The view ray of the pixel, mirrored at the
 // water plane, projected back onto the screen; above the top edge the top row of the sky copy is used.
@@ -498,6 +492,10 @@ float3 ReflectedSky( float2 pixel, float2 size, out float found, out float sky_v
         distant *= saturate( uv.y * 10.0 ) * saturate( ( 1.0 - uv.y ) * 10.0 ) * saturate( uv.x * 10.0 ) * saturate( ( 1.0 - uv.x ) * 10.0 );
         near = lerp( near, g_Frame.Load( int3( q, 0 ) ).rgb, distant );
     }
+    // The band only counts near the top edge (uv.y below 0.2), most of the water mirrors sky further down:
+    // its 18 lookups only where they count.
+    if ( uv.y >= 0.2 )
+        return near;
     float3 band = float3( 0.0, 0.0, 0.0 );
     [unroll] for ( int k = 0; k < 6; ++k )
     {
@@ -675,6 +673,151 @@ float4 MainPS( float4 position : SV_Position ) : SV_Target
         }
     }
     return float4( mirrored, alpha );
+}
+)hlsl";
+
+    // Water reflections (B15): stencil and depth of the frame, sample 0, into two single sampled targets for the
+    // composite (REFLECT). Fullscreen triangle of REFLECT's MainVS.
+    inline constexpr char REFLECT_PACK[] = R"hlsl(
+#ifdef STENCIL_MS
+Texture2DMS<uint2> g_Stencil : register( t0 );
+Texture2DMS<float> g_Depth : register( t1 );
+uint StencilAt( int2 p ) { return g_Stencil.Load( p, 0 ).g; }
+float DepthAt( int2 p ) { return g_Depth.Load( p, 0 ); }
+#else
+Texture2D<uint2> g_Stencil : register( t0 );
+Texture2D<float> g_Depth : register( t1 );
+uint StencilAt( int2 p ) { return g_Stencil.Load( int3( p, 0 ) ).g; }
+float DepthAt( int2 p ) { return g_Depth.Load( int3( p, 0 ) ); }
+#endif
+
+struct PackOut
+{
+    uint m_Stencil : SV_Target0;
+    float m_Depth : SV_Target1;
+};
+
+PackOut MainPS( float4 position : SV_Position )
+{
+    PackOut output;
+    int2 p = int2( position.xy );
+    output.m_Stencil = StencilAt( p );
+    output.m_Depth = DepthAt( p );
+    return output;
+}
+)hlsl";
+
+    // Car reflections (PLAN.md 9.12b, doc/LICHT.md 12): the body of a car drawn once more, the frame in the reflected
+    // direction over it. Position and normal per vertex in the camera space of the game come from the driver (normals
+    // averaged over the triangles of the draw), the direction is projected to the screen as a point at infinity.
+    inline constexpr char CAR_REFLECT[] = R"hlsl(
+cbuffer CarReflectConstants : register( b0 )
+{
+    float4 g_Target; // vertex offset in game pixels (x, y), 1 / width, 1 / height of the game
+    float4 g_Viewport; // fx, fy, cx, cy of the game projection
+    row_major float4x4 g_ViewOfClip;
+    row_major float4x4 g_ClipOfView;
+    float4 g_Params; // strength, reflectance head on, blur level of the frame, debug
+    float4 g_Forward; // xyz: view direction of the camera in its space, w: alpha reference of the texture (< 0: no test)
+    float4 g_Glass; // x: alpha below which a blended pixel is glass (< 0: not blended), y: 1 = reflect glass too
+    float4 g_Up; // xyz: up of the car in view space (0: unknown), w: strength of reflections below the horizon
+    float4 g_SkyColour; // rgb: sky where the frame has nothing (the fog colour), w: 1 = use it
+    float4 g_Shape; // x: exponent of the Fresnel term (5 = Schlick, smaller = softer change)
+};
+
+Texture2D g_Scene : register( t0 );
+Texture2D g_Texture : register( t1 );
+SamplerState g_SceneSampler : register( s0 );
+SamplerState g_TextureSampler : register( s1 );
+
+struct VertexIn
+{
+    float4 m_Position : POSITION;
+    float3 m_View : TEXCOORD0;
+    float3 m_Normal : TEXCOORD1;
+    float3 m_Uv : TEXCOORD2; // u, v, alpha of the vertex colour
+};
+
+struct PixelIn
+{
+    float4 m_Position : SV_Position;
+    float3 m_View : TEXCOORD0;
+    float3 m_Normal : TEXCOORD1;
+    float3 m_Uv : TEXCOORD2;
+};
+
+PixelIn MainVS( VertexIn input )
+{
+    PixelIn output;
+    float rhw = input.m_Position.w;
+    float w = ( rhw > 0.0 && rhw < 1e30 ) ? 1.0 / rhw : 1.0;
+
+    // As the scene shader, so the depth is the same and the body passes the test equal.
+    float2 ndc;
+    ndc.x = ( input.m_Position.x + g_Target.x ) * g_Target.z * 2.0 - 1.0;
+    ndc.y = 1.0 - ( input.m_Position.y + g_Target.y ) * g_Target.w * 2.0;
+    output.m_Position = float4( ndc * w, saturate( input.m_Position.z ) * w, w );
+    output.m_View = input.m_View;
+    output.m_Normal = input.m_Normal;
+    output.m_Uv = input.m_Uv;
+    return output;
+}
+
+float4 MainPS( PixelIn input ) : SV_Target
+{
+    // Cut out parts (grilles) keep their holes; the game blends the whole body, glass is what is not opaque.
+    float alpha = g_Texture.Sample( g_TextureSampler, input.m_Uv.xy ).a * input.m_Uv.z;
+    if ( g_Forward.w >= 0.0 )
+        clip( alpha - g_Forward.w );
+    if ( g_Glass.x >= 0.0 && g_Glass.y == 0.0 )
+        clip( alpha - g_Glass.x );
+
+    float3 v = normalize( input.m_View );
+    float3 n = normalize( input.m_Normal );
+    if ( dot( n, v ) > 0.0 )
+        n = -n;
+    float facing = saturate( -dot( n, v ) );
+    float3 r = reflect( v, n );
+
+    // Upwards or downwards in the world: the ground is near and dark, the frame shows it sharp and too strong.
+    bool has_up = dot( g_Up.xyz, g_Up.xyz ) > 0.5;
+    float upward = has_up ? dot( r, g_Up.xyz ) : 0.0;
+
+    // The frame only shows what lies ahead; a direction behind the camera is mirrored to the front.
+    float along = dot( r, g_Forward.xyz );
+    r += g_Forward.xyz * ( max( abs( along ), 0.2 ) - along );
+
+    // Point at infinity in that direction: x = xc / wc * fx + cx. Outside the frame, towards its middle onto the edge.
+    float3 c = mul( float4( r, 0.0 ), g_ClipOfView ).xyz;
+    float2 screen = c.xy / c.z * g_Viewport.xy + g_Viewport.zw;
+    float2 p = ( screen + g_Target.xy ) * g_Target.zw * 2.0 - 1.0;
+    float edge = max( abs( p.x ), abs( p.y ) );
+    float outside = saturate( ( edge - 1.0 ) / 0.3 );
+    p /= max( 1.0, edge / 0.99 );
+    // Towards and beyond the edge blurrier and then the mean of the frame, the last row of pixels would become streaks.
+    float blur = lerp( g_Params.z, max( g_Params.z, 6.0 ), saturate( ( edge - 0.8 ) / 0.4 ) );
+    float3 colour = g_Scene.SampleLevel( g_SceneSampler, p * 0.5 + 0.5, blur ).rgb;
+    colour = lerp( colour, g_Scene.SampleLevel( g_SceneSampler, float2( 0.5, 0.5 ), 12.0 ).rgb, saturate( ( edge - 1.0 ) / 0.6 ) );
+
+    // Up out of the frame there is sky, not the stretched edge of the frame. Behind the camera the mirrored frame
+    // stays: the plain fog colour there made the back of the car look as if it reflected nothing.
+    float strength = g_Params.x;
+    if ( has_up )
+    {
+        float sky = outside * saturate( upward * 4.0 + 0.5 ) * g_SkyColour.w;
+        colour = lerp( colour, g_SkyColour.rgb, sky );
+        strength *= lerp( g_Up.w, 1.0, saturate( upward * 4.0 + 1.0 ) );
+    }
+
+    float fresnel = g_Params.y + ( 1.0 - g_Params.y ) * pow( 1.0 - facing, g_Shape.x );
+
+    if ( g_Params.w == 1.0 )
+        return float4( n * 0.5 + 0.5, 1.0 );
+    if ( g_Params.w == 2.0 )
+        return float4( colour, 1.0 );
+    if ( g_Params.w == 3.0 )
+        return float4( fresnel.xxx, 1.0 );
+    return float4( colour, saturate( strength * fresnel ) );
 }
 )hlsl";
 

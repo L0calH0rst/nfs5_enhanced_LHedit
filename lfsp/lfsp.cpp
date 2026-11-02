@@ -334,7 +334,7 @@ namespace
     bool g_freeKeyDown = false;
     // Menükamera: rechte Maustaste halten = Kamera im 3D-Raum des Menüs frei bewegen
     int g_menuCam = 1;            // 1 = an
-    float g_menuCamSpeed = 2.0f;  // m/s mit W/A/S/D/Q/E, mit Umschalt × 4, mit Strg × 0,2
+    float g_menuCamSpeed = 2.0f;  // m/s mit dem Numpad wie die Freecam, mit Umschalt × 4, mit Strg × 0,2
     float g_menuCamMouse = 0.2f;  // Grad je Mauspixel (negativ = Blick links/rechts umgekehrt)
     int g_menuCamStopSpin = 1;    // 1 = Drehscheibe (Auto, Licht, Händler-Bühne) hält an, solange die Kamera frei ist
     int g_menuCamKeep = 0;        // 1 = Kamera bleibt beim Menüwechsel im selben 3D-Raum stehen
@@ -351,6 +351,7 @@ namespace
     int g_trafficCount[4] = { 0, 2, 5, 8 };       // Verkehrsautos je Menüstufe Kein/Leicht/Mittel/Schwer (Spiel: 0/2/5/7)
     int g_trafficPorsches = 0;                    // Anteil Porsches im Verkehr in Prozent (0 = nur Verkehrsmodelle)
     int g_trafficOvertake = 0;                    // 1 = Verkehr überholt über die Gegenfahrbahn (Spiel), 0 = nie
+    int g_trafficFollowGap = 12;                  // Sollabstand zum Vordermann in m, Mitte zu Mitte (0 = Spiel: 2 m)
     // Lacke des Verkehrs (12.8): Farbe 0xRRGGBB mit Gewicht; leer = Zufallsfarbe des Spiels
     std::vector<std::pair<std::uint32_t, int>> g_trafficColours;
     int g_trafficColourRandom = 10;               // Anteil in Prozent, der die Zufallsfarbe des Spiels behält
@@ -791,6 +792,9 @@ namespace
         Log("Verkehr: Porsches %d %%", g_trafficPorsches);
         g_trafficOvertake = GetPrivateProfileIntA("Traffic", "Overtake", 0, ini) != 0;
         Log("Verkehr: Overtake %d", g_trafficOvertake);
+        g_trafficFollowGap = GetPrivateProfileIntA("Traffic", "FollowGap", 12, ini);
+        g_trafficFollowGap = g_trafficFollowGap <= 0 ? 0 : (g_trafficFollowGap < 3 ? 3 : (g_trafficFollowGap > 100 ? 100 : g_trafficFollowGap));
+        Log("Verkehr: FollowGap %d m (0 = Spiel)", g_trafficFollowGap);
         // Colours = RRGGBB:Gewicht, ... (Vorgabe: Lacke, wie sie um 2000 auf der Straße häufig waren)
         for (const auto & entry : ReadNameList(ini, "Traffic", "Colours",
                  "F2F2F0:18, 151515:17, B8BCC0:17, 75787C:12, 45484C:6, 9E1B1B:9, 2B4A80:7, 162444:5, "
@@ -3720,8 +3724,9 @@ namespace
     // Das Frontend zeichnet seinen 3D-Raum (Garage = Hauptmenü, Händler, Streckenwahl …) in FUN_004d2f30 mit der
     // View FRONT_END + 0xFC. Deren Kamerablock (+0xB8, Aufbau wie bei Game_ViewSetRotation/-Position) setzt das Spiel
     // im Menü nicht je Bild; LFSP schreibt dort die eigene Kamera hinein. Rechte Maustaste halten: Maus = Blick,
-    // W/A/S/D vor/zurück/seitlich, E/Q hoch/runter, Mausrad vor/zurück; Umschalt schnell, Strg langsam. Losgelassen
-    // bleibt die Kamera stehen. Mittlere Maustaste oder ein neuer 3D-Raum: zurück zur Kamera des Spiels.
+    // Tasten wie bei der Freecam (Numpad 8/5/4/6 vor/zurück/seitlich, 9/3 hoch/runter, 7/1 und / * Blick), Mausrad
+    // vor/zurück; Umschalt schnell, Strg langsam. Losgelassen bleibt die Kamera stehen. Numpad 0, mittlere Maustaste
+    // oder ein neuer 3D-Raum: zurück zur Kamera des Spiels.
     constexpr std::uintptr_t kFeDraw = 0x4D2F30;
     constexpr std::size_t kFeRoom = 0xE8;  // aktiver 3D-Raum (FE3DRoom), 0 = keiner
     constexpr std::size_t kFeView = 0xFC;  // View des 3D-Raums
@@ -4109,13 +4114,19 @@ namespace
         // derselbe Raum bleibt über mehrere Menüs bestehen (👤: Kamera blieb beim Menüwechsel stehen)
         void * screen = g_menuCamKeep ? nullptr : FeScreen(app);
         float * cam = view ? reinterpret_cast<float *>(view + kViewCam) : nullptr;
+        // Numpad 0: zurück zur Kamera des Spiels (wie bei der Freecam)
+        static bool resetDown = false;
+        if (KeyPressed(VK_NUMPAD0, resetDown) && m.active)
+        {
+            m.reset = true;
+        }
         if (view != m.view || room != m.room || screen != m.screen || m.reset)
         {
             if (m.active && view == m.view && cam)
             {
                 std::memcpy(cam, m.saved, sizeof(m.saved));
                 Log("Menuekamera: zurueck zur Kamera des Spiels (%s)",
-                    m.reset ? "mittlere Maustaste" : room != m.room ? "neuer 3D-Raum" : "anderes Menue");
+                    m.reset ? "Numpad 0 / mittlere Maustaste" : room != m.room ? "neuer 3D-Raum" : "anderes Menue");
             }
             m.active = false;
             m.reset = false;
@@ -4181,8 +4192,13 @@ namespace
         {
             POINT cursor = {};
             GetCursorPos(&cursor);
-            m.yaw += (cursor.x - m.anchor.x) * g_menuCamMouse * m.sideSign;
-            m.pitch = std::fmax(-89.0f, std::fmin(m.pitch - (cursor.y - m.anchor.y) * std::fabs(g_menuCamMouse), 89.0f));
+            // Blick: Maus, dazu Numpad / * links/rechts und 7/1 hoch/runter mit 90 Grad/s wie bei der Freecam
+            const float turn = 90.0f * dt;
+            const float keyYaw = (KeyHeld(VK_MULTIPLY) ? turn : 0.0f) - (KeyHeld(VK_DIVIDE) ? turn : 0.0f);
+            const float keyPitch = (KeyHeld(VK_NUMPAD7) ? turn : 0.0f) - (KeyHeld(VK_NUMPAD1) ? turn : 0.0f);
+            m.yaw += ((cursor.x - m.anchor.x) * g_menuCamMouse + keyYaw) * m.sideSign;
+            m.pitch = std::fmax(-89.0f, std::fmin(m.pitch - (cursor.y - m.anchor.y) * std::fabs(g_menuCamMouse) +
+                                                      keyPitch, 89.0f));
             if (cursor.x != m.anchor.x || cursor.y != m.anchor.y)
             {
                 SetCursorPos(m.anchor.x, m.anchor.y);
@@ -4195,9 +4211,10 @@ namespace
             {
                 speed *= 0.2f;
             }
-            mf = (KeyHeld('W') ? 1.0f : 0.0f) - (KeyHeld('S') ? 1.0f : 0.0f);
-            ms = (KeyHeld('D') ? 1.0f : 0.0f) - (KeyHeld('A') ? 1.0f : 0.0f);
-            mu = (KeyHeld('E') ? 1.0f : 0.0f) - (KeyHeld('Q') ? 1.0f : 0.0f);
+            // Bewegung wie bei der Freecam
+            mf = (KeyHeld(VK_NUMPAD8) ? 1.0f : 0.0f) - (KeyHeld(VK_NUMPAD5) || KeyHeld(VK_NUMPAD2) ? 1.0f : 0.0f);
+            ms = (KeyHeld(VK_NUMPAD6) ? 1.0f : 0.0f) - (KeyHeld(VK_NUMPAD4) ? 1.0f : 0.0f);
+            mu = (KeyHeld(VK_NUMPAD9) ? 1.0f : 0.0f) - (KeyHeld(VK_NUMPAD3) ? 1.0f : 0.0f);
             step = InterlockedExchange(&g_menuWheel, 0) / 120.0f * speed * 0.15f;
         }
 
@@ -5228,6 +5245,23 @@ namespace
         PatchBytes("Verkehr nicht ueber die Gegenfahrbahn", 0x401A21, kOld, kNew, sizeof(kOld));
     }
 
+    // 12.7b: Folgeregel (VERKEHR.md §4c). FUN_00401F20 erlaubt je Spur das Tempo des Vordermanns + (round(d) - 2) * k
+    // und hebt den Zuschlag für Verkehr und Polizei auf mindestens 1 an: der Folger ist immer schneller und fährt auf.
+    // Patch: Sollabstand G statt 2 m und keine Anhebung; unter G fährt der Folger das Tempo des Vordermanns
+    // (negative Zuschläge schneidet das Spiel weiter ab, also kein Rückwärtsfahren).
+    void InstallTrafficFollowGap()
+    {
+        const auto gap = static_cast<unsigned char>(g_trafficFollowGap);
+        // Fahrtrichtung +1: ADD EAX,-2 / TEST CL,0x28 / JZ +0A
+        static const unsigned char kOldFwd[] = { 0x83, 0xC0, 0xFE, 0xF6, 0xC1, 0x28, 0x74, 0x0A };
+        const unsigned char newFwd[] = { 0x83, 0xC0, static_cast<unsigned char>(-gap), 0xF6, 0xC1, 0x28, 0xEB, 0x0A };
+        // Fahrtrichtung -1: LEA EAX,[EDX+2] / JZ +08
+        static const unsigned char kOldBack[] = { 0x8D, 0x42, 0x02, 0x74, 0x08 };
+        const unsigned char newBack[] = { 0x8D, 0x42, gap, 0xEB, 0x08 };
+        PatchBytes("Verkehr Sollabstand vorwaerts", 0x4020A9, kOldFwd, newFwd, sizeof(kOldFwd));
+        PatchBytes("Verkehr Sollabstand rueckwaerts", 0x4020D6, kOldBack, newBack, sizeof(kOldBack));
+    }
+
     // 12.8: Lacke des Verkehrs (VERKEHR.md §3). Die Verkehrsschleife von FUN_004ECF00 würfelt vier Zufallsbytes
     // (FUN_00538040) und gibt sie als alle vier Farben (ARGB, wie car[N].colorconfig in fe_out.txt) an FUN_004EE3B0
     // (thiscall, ret 0x1C). LFSP leitet nur diesen Aufruf (0x4ED542) um und setzt eine Farbe aus [Traffic] Colours,
@@ -6137,7 +6171,7 @@ namespace
         std::string base = path;
         base.erase(base.find_last_of('.'));
         g_log = std::fopen((base + ".log").c_str(), "w");
-        Log("LFSP v8t gestartet");
+        Log("LFSP v8v gestartet");
 
         auto * exe = reinterpret_cast<unsigned char *>(GetModuleHandleA(nullptr));
         const auto * dos = reinterpret_cast<IMAGE_DOS_HEADER *>(exe);
@@ -6195,6 +6229,11 @@ namespace
         if (!g_trafficOvertake)
         {
             InstallTrafficOvertake();
+        }
+        // 12.7b: Verkehr hält Abstand zum Vordermann
+        if (g_trafficFollowGap > 0)
+        {
+            InstallTrafficFollowGap();
         }
         // 12.8: Lacke des Verkehrs
         if (!g_trafficColours.empty())

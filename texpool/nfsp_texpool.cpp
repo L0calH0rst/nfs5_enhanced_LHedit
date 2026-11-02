@@ -3,6 +3,9 @@
 // Im Rennen legt das Spiel den Pool mit FUN_00553fc0(0x1800000) = 24 MB an. Eine 1024²-Textur 8888
 // mit Mips braucht 5,6 MB; läuft der Pool über, stürzt FUN_00554ad0 ab (0x554AE6).
 // Die ASI ersetzt die Größe an beiden Aufrufstellen (und im Log-Text daneben) durch TexturePoolMB.
+// Dazu der Hauptspeicher „RAM“ (Pool 0): Sys_PlatformInit ruft Mem_InitPools(0x1800000, …) auf (push bei 0x4A541F),
+// ebenfalls fest 24 MB. Daraus legt das Spiel u. a. die Texturseiten der Autos als Fenster an (LoadTexPages ->
+// Sys_WindowCreateDefault); ist er voll, stürzt Car_BlitShape ab (0x444627). Größe aus RamPoolMB.
 
 #include <windows.h>
 
@@ -19,6 +22,11 @@ namespace
     // Adresse des imm32 von „push 0x1800000“: je Aufruf FUN_00553fc0 und das Argument der Log-Ausgabe danach
     constexpr std::uintptr_t kSites[] = {0x4679DB, 0x4679EA, 0x467F46, 0x467F55};
 
+    // imm32 von „push 0x1800000“ vor dem Aufruf Mem_InitPools in Sys_PlatformInit
+    constexpr std::uintptr_t kRamSite = 0x4A5420;
+    // Mem_gPoolTable: Eintrag 0 ist „RAM“, gesetzt erst durch Mem_InitPools
+    constexpr std::uintptr_t kPoolTable = 0x6B4F20;
+
     std::string g_logPath;
 
     void Log(const char* format, ...)
@@ -32,6 +40,40 @@ namespace
         va_end(args);
         std::fputc('\n', file);
         std::fclose(file);
+    }
+
+    void WriteImm32(std::uintptr_t site, std::uint32_t value)
+    {
+        DWORD old;
+        VirtualProtect(reinterpret_cast<void*>(site), 4, PAGE_EXECUTE_READWRITE, &old);
+        *reinterpret_cast<std::uint32_t*>(site) = value;
+        VirtualProtect(reinterpret_cast<void*>(site), 4, old, &old);
+    }
+
+    void PatchRam(const std::string& ini)
+    {
+        int megabytes = GetPrivateProfileIntA("General", "RamPoolMB", 64, ini.c_str());
+        if (megabytes < 24)
+            megabytes = 24;
+        if (megabytes > 512)
+            megabytes = 512;
+        if (megabytes == 24)
+            return;
+
+        if (*reinterpret_cast<std::uint32_t*>(kPoolTable) != 0)
+        {
+            Log("Hauptspeicher: schon angelegt, als die ASI geladen wurde, bleibt 24 MB");
+            return;
+        }
+        auto* value = reinterpret_cast<std::uint32_t*>(kRamSite);
+        if (*reinterpret_cast<std::uint8_t*>(kRamSite - 1) != 0x68 || *value != kOriginalSize)
+        {
+            Log("Stelle %08X hat unerwartete Bytes, Hauptspeicher nicht geändert", static_cast<unsigned>(kRamSite));
+            return;
+        }
+        WriteImm32(kRamSite, static_cast<std::uint32_t>(megabytes) << 20);
+        FlushInstructionCache(GetCurrentProcess(), nullptr, 0);
+        Log("Hauptspeicher: %d MB statt 24 MB", megabytes);
     }
 
     void Install(HMODULE self)
@@ -53,6 +95,8 @@ namespace
         }
 
         const std::string ini = base + ".ini";
+        PatchRam(ini);
+
         int megabytes = GetPrivateProfileIntA("General", "TexturePoolMB", 256, ini.c_str());
         if (megabytes < 24)
             megabytes = 24;
@@ -70,12 +114,7 @@ namespace
             }
         }
         for (std::uintptr_t site : kSites)
-        {
-            DWORD old;
-            VirtualProtect(reinterpret_cast<void*>(site), 4, PAGE_EXECUTE_READWRITE, &old);
-            *reinterpret_cast<std::uint32_t*>(site) = size;
-            VirtualProtect(reinterpret_cast<void*>(site), 4, old, &old);
-        }
+            WriteImm32(site, size);
         FlushInstructionCache(GetCurrentProcess(), nullptr, 0);
         Log("Texturpool im Rennen: %d MB statt 24 MB", megabytes);
     }
