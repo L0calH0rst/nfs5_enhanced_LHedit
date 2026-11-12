@@ -4611,6 +4611,80 @@ namespace dx11z
         return cached.Get();
     }
 
+    bool Driver::UploadRing(
+        const TlVertex * vertices,
+        std::size_t vertex_count,
+        const std::uint16_t * indices,
+        std::size_t index_count,
+        UINT & base_vertex,
+        UINT & first_index
+    )
+    {
+        if (vertex_count == 0 || index_count == 0 || vertex_count > RAW_VERTICES || index_count > RAW_INDICES)
+            return false;
+
+        // Both buffers start anew together, the draws already queued keep the old ones.
+        const bool wrap = m_VertexCursor + vertex_count > RAW_VERTICES || m_IndexCursor + index_count > RAW_INDICES;
+        if (wrap)
+        {
+            m_VertexCursor = 0;
+            m_IndexCursor = 0;
+        }
+        const D3D11_MAP map = wrap ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE;
+
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if (FAILED( m_Context->Map( m_VertexBuffer.Get(), 0, map, 0, &mapped ) ))
+        {
+            m_VertexCursor = RAW_VERTICES;
+            m_IndexCursor = RAW_INDICES;
+            return false;
+        }
+        std::memcpy( static_cast<TlVertex *>(mapped.pData) + m_VertexCursor, vertices, vertex_count * sizeof( TlVertex ) );
+        m_Context->Unmap( m_VertexBuffer.Get(), 0 );
+
+        if (FAILED( m_Context->Map( m_IndexBuffer.Get(), 0, map, 0, &mapped ) ))
+        {
+            m_VertexCursor = RAW_VERTICES;
+            m_IndexCursor = RAW_INDICES;
+            return false;
+        }
+        std::memcpy( static_cast<std::uint16_t *>(mapped.pData) + m_IndexCursor, indices, index_count * sizeof( std::uint16_t ) );
+        m_Context->Unmap( m_IndexBuffer.Get(), 0 );
+
+        base_vertex = static_cast<UINT>(m_VertexCursor);
+        first_index = static_cast<UINT>(m_IndexCursor);
+        m_VertexCursor += vertex_count;
+        m_IndexCursor += index_count;
+        return true;
+    }
+
+
+    void Driver::UploadDrawConstants(
+        const void * data,
+        std::size_t size
+    )
+    {
+        size = std::min( size, sizeof( DrawConstants ) );
+        // Unchanged since the last upload: most batches of a frame share their state, only the texture differs.
+        if (m_ConstantsValid && size == sizeof( DrawConstants ) && std::memcmp( &m_LastConstants, data, size ) == 0)
+            return;
+
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if (FAILED( m_Context->Map( m_DrawConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
+        {
+            m_ConstantsValid = false;
+            return;
+        }
+        std::memcpy( mapped.pData, data, size );
+        m_Context->Unmap( m_DrawConstants.Get(), 0 );
+
+        // A shorter block leaves the rest of the buffer undefined, the next upload compares against nothing.
+        m_ConstantsValid = size == sizeof( DrawConstants );
+        if (m_ConstantsValid)
+            std::memcpy( &m_LastConstants, data, size );
+    }
+
+
     void Driver::ApplyPipeline()
     {
         const auto & render = m_D3D.m_Render;
@@ -4727,12 +4801,7 @@ namespace dx11z
             }
         }
 
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-        if (SUCCEEDED( m_Context->Map( m_DrawConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
-        {
-            std::memcpy( mapped.pData, &constants, sizeof( constants ) );
-            m_Context->Unmap( m_DrawConstants.Get(), 0 );
-        }
+        UploadDrawConstants( &constants, sizeof( constants ) );
 
         // Water reflections (B15): the mirrored copy draws without headlight model and without edge split.
         if (m_ReflCapture)
@@ -5177,17 +5246,24 @@ namespace dx11z
             CaptureMirrorBatch();
         }
 
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-        if (SUCCEEDED( m_Context->Map( m_VertexBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
+        // The car reflections draw the indices of a car part batch once more, from the start of the buffer: such a
+        // batch starts the ring anew (a few per frame).
+        const bool car_reflection = m_CarLodMask != 0 && m_ConfigCarRefl > 0;
+        if (car_reflection)
         {
-            std::memcpy( mapped.pData, m_BatchVertices.data(), m_BatchVertices.size() * sizeof( TlVertex ) );
-            m_Context->Unmap( m_VertexBuffer.Get(), 0 );
+            m_VertexCursor = RAW_VERTICES;
+            m_IndexCursor = RAW_INDICES;
         }
-        if (SUCCEEDED( m_Context->Map( m_IndexBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
+        UINT base_vertex = 0;
+        UINT first_index = 0;
+        if (!UploadRing( m_BatchVertices.data(), m_BatchVertices.size(), m_BatchIndices.data(), m_BatchIndices.size(), base_vertex, first_index ))
         {
-            std::memcpy( mapped.pData, m_BatchIndices.data(), m_BatchIndices.size() * sizeof( std::uint16_t ) );
-            m_Context->Unmap( m_IndexBuffer.Get(), 0 );
+            m_BatchVertices.clear();
+            m_BatchIndices.clear();
+            m_BatchPrimitive = Primitive::NONE;
+            return;
         }
+        const UINT index_count = static_cast<UINT>(m_BatchIndices.size());
 
         D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 
@@ -5201,13 +5277,13 @@ namespace dx11z
         }
 
         m_Context->IASetPrimitiveTopology( topology );
-        m_Context->DrawIndexed( static_cast<UINT>(m_BatchIndices.size()), 0, 0 );
+        m_Context->DrawIndexed( index_count, first_index, static_cast<INT>(base_vertex) );
 
         if (edge_split)
         {
             m_EdgePass = 2;
             ApplyPipeline();
-            m_Context->DrawIndexed( static_cast<UINT>(m_BatchIndices.size()), 0, 0 );
+            m_Context->DrawIndexed( index_count, first_index, static_cast<INT>(base_vertex) );
         }
 
         // Water reflections (B15): the water part of a shore texture (alpha below the edge reference) joins the
@@ -5222,7 +5298,7 @@ namespace dx11z
             m_EdgePass = m_ReflWeightRtv ? 0 : 2;
             ++m_ReflShoreDraws;
             ApplyPipeline();
-            m_Context->DrawIndexed( static_cast<UINT>(m_BatchIndices.size()), 0, 0 );
+            m_Context->DrawIndexed( index_count, first_index, static_cast<INT>(base_vertex) );
             m_ShorePass = false;
 
             if (m_ReflWeightRtv && m_ReflWeightBlend)
@@ -5231,7 +5307,7 @@ namespace dx11z
                 m_Context->OMSetRenderTargets( 1, &weight, nullptr );
                 const float factor[4] = {};
                 m_Context->OMSetBlendState( m_ReflWeightBlend.Get(), factor, 0xFFFFFFFF );
-                m_Context->DrawIndexed( static_cast<UINT>(m_BatchIndices.size()), 0, 0 );
+                m_Context->DrawIndexed( index_count, first_index, static_cast<INT>(base_vertex) );
                 ID3D11RenderTargetView * frame = m_FrameView.Get();
                 m_Context->OMSetRenderTargets( 1, &frame, m_DepthView.Get() );
             }
@@ -5249,15 +5325,20 @@ namespace dx11z
             m_BackPass = true;
             m_EdgePass = 0;
             ApplyPipeline();
-            m_Context->DrawIndexed( static_cast<UINT>(m_BatchIndices.size()), 0, 0 );
+            m_Context->DrawIndexed( index_count, first_index, static_cast<INT>(base_vertex) );
             m_BackPass = false;
         }
 
         m_EdgePass = 0;
 
         // Car reflections (PLAN.md 9.12b): body parts of R3DCarLOD::Draw once more, with the reflection.
-        if (m_CarLodMask != 0 && m_ConfigCarRefl > 0)
+        if (car_reflection)
+        {
             CarReflBatch();
+            // It discarded the buffers for its own vertices.
+            m_VertexCursor = RAW_VERTICES;
+            m_IndexCursor = RAW_INDICES;
+        }
 
         m_BatchVertices.clear();
         m_BatchIndices.clear();
@@ -9914,28 +9995,16 @@ namespace dx11z
 
         const float one[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 
-        // Vertices, indices, constants, textures and samplers of a kept draw.
+        // Vertices, indices, constants, textures and samplers of a kept draw; where its vertices and indices lie.
+        UINT base_vertex = 0;
+        UINT first_index = 0;
         const auto upload = [&]( const MirrorBatch & batch )
         {
-            if (batch.m_Vertices.empty() || batch.m_Indices.empty() || batch.m_Vertices.size() > RAW_VERTICES ||
-                batch.m_Indices.size() > RAW_INDICES)
+            if (!UploadRing( batch.m_Vertices.data(), batch.m_Vertices.size(), batch.m_Indices.data(), batch.m_Indices.size(),
+                base_vertex, first_index ))
                 return false;
 
-            if (SUCCEEDED( m_Context->Map( m_VertexBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
-            {
-                std::memcpy( mapped.pData, batch.m_Vertices.data(), batch.m_Vertices.size() * sizeof( TlVertex ) );
-                m_Context->Unmap( m_VertexBuffer.Get(), 0 );
-            }
-            if (SUCCEEDED( m_Context->Map( m_IndexBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
-            {
-                std::memcpy( mapped.pData, batch.m_Indices.data(), batch.m_Indices.size() * sizeof( std::uint16_t ) );
-                m_Context->Unmap( m_IndexBuffer.Get(), 0 );
-            }
-            if (SUCCEEDED( m_Context->Map( m_DrawConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
-            {
-                std::memcpy( mapped.pData, batch.m_Constants.data(), std::min( batch.m_Constants.size(), sizeof( DrawConstants ) ) );
-                m_Context->Unmap( m_DrawConstants.Get(), 0 );
-            }
+            UploadDrawConstants( batch.m_Constants.data(), batch.m_Constants.size() );
 
             ID3D11ShaderResourceView * views[2] = { batch.m_Views[0], batch.m_Views[1] };
             ID3D11SamplerState * samplers[2] = { batch.m_Samplers[0], batch.m_Samplers[1] };
@@ -10015,7 +10084,7 @@ namespace dx11z
             }
             m_Context->RSSetState( raster.Get() );
 
-            m_Context->DrawIndexed( static_cast<UINT>(batch.m_Indices.size()), 0, 0 );
+            m_Context->DrawIndexed( static_cast<UINT>(batch.m_Indices.size()), first_index, static_cast<INT>(base_vertex) );
         }
 
         // The sky alone, the draws of the sky phase as the game made them (not mirrored): the composite looks up
@@ -10083,7 +10152,7 @@ namespace dx11z
                     m_Device->CreateBlendState( &desc, blend.Put() );
                 }
                 m_Context->OMSetBlendState( blend.Get(), one, 0xFFFFFFFF );
-                m_Context->DrawIndexed( static_cast<UINT>(batch.m_Indices.size()), 0, 0 );
+                m_Context->DrawIndexed( static_cast<UINT>(batch.m_Indices.size()), first_index, static_cast<INT>(base_vertex) );
             }
         }
         // Before the composite clears the water bit: open sky (stencil 0) next to the water for '[Water] EdgeFade',

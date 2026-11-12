@@ -789,6 +789,20 @@ namespace dx11z
         ComPtr<ID3D11Buffer> m_ClearConstants;
         ComPtr<ID3D11Buffer> m_VertexBuffer;
         ComPtr<ID3D11Buffer> m_IndexBuffer;
+        // Appends a batch to the vertex and index buffer ring (m_VertexCursor, m_IndexCursor); false when it does not fit.
+        bool UploadRing(
+            const TlVertex * vertices,
+            std::size_t vertex_count,
+            const std::uint16_t * indices,
+            std::size_t index_count,
+            UINT & base_vertex,
+            UINT & first_index
+        );
+        // Uploads the draw constants unless they equal the last upload (m_LastConstants, m_ConstantsValid).
+        void UploadDrawConstants(
+            const void * data,
+            std::size_t size
+        );
         ComPtr<ID3D11SamplerState> m_PresentSampler;
         ComPtr<ID3D11SamplerState> m_PointSampler;
         ComPtr<ID3D11BlendState> m_OpaqueBlend;
