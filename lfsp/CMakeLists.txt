@@ -1,5 +1,5 @@
 # lfsp.asi, the LFSP plugin (windows and roof, lights, traffic, racer list). dx11z finds it by module name.
-add_library( lfsp SHARED lfsp.cpp weather.cpp )
+add_library( lfsp SHARED lfsp.cpp weather.cpp coverage.cpp )
 
 set_target_properties( lfsp PROPERTIES
     PREFIX ""

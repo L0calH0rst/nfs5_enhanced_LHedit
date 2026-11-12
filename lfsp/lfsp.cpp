@@ -30,6 +30,11 @@ namespace lfsp_weather
     void Install(const char * ini, void (*log)(const char *, ...)); // weather.cpp
 }
 
+namespace lfsp_coverage
+{
+    void Install(const char * ini, const char * dir, void (*log)(const char *, ...)); // coverage.cpp
+}
+
 namespace
 {
     // ---- Adressen Porsche.exe v3.5 ----
@@ -351,7 +356,8 @@ namespace
     int g_trafficCount[4] = { 0, 2, 5, 8 };       // Verkehrsautos je Menüstufe Kein/Leicht/Mittel/Schwer (Spiel: 0/2/5/7)
     int g_trafficPorsches = 0;                    // Anteil Porsches im Verkehr in Prozent (0 = nur Verkehrsmodelle)
     int g_trafficOvertake = 0;                    // 1 = Verkehr überholt über die Gegenfahrbahn (Spiel), 0 = nie
-    int g_trafficFollowGap = 12;                  // Sollabstand zum Vordermann in m, Mitte zu Mitte (0 = Spiel: 2 m)
+    int g_trafficFollowGap = 6;                   // Mindestlücke zum Vordermann in m, Stoßstange zu Stoßstange (0 = Spiel)
+    int g_trafficFollowTime = 10;                 // zusätzliche Zeitlücke in 1/10 s (10 = 1 s × eigenes Tempo)
     // Lacke des Verkehrs (12.8): Farbe 0xRRGGBB mit Gewicht; leer = Zufallsfarbe des Spiels
     std::vector<std::pair<std::uint32_t, int>> g_trafficColours;
     int g_trafficColourRandom = 10;               // Anteil in Prozent, der die Zufallsfarbe des Spiels behält
@@ -792,9 +798,11 @@ namespace
         Log("Verkehr: Porsches %d %%", g_trafficPorsches);
         g_trafficOvertake = GetPrivateProfileIntA("Traffic", "Overtake", 0, ini) != 0;
         Log("Verkehr: Overtake %d", g_trafficOvertake);
-        g_trafficFollowGap = GetPrivateProfileIntA("Traffic", "FollowGap", 12, ini);
-        g_trafficFollowGap = g_trafficFollowGap <= 0 ? 0 : (g_trafficFollowGap < 3 ? 3 : (g_trafficFollowGap > 100 ? 100 : g_trafficFollowGap));
-        Log("Verkehr: FollowGap %d m (0 = Spiel)", g_trafficFollowGap);
+        g_trafficFollowGap = GetPrivateProfileIntA("Traffic", "FollowGap", 6, ini);
+        g_trafficFollowGap = g_trafficFollowGap <= 0 ? 0 : (g_trafficFollowGap < 2 ? 2 : (g_trafficFollowGap > 50 ? 50 : g_trafficFollowGap));
+        g_trafficFollowTime = GetPrivateProfileIntA("Traffic", "FollowTime", 10, ini);
+        g_trafficFollowTime = g_trafficFollowTime < 0 ? 0 : (g_trafficFollowTime > 40 ? 40 : g_trafficFollowTime);
+        Log("Verkehr: FollowGap %d m Luecke + FollowTime %d/10 s (0 = Spiel)", g_trafficFollowGap, g_trafficFollowTime);
         // Colours = RRGGBB:Gewicht, ... (Vorgabe: Lacke, wie sie um 2000 auf der Straße häufig waren)
         for (const auto & entry : ReadNameList(ini, "Traffic", "Colours",
                  "F2F2F0:18, 151515:17, B8BCC0:17, 75787C:12, 45484C:6, 9E1B1B:9, 2B4A80:7, 162444:5, "
@@ -5245,21 +5253,124 @@ namespace
         PatchBytes("Verkehr nicht ueber die Gegenfahrbahn", 0x401A21, kOld, kNew, sizeof(kOld));
     }
 
-    // 12.7b: Folgeregel (VERKEHR.md §4c). FUN_00401F20 erlaubt je Spur das Tempo des Vordermanns + (round(d) - 2) * k
-    // und hebt den Zuschlag für Verkehr und Polizei auf mindestens 1 an: der Folger ist immer schneller und fährt auf.
-    // Patch: Sollabstand G statt 2 m und keine Anhebung; unter G fährt der Folger das Tempo des Vordermanns
-    // (negative Zuschläge schneidet das Spiel weiter ab, also kein Rückwärtsfahren).
+    // 12.7b/B31: Folgeregel (VERKEHR.md §4c, BUGS.md B31). AI_ScoreCarsInLanes 0x401F20 gibt je Spur ein Höchsttempo
+    // = Tempo des Vordermanns + max(0, round(d) − 2) · k. d ist Mitte zu Mitte (AI_RouteDistExact), über ±12 m nur in
+    // 6-m-Abschnitten. Folgen: Verkehr ist bei jeder echten Lücke schneller als der Vordermann (bei Berührung
+    // d ≈ 4,5 m noch +0,33 m/s, hinter einem Bus mehr), und unter dem Sollabstand gibt es nichts, was ihn zurückfallen
+    // lässt. Der alte Byte-Patch (Sollabstand G statt 2) half nur halb: Mitte zu Mitte ohne Länge, bei 18 m (Abschnitt)
+    // noch +7,5 m/s, ab 12 m sofort Tempo des Vordermanns ohne Bremsweg, danach kein Zurückfallen.
+    // Hook an 0x402095 (nach der Fensterprüfung, vor der Zuschlagsrechnung): für Verkehr (Flag 0x10) Lücke Stoßstange
+    // zu Stoßstange (halbe Längen +0x3B0 beider Autos abziehen), Soll = FollowGap + Zeitlücke × eigenes Tempo,
+    // darüber Annäherung mit halber Bremsverzögerung (trafcfg [+0x1014]+0x80), darunter langsamer als der Vordermann,
+    // nie rückwärts. Gegner und Polizei rechnen wie das Spiel.
+    int g_followLogCount = 0;
+
+    void __cdecl TrafficFollowLimits(const std::uint8_t * self, const std::uint8_t * other, std::uint8_t * frame)
+    {
+        auto & outA = *reinterpret_cast<float *>(frame - 0x08); // rein: Abstand roh (AI_RouteDistExact), raus: Grenze A
+        auto & outB = *reinterpret_cast<float *>(frame - 0x14); // raus: Grenze B
+        const float kA = *reinterpret_cast<const float *>(frame - 0x0C);
+        const float kB = *reinterpret_cast<const float *>(frame - 0x10);
+        const float raw = outA;
+        const int dir = *reinterpret_cast<const std::int32_t *>(self + 0xEB0);
+        const float vLead = *reinterpret_cast<const float *>(other + 0xEC0);
+        const std::uint32_t flags = *reinterpret_cast<const std::uint32_t *>(self + 0x52C);
+        if ((flags & 0x10) == 0)
+        {
+            // wie das Spiel (0x402095..0x402115)
+            int s;
+            if (dir == 1)
+            {
+                s = static_cast<int>(std::lrint(raw)) - 2;
+                if ((flags & 0x28) != 0 && s < 1)
+                {
+                    s = 1;
+                }
+                if (s < 0)
+                {
+                    s = 0;
+                }
+            }
+            else
+            {
+                s = static_cast<int>(std::lrint(raw)) + 2;
+                if ((flags & 0x28) != 0 && s > 1)
+                {
+                    s = -1;
+                }
+                if (s > 0)
+                {
+                    s = 0;
+                }
+            }
+            outA = static_cast<float>(s) * kA + vLead;
+            outB = static_cast<float>(s) * kB + vLead;
+            return;
+        }
+        const float sign = dir == 1 ? 1.0f : -1.0f;
+        const float halfSelf = *reinterpret_cast<const float *>(self + 0x3B0);
+        const float halfOther = *reinterpret_cast<const float *>(other + 0x3B0);
+        const float vOwn = std::fabs(*reinterpret_cast<const float *>(self + 0xEC0));
+        const float vLeadF = sign * vLead;
+        const float gap = sign * raw - halfSelf - halfOther;
+        const float want = static_cast<float>(g_trafficFollowGap) + vOwn * static_cast<float>(g_trafficFollowTime) * 0.1f;
+        float brake = 3.0f;
+        const auto cfg = *reinterpret_cast<const std::uintptr_t *>(self + 0x1014);
+        if (cfg != 0)
+        {
+            brake = *reinterpret_cast<const float *>(cfg + 0x80);
+            const float boost = *reinterpret_cast<const float *>(self + 0x108C);
+            if (boost > 1.0f)
+            {
+                brake *= boost;
+            }
+        }
+        const float decel = std::clamp(0.5f * brake, 0.75f, 6.0f);
+        float vA = gap > want ? vLeadF + std::sqrt(2.0f * decel * (gap - want)) : vLeadF - 0.5f * (want - gap);
+        if (vA < 0.0f)
+        {
+            vA = 0.0f;
+        }
+        const float ratio = kA != 0.0f ? kB / kA : 0.45f;
+        float vB = vLeadF + (vA - vLeadF) * ratio;
+        if (vB < 0.0f)
+        {
+            vB = 0.0f;
+        }
+        outA = sign * vA;
+        outB = sign * vB;
+        if (g_followLogCount < 8 && (g_trafficMeasure || g_followLogCount < 3))
+        {
+            ++g_followLogCount;
+            Log("Verkehr Abstand: halbe Laengen %.2f/%.2f, Luecke %.1f m, Soll %.1f m, Bremse %.2f, Vordermann %.1f m/s, "
+                "eigen %.1f m/s -> %.1f m/s", halfSelf, halfOther, gap, want, brake, vLeadF, vOwn, vA);
+        }
+    }
+
+    // Ersetzt 0x402095 CMP ECX,1 / JNZ (5 Byte). ESI = eigenes Auto, EDI = Vordermann, EBP = Rahmen.
+    // Weiter bei 0x402118 mit den Flags von TEST [EDI+0xEA8],[EBP-0x2C] und EAX = Maske der eigenen Spur.
+    __declspec(naked) void TrafficFollowDetour()
+    {
+        __asm
+        {
+            push ebp
+            push edi
+            push esi
+            call TrafficFollowLimits
+            add esp, 12
+            mov eax, [ebp - 0x2C]
+            mov ecx, [edi + 0xEA8]
+            test ecx, eax
+            push 0x402118
+            ret
+        }
+    }
+
     void InstallTrafficFollowGap()
     {
-        const auto gap = static_cast<unsigned char>(g_trafficFollowGap);
-        // Fahrtrichtung +1: ADD EAX,-2 / TEST CL,0x28 / JZ +0A
-        static const unsigned char kOldFwd[] = { 0x83, 0xC0, 0xFE, 0xF6, 0xC1, 0x28, 0x74, 0x0A };
-        const unsigned char newFwd[] = { 0x83, 0xC0, static_cast<unsigned char>(-gap), 0xF6, 0xC1, 0x28, 0xEB, 0x0A };
-        // Fahrtrichtung -1: LEA EAX,[EDX+2] / JZ +08
-        static const unsigned char kOldBack[] = { 0x8D, 0x42, 0x02, 0x74, 0x08 };
-        const unsigned char newBack[] = { 0x8D, 0x42, gap, 0xEB, 0x08 };
-        PatchBytes("Verkehr Sollabstand vorwaerts", 0x4020A9, kOldFwd, newFwd, sizeof(kOldFwd));
-        PatchBytes("Verkehr Sollabstand rueckwaerts", 0x4020D6, kOldBack, newBack, sizeof(kOldBack));
+        static const unsigned char kOld[] = { 0x83, 0xF9, 0x01, 0x75, 0x2A }; // CMP ECX,1 / JNZ 0x4020C4
+        PatchJump("Verkehr Abstand (Luecke + Zeitluecke)", 0x402095, kOld, sizeof(kOld),
+                  reinterpret_cast<void *>(&TrafficFollowDetour));
     }
 
     // 12.8: Lacke des Verkehrs (VERKEHR.md §3). Die Verkehrsschleife von FUN_004ECF00 würfelt vier Zufallsbytes
@@ -6171,7 +6282,7 @@ namespace
         std::string base = path;
         base.erase(base.find_last_of('.'));
         g_log = std::fopen((base + ".log").c_str(), "w");
-        Log("LFSP v8v gestartet");
+        Log("LFSP v8w gestartet");
 
         auto * exe = reinterpret_cast<unsigned char *>(GetModuleHandleA(nullptr));
         const auto * dos = reinterpret_cast<IMAGE_DOS_HEADER *>(exe);
@@ -6191,6 +6302,7 @@ namespace
         StartWeatherLog();
         StartStateLog();
         g_soundDir = base.substr(0, base.find_last_of("\\/") + 1);
+        lfsp_coverage::Install((base + ".ini").c_str(), g_soundDir.c_str(), &Log);
 
         static const unsigned char kLoadBytes[]    = { 0x81, 0xEC, 0xB4, 0x00, 0x00, 0x00 };
         static const unsigned char kUpdateBytes[]  = { 0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x8C, 0x00, 0x00, 0x00 };
