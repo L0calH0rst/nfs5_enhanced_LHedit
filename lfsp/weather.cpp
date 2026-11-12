@@ -58,6 +58,13 @@ namespace
     constexpr unsigned kStrRain     = 64002;
     constexpr unsigned kStrSnow     = 64003;
     constexpr unsigned kStrHelp     = 64004;
+    constexpr unsigned kStrRandom   = 64005;
+    constexpr unsigned kStrTimeLabel = 64006;
+    constexpr unsigned kStrDay      = 64007;
+    constexpr unsigned kStrNight    = 64008;
+    constexpr unsigned kStrTimeHelp = 64009;
+    constexpr std::uintptr_t kSelectSpec = 0x475D70; // Trk_SelectTrackSpec, cdecl(weather, time), aus R_InitRace
+    constexpr std::uintptr_t kTimeVar    = 0x657A30; // TIME (Nachtflag), wird in Trk_DefaultTrackSpec ins Spec kopiert
     struct Text
     {
         const char * en;
@@ -68,15 +75,25 @@ namespace
         { "original", "Original" },
         { "rain", "Regen" },
         { "snow", "Schnee" },
-        { "Choose the weather: as on the track, rain or snow.",
-          "Wetter w\xE4hlen: wie auf der Strecke, Regen oder Schnee." }, // Texte der FE in Windows-1252
+        { "Choose the weather: as on the track, rain, snow or random.",
+          "Wetter w\xE4hlen: wie auf der Strecke, Regen, Schnee oder Zufall." }, // Texte der FE in Windows-1252
+        { "random", "Zufall" },
+        { "time of day", "Tageszeit" },
+        { "day", "Tag" },
+        { "night", "Nacht" },
+        { "Choose the time of day: as on the track, day, night or random.",
+          "Tageszeit w\xE4hlen: wie auf der Strecke, Tag, Nacht oder Zufall." },
     };
 
     // ---- Einstellungen ----
-    int g_mode = 0;              // 0 Original, 1 Regen, 2 Schnee
+    int g_mode = 0;              // Menüwahl: 0 Original, 1 Regen, 2 Schnee, 3 Zufall
+    int g_effMode = 0;           // gilt im Rennen: 0…2 (bei Zufall je Rennstart gewürfelt)
+    int g_timeMode = 0;          // Menüwahl: 0 Original, 1 Tag, 2 Nacht, 3 Zufall
     int g_menu = 1;
     std::string g_posLocation = "377,71"; // unter „records…“
     std::string g_posQuick;      // leer = kein Eintrag im Schnellen Rennen
+    std::string g_posTimeLocation = "377,95"; // unter „Wetter“
+    std::string g_posTimeQuick;
     float g_rainAmount = 0.8f;
     float g_snowAmount = 0.8f;
     int g_coverOn = 1;
@@ -339,7 +356,7 @@ namespace
             g_logTick = now;
             Log("Wetter: Modus %d, Regen %.2f, Schnee %.2f, Abdeckung %.2f (%s%s, %d Flaechen, darueber %.1f m), "
                 "Kamera %.1f %.1f %.1f, %.0f km/h",
-                g_mode, g_lastRain, g_lastSnow, g_cover, probe.valid ? (probe.covered ? "bedeckt" : "offen") : "-",
+                g_effMode, g_lastRain, g_lastSnow, g_cover, probe.valid ? (probe.covered ? "bedeckt" : "offen") : "-",
                 ahead.covered ? " voraus" : "", probe.surfaces, probe.above, probe.pos[0], probe.pos[1], probe.pos[2],
                 std::sqrt(g_coverVel[0] * g_coverVel[0] + g_coverVel[2] * g_coverVel[2]) * 3.6f);
         }
@@ -359,11 +376,11 @@ namespace
     {
         float v = SkyValue(sky, kSkyLerpRain);
         UpdateCover();
-        if (g_mode == 1)
+        if (g_effMode == 1)
         {
             v = g_rainAmount;
         }
-        else if (g_mode == 2)
+        else if (g_effMode == 2)
         {
             v = 0.0f;
         }
@@ -375,11 +392,11 @@ namespace
     {
         float v = SkyValue(sky, kSkyLerpSnow);
         UpdateCover();
-        if (g_mode == 1)
+        if (g_effMode == 1)
         {
             v = 0.0f;
         }
-        else if (g_mode == 2)
+        else if (g_effMode == 2)
         {
             v = g_snowAmount;
         }
@@ -496,26 +513,106 @@ namespace
         }
     }
 
-    // ---- Menü: Accessor Track1.Weather ----
+    // ---- Menü: Accessoren Track1.Weather und Track1.TimeOfDay ----
     // Wie Track1.Traffic in FEdaTrack__Initialize: FELocalizedTextAccessor mit nullterminierter Liste von Text-IDs,
     // aktueller Eintrag +0x18, Rückruf +0x10 (cdecl(accessor)) bei jeder Wahl (FEPositionableAccessor__SetCurrent).
     int g_weatherStrings[] = { static_cast<int>(kStrOriginal), static_cast<int>(kStrRain),
-                               static_cast<int>(kStrSnow), 0 };
+                               static_cast<int>(kStrSnow), static_cast<int>(kStrRandom), 0 };
+    int g_timeStrings[] = { static_cast<int>(kStrOriginal), static_cast<int>(kStrDay),
+                            static_cast<int>(kStrNight), static_cast<int>(kStrRandom), 0 };
     void * g_acc = nullptr;
+    void * g_accTime = nullptr;
     bool g_menuReady = false;
+
+    // Wahl 3 = Zufall: je Rennstart neu würfeln (SelectSpecHook). Sonst gilt die Wahl selbst.
+    unsigned g_rng = 0;
+    unsigned Roll(unsigned n)
+    {
+        if (!g_rng)
+        {
+            g_rng = timeGetTime() | 1u;
+        }
+        g_rng = g_rng * 1664525u + 1013904223u;
+        return (g_rng >> 16) % n;
+    }
 
     void __cdecl OnWeatherChanged(void * acc)
     {
         const int mode = At<int>(acc, 0x18);
-        if (mode == g_mode || mode < 0 || mode > 2)
+        if (mode == g_mode || mode < 0 || mode > 3)
         {
             return;
         }
         g_mode = mode;
+        g_effMode = mode == 3 ? 0 : mode;
         char text[8] = {};
         std::snprintf(text, sizeof(text), "%d", mode);
         WritePrivateProfileStringA("Weather", "Mode", text, g_ini.c_str());
         Log("Wetter: Menue Modus %d", mode);
+    }
+
+    void __cdecl OnTimeChanged(void * acc)
+    {
+        const int mode = At<int>(acc, 0x18);
+        if (mode == g_timeMode || mode < 0 || mode > 3)
+        {
+            return;
+        }
+        g_timeMode = mode;
+        char text[8] = {};
+        std::snprintf(text, sizeof(text), "%d", mode);
+        WritePrivateProfileStringA("Weather", "TimeMode", text, g_ini.c_str());
+        Log("Wetter: Menue Tageszeit %d", mode);
+    }
+
+    // Trk_SelectTrackSpec(weather, time) läuft einmal je Rennstart (R_InitRace) vor Sky_Load/R_WeatherCreate.
+    // Die Strecken-Spec-Datei fehlt im Spiel, Trk_DefaultTrackSpec übernimmt TIME aus 0x657A30 (Nachtflag).
+    using SelectSpecFn = void (__cdecl *)(int weather, int time);
+    SelectSpecFn g_origSelectSpec = nullptr;
+
+    // Trk_BWorldInit löscht das Nachtflag (Trk_ClearNightFlag 0x4B68E7: mov byte [0x628A28],0), danach setzen
+    // Streckenschichten 0x8002/0x8003/0x8011 es wieder. Bei „Nacht“ bleibt es nach dem Löschen an.
+    int g_nightForce = -1;
+    void __cdecl ClearNightHook()
+    {
+        *reinterpret_cast<unsigned char *>(0x628A28) = g_nightForce == 1 ? 1 : 0;
+    }
+
+    void __cdecl SelectSpecHook(int weather, int time)
+    {
+        g_nightForce = -1;
+        if (g_mode == 3)
+        {
+            g_effMode = static_cast<int>(Roll(3));
+            Log("Wetter: Zufall -> Modus %d", g_effMode);
+        }
+        if (g_timeMode != 0)
+        {
+            const int night = g_timeMode == 3 ? static_cast<int>(Roll(2)) : g_timeMode - 1;
+            Log("Wetter: Tageszeit %s (Wahl %d, Spiel %d)", night ? "Nacht" : "Tag", g_timeMode, time);
+            g_nightForce = night;
+            time = night;
+            *reinterpret_cast<int *>(kTimeVar) = night;
+        }
+        g_origSelectSpec(weather, time);
+    }
+
+    void * MakeAccessor(const char * name, int * strings, void (__cdecl * changed)(void *), int value)
+    {
+        using AllocFn = void * (__cdecl *)(unsigned size, unsigned pool);
+        using CtorFn = void * (__thiscall *)(void * mem, const char * name, unsigned key, int * table,
+                                            const char * group, void (__cdecl * changed)(void *), int extra);
+        void * mem = reinterpret_cast<AllocFn>(kMemAllocIn)(0x2C, *reinterpret_cast<unsigned *>(kFePool));
+        if (!mem)
+        {
+            return nullptr;
+        }
+        void * acc = reinterpret_cast<CtorFn>(kAccCtorCount)(mem, name, 0, strings, nullptr, changed, 0);
+        if (acc)
+        {
+            At<int>(acc, 0x18) = value;
+        }
+        return acc;
     }
 
     void __fastcall TrackInitHook(void * self)
@@ -526,27 +623,24 @@ namespace
         {
             return;
         }
-        using AllocFn = void * (__cdecl *)(unsigned size, unsigned pool);
-        using CtorFn = void * (__thiscall *)(void * mem, const char * name, unsigned key, int * table,
-                                            const char * group, void (__cdecl * changed)(void *), int extra);
-        void * mem = reinterpret_cast<AllocFn>(kMemAllocIn)(0x2C, *reinterpret_cast<unsigned *>(kFePool));
-        if (!mem)
+        g_acc = MakeAccessor("Track1.Weather", g_weatherStrings, &OnWeatherChanged, g_mode);
+        g_accTime = MakeAccessor("Track1.TimeOfDay", g_timeStrings, &OnTimeChanged, g_timeMode);
+    }
+
+    void DestroyAccessor(void *& acc)
+    {
+        if (acc)
         {
-            return;
+            using DtorFn = void (__thiscall *)(void * self, int flags);
+            reinterpret_cast<DtorFn>((*reinterpret_cast<std::uintptr_t **>(acc))[0])(acc, 1);
+            acc = nullptr;
         }
-        g_acc = reinterpret_cast<CtorFn>(kAccCtorCount)(mem, "Track1.Weather", 0, g_weatherStrings, nullptr,
-                                                         &OnWeatherChanged, 0);
-        At<int>(g_acc, 0x18) = g_mode;
     }
 
     void __fastcall TrackCleanupHook(void * self)
     {
-        if (g_acc)
-        {
-            using DtorFn = void (__thiscall *)(void * self, int flags);
-            reinterpret_cast<DtorFn>((*reinterpret_cast<std::uintptr_t **>(g_acc))[0])(g_acc, 1);
-            g_acc = nullptr;
-        }
+        DestroyAccessor(g_acc);
+        DestroyAccessor(g_accTime);
         using CleanupFn = void (__thiscall *)(void * self);
         reinterpret_cast<CleanupFn>(kTrackCleanup)(self);
     }
@@ -583,9 +677,10 @@ namespace
         return line.size() > k && _strnicmp(line.c_str(), key, k) == 0 && line[k] == '=' ? line.substr(k + 1) : "";
     }
 
-    bool BuildLayout(std::string & text, const char * templ, const std::string & pos)
+    bool BuildLayout(std::string & text, const char * templ, const std::string & pos, const char * accessor,
+                     unsigned labelId, unsigned helpId)
     {
-        if (text.find("accessor=Track1.Weather") != std::string::npos)
+        if (text.find(std::string("accessor=") + accessor) != std::string::npos)
         {
             return false;
         }
@@ -632,15 +727,15 @@ namespace
             }
             else if (!LineValue(l, "accessor").empty())
             {
-                l = "accessor=Track1.Weather";
+                l = std::string("accessor=") + accessor;
             }
             else if (!LineValue(l, "stringID").empty())
             {
-                l = "stringID=" + std::to_string(kStrLabel);
+                l = "stringID=" + std::to_string(labelId);
             }
             else if (!LineValue(l, "helptext").empty())
             {
-                l = "helptext=" + std::to_string(kStrHelp);
+                l = "helptext=" + std::to_string(helpId);
             }
             else if (!LineValue(l, "name").empty())
             {
@@ -677,25 +772,37 @@ namespace
         }
         const char * templ = nullptr;
         const std::string * pos = nullptr;
+        const std::string * posTime = nullptr;
         if (EndsWith(path, "location.lay"))
         {
             templ = "Track1.Direction(SHORT)"; // gleiche Zeile auf der linken Seite
             pos = &g_posLocation;
+            posTime = &g_posTimeLocation;
         }
         else if (EndsWith(path, "QuickRace.lay"))
         {
             templ = "Game.NumOpponents";
             pos = &g_posQuick;
+            posTime = &g_posTimeQuick;
         }
-        if (!templ || pos->empty())
+        if (!templ || (pos->empty() && posTime->empty()))
         {
             return block;
         }
         const int size = At<int>(block, static_cast<std::size_t>(-0xC));
         std::string text(static_cast<const char *>(block), static_cast<std::size_t>(size > 0 ? size : 0));
-        if (!BuildLayout(text, templ, *pos))
+        bool changed = false;
+        if (!pos->empty())
         {
-            Log("Wetter: %s: Vorbild %s nicht gefunden oder Eintrag schon da", path, templ);
+            changed = BuildLayout(text, templ, *pos, "Track1.Weather", kStrLabel, kStrHelp) || changed;
+        }
+        if (!posTime->empty())
+        {
+            changed = BuildLayout(text, templ, *posTime, "Track1.TimeOfDay", kStrTimeLabel, kStrTimeHelp) || changed;
+        }
+        if (!changed)
+        {
+            Log("Wetter: %s: Vorbild %s nicht gefunden oder Eintraege schon da", path, templ);
             return block;
         }
         using AllocFn = void * (__cdecl *)(const char * name, int size, unsigned pool);
@@ -736,10 +843,15 @@ void lfsp_weather::Install(const char * ini, LogFn log)
         return;
     }
     g_mode = GetPrivateProfileIntA("Weather", "Mode", 0, ini);
-    g_mode = g_mode < 0 || g_mode > 2 ? 0 : g_mode;
+    g_mode = g_mode < 0 || g_mode > 3 ? 0 : g_mode;
+    g_effMode = g_mode == 3 ? 0 : g_mode;
+    g_timeMode = GetPrivateProfileIntA("Weather", "TimeMode", 0, ini);
+    g_timeMode = g_timeMode < 0 || g_timeMode > 3 ? 0 : g_timeMode;
     g_menu = GetPrivateProfileIntA("Weather", "Menu", 1, ini);
     g_posLocation = ReadString(ini, "MenuPosLocation", "377,71");
     g_posQuick = ReadString(ini, "MenuPosQuickRace", "");
+    g_posTimeLocation = ReadString(ini, "MenuPosTimeLocation", "377,95");
+    g_posTimeQuick = ReadString(ini, "MenuPosTimeQuickRace", "");
     g_rainAmount = ReadFloat(ini, "RainAmount", "0.8", 0.0f, 1.0f);
     g_snowAmount = ReadFloat(ini, "SnowAmount", "0.8", 0.0f, 1.0f);
     g_coverOn = GetPrivateProfileIntA("Weather", "Cover", 1, ini);
@@ -754,9 +866,9 @@ void lfsp_weather::Install(const char * ini, LogFn log)
     g_windStart = ReadFloat(ini, "DropWindStart", "30", 0.0f, 400.0f);
     g_windFull = ReadFloat(ini, "DropWindFull", "150", 0.0f, 400.0f);
     g_logOn = GetPrivateProfileIntA("Weather", "Log", 0, ini);
-    Log("Wetter: Modus %d, Menue %d, Regen %.2f, Schnee %.2f, Abdeckung %d (%.1f s), Tropfen %d (Wind %.2f, %.0f-%.0f km/h, "
+    Log("Wetter: Modus %d, Tageszeit %d, Menue %d, Regen %.2f, Schnee %.2f, Abdeckung %d (%.1f s), Tropfen %d (Wind %.2f, %.0f-%.0f km/h, "
         "Rutschen %.2f)",
-        g_mode, g_menu, g_rainAmount, g_snowAmount, g_coverOn, g_coverFade, g_dropsOn, g_dropWind, g_windStart,
+        g_mode, g_timeMode, g_menu, g_rainAmount, g_snowAmount, g_coverOn, g_coverFade, g_dropsOn, g_dropWind, g_windStart,
         g_windFull, g_dropSlide);
 
     static const unsigned char kSkyBytes[] = { 0x51, 0x56, 0x8B, 0xF1, 0x8B, 0x46, 0x50 };
@@ -765,6 +877,18 @@ void lfsp_weather::Install(const char * ini, LogFn log)
     if (g_dropsOn)
     {
         PatchCall("Scheibentropfen", kDropsTickCall, kDropsTick, reinterpret_cast<void *>(&DropsTickHook));
+    }
+    if (true) // immer: die Wahl kann im Menü wechseln
+    {
+        static const unsigned char kSelectBytes[] = { 0x83, 0xEC, 0x10, 0x8B, 0x44, 0x24, 0x14 };
+        InstallHook("Rennstart-Spec (Zufall, Tageszeit)", kSelectSpec, kSelectBytes, sizeof(kSelectBytes),
+                    reinterpret_cast<void *>(&SelectSpecHook), reinterpret_cast<void **>(&g_origSelectSpec));
+    }
+    {
+        static const unsigned char kClearBytes[] = { 0xC6, 0x05, 0x28, 0x8A, 0x62, 0x00, 0x00 };
+        static void * dummy = nullptr;
+        InstallHook("Nachtflag loeschen", 0x4B68E7, kClearBytes, sizeof(kClearBytes),
+                    reinterpret_cast<void *>(&ClearNightHook), &dummy);
     }
     if (g_menu)
     {
