@@ -9,11 +9,11 @@
 For general errors, base setup explanations, or core troubleshooting, please refer to the original [nfs5_enhanced repository](https://github.com/iArtorias/nfs5_enhanced) first.
 
 ### LHedit Enhancements (`nfs5_enhanced_LHedit`)
-Unlike the original mod which intentionally kept vanilla visuals unchanged, **LHedit** actively expands the visual and features of the game. Built on top of NFS5 Enhanced v1.2.0, LHedit enhances `dx11z.dll` with real-time player and opponent headlight illumination (including high beams), tail/brake/signal light glows, real-time water reflections, special alpha edge (`B4`) and back-face geometry (`B8`) passes, as well as extended Hor+ widescreen sky and world culling hooks.
+Unlike the original mod which intentionally kept vanilla visuals unchanged, **LHedit** actively expands the visual and features of the game. Built on top of NFS5 Enhanced v1.3.0, LHedit enhances `dx11z.dll` with real-time player and opponent headlight illumination (including high beams), tail/brake/signal light glows, real-time water reflections, special alpha edge (`B4`) and back-face geometry (`B8`) passes, as well as extended Hor+ widescreen sky and world culling hooks.
 For new features, the additional "Love for Speed Porsche" lfsp.asi is used. This one is exclusive for the nfs5_enhanced_LHedit version.
 
 > [!NOTE]
-> **Pipeline Architecture Note:** LHedit intentionally bypasses the v1.2.0 performance state-caching and ring-buffer streaming rewrite for pipeline execution (`ApplyPipeline` / `Flush`). Because LHedit's extra rendering passes (headlights, light glows, water reflections, B4 alpha edge, B8 back-face) bind state and buffers outside of the v1.2.0 state cache assumptions, LHedit uses full state rebinding and per-draw buffer discards to guarantee render state correctness and stability across all custom passes.
+> **Pipeline Architecture Note:** LHedit does not use the v1.2.0 state cache for pipeline execution (`ApplyPipeline` / `Flush`). Because LHedit's extra rendering passes (headlights, light glows, water reflections, car reflections, B4 alpha edge, B8 back-face) bind state outside of the v1.2.0 state cache assumptions, LHedit rebinds the full render state. Since 1.3.0-LH.2 the batches go into its own vertex and index ring, and the draw constants are only uploaded when they change.
 > If not stated otherwise, this fork functions exactly like the original nfs5_enhanced
 
 ---
@@ -38,6 +38,7 @@ For new features, the additional "Love for Speed Porsche" lfsp.asi is used. This
 | Pop-up flash & high beam glow | Pop-up headlights flash with the high beam key; the lens flare of your own headlights grows with the high beam (`HeadlightsFlashPopUps`, `HeadlightsHighGlow`). |
 | Signals & third brake light | Rear turn signals blink in sync with the front ones, the third brake light only lights when braking, damaged lamps cast no glow (`SignalsInSync`, `ThirdBrakeLightBrakingOnly`). |
 | Skid marks (B22) | Skid marks are drawn slightly towards the camera so they no longer vanish under the road surface (`SkidDepthBias`). |
+| Car reflections (experimental) | A reflection pass over the car body with Fresnel, blur and matte parts (cloth tops, tyres), off by default (`[CarReflections]` in `lfsp.ini`). |
 | Damage gauge lines (B18) | Lines are widened to the game's 640x480 pixel size, so the colour gradient of the HUD damage gauge is a solid bar at high resolutions. |
 
 ### Widescreen & Culling Enhancements
@@ -77,12 +78,28 @@ For new features, the additional "Love for Speed Porsche" lfsp.asi is used. This
 | Realistic paint | Traffic uses typical car colours with weights instead of random colours (`Colours`, `ColourRandom`). |
 | No reckless overtaking | Traffic can be kept on its side of the road, no driving side by side and no crashes with oncoming cars (`Overtake = 0`). |
 | More than 9 cars | Raises the car limit of a race up to 16 (`[Cars] MaxCars`); saved replays keep the first 9 cars. |
+| Keeps distance (B31) | Traffic keeps a gap to the car in front, bumper to bumper with the length of buses and trucks, plus a time gap that grows with speed. The game let traffic close up and push the car in front (`FollowGap`, `FollowTime`). |
+
+### Weather (LFSP)
+
+| Feature | What it does |
+|---|---|
+| Weather menu | A "Weather" entry (original, rain, snow) in the track selection of the quick race (`[Weather] Menu`). |
+| Rain and snow strength | Rain and snow over the whole track with an adjustable strength (`RainAmount`, `SnowAmount`). |
+| Cover | No rain or snow under bridges and in tunnels (`Cover*`). |
+| Windshield drops | The drops on the windshield run off with the airflow when driving (`Drops`, `DropWind*`). |
+
+### Sound
+
+| Feature | What it does |
+|---|---|
+| Stereo on mirrored tracks | On mirrored tracks a car passing on the left was heard on the right, the game mirrored the sound twice (`[Audio] MirrorPanFix` in `nfs5_enhanced.ini`, also sent upstream as a pull request). |
 
 ### HD Texture Framework
 
 | Feature | What it does |
 |---|---|
-| Larger texture pool | `nfsp_texpool.asi` enlarges the in-race texture pool so large HD textures do not crash the game (`TexturePoolMB`). |
+| Larger texture pool | `nfsp_texpool.asi` enlarges the in-race texture pool so large HD textures do not crash the game (`TexturePoolMB`), and the main memory pool "RAM" (`RamPoolMB`). |
 | Texture LOD bias & forced mips | Against shimmering of fine textures at grazing angles: `[World] TextureLodBias` and `ForceMips` in `lfsp.ini`. |
 
 The HD textures themselves and the tools to make them are not part of this repository.
@@ -93,6 +110,7 @@ The HD textures themselves and the tools to make them are not part of this repos
 |---|---|
 | Menu list scrolling | Lists in the menus (cars, paints, tracks) scroll with the mouse wheel over the list and with the arrow, page and home/end keys. The wheel over a closed drop down list picks the next or previous entry. Settings in `[Menu]`. |
 | Roof key in the showroom | The roof key can also open and close the roof in the menu (`RoofKeyInMenu`). |
+| Menu camera | Hold the right mouse button in the 3D rooms of the menu (garage, dealer, track selection) to move the camera freely with the mouse and `W`/`A`/`S`/`D`/`Q`/`E`; the turntable stops meanwhile (`[Camera] MenuCam*`). |
 
 ---
 
@@ -140,6 +158,7 @@ Everything is set in `nfs5_enhanced.ini`, and every setting is explained in the 
 | `[Controller]` | SDL3 gamepads, rumble, dead zones, default bindings. |
 | `[Menu]` | Mouse wheel and key scrolling of the menu lists. |
 | `[Movie]` | Hands the movie frames to the DX11 driver, which enlarges them. |
+| `[Audio]` | Stereo fix for mirrored tracks. |
 
 The LHedit settings are in `lfsp.ini` of LFSP, every setting is explained in the file:
 
@@ -153,6 +172,9 @@ The LHedit settings are in `lfsp.ini` of LFSP, every setting is explained in the
 | `[Traffic]` | Amount, models, Porsches, paint and overtaking of traffic. |
 | `[Cars]` | Car limit of a race. |
 | `[Damage]` | Exhaust smoke on engine damage. |
+| `[CarReflections]` | Experimental reflection pass over the car body (off by default). |
+| `[Weather]` | Weather menu, rain and snow strength, cover under bridges, windshield drops. |
+| `[SimTrace]`, `[Debug]`, `[Coverage]` | Measuring tools for reverse engineering (field access trace, forced police, weather and state logs, function coverage); all off by default. |
 
  A `[Lights]` key missing there is still read from `[Dx11]` of `nfs5_enhanced.ini`.
 

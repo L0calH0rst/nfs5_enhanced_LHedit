@@ -1,11 +1,29 @@
 # Changelog
 
-## 1.3.0-LH.2 (2026-11-02)
+## 1.3.0-LH.2 (2026-11-12)
 
 LHedit build on top of upstream 1.3.0 plus the merged pull requests up to `8b7acf6` (#21, #23, #25 to #31).
 
 ### LHedit
 
+- Stereo on mirrored tracks: a car passing on the left was heard on the right, because the game mirrored
+  the sound listener and the car positions. `[Audio] MirrorPanFix` in `nfs5_enhanced.ini`, on by default
+  (also sent upstream as a pull request).
+- Traffic keeps its distance (B31): the game let traffic always drive a bit faster than the car in front,
+  so it closed up and pushed buses and cars ahead of it. LFSP keeps a gap bumper to bumper, with the length
+  of the car in front, plus a time gap (`[Traffic] FollowGap`, `FollowTime`).
+- Weather in the race (LFSP `[Weather]`): a weather entry (original, rain, snow) in the track selection,
+  rain and snow strength, no rain under bridges and in tunnels, windshield drops that run off with the airflow.
+- Menu camera (LFSP `[Camera] MenuCam*`): hold the right mouse button in the 3D rooms of the menu to move
+  the camera freely; the turntable stops meanwhile.
+- Car reflections (dx11z, `[CarReflections]` in `lfsp.ini`): measurement of the game's environment layer and
+  an own reflection pass over the car body with Fresnel, blur and matte parts. Experimental, off by default.
+- dx11z: batches go into a vertex and index ring, draw constants are only uploaded when they change; the water
+  reflection reads stencil and depth single sampled; skid marks in their own batches; GPU timing in the measure log.
+- `nfsp_texpool`: `RamPoolMB` enlarges the main memory pool "RAM".
+- LFSP measuring tools for reverse engineering, all off by default: `[SimTrace]` (field access of the car
+  simulation data), `[Debug]` `ForceCops`, `WeatherLog`, `StateLog`, and `[Coverage]` (first call of each
+  function with caller and game state).
 - Exponential fog with the eye depth (#23) in the LHedit scene shader as well, the water reflection
   fogs the reflected point.
 - Essentials V2 (#21) is included, but `GameplayRedirect = 0` in the shipped INI: LFSP reads the car
