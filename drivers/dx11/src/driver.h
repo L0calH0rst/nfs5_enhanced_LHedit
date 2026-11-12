@@ -197,6 +197,7 @@ namespace dx11z
         // Test switches (BUGS.md B21): x vertex alpha forced to 1.
         float m_Test[4];
         float m_Clip[4]; // clip rectangle of the game in game pixels: left, top, right, bottom
+        float m_Night[4]; // rgb: factor of the world at night (LFSP LfspNightGrade), w: 1 = on
     };
 
     struct Texture

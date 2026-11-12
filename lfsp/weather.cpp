@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <mmsystem.h>
 
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -19,6 +20,7 @@ namespace lfsp_weather
 {
     using LogFn = void (*)(const char *, ...);
     void Install(const char * ini, LogFn log);
+    bool NightGradeActive(float * rgb);
 }
 
 namespace
@@ -573,6 +575,28 @@ namespace
     // Trk_BWorldInit löscht das Nachtflag (Trk_ClearNightFlag 0x4B68E7: mov byte [0x628A28],0), danach setzen
     // Streckenschichten 0x8002/0x8003/0x8011 es wieder. Bei „Nacht“ bleibt es nach dem Löschen an.
     int g_nightForce = -1;
+    bool g_nightGrade = true;      // Welt abdunkeln, wenn „Nacht“ auf einer Tagstrecke gewählt ist
+    bool g_nightActive = false;    // gilt für das laufende Rennen
+    float g_nightMul[3] = { 0.22f, 0.27f, 0.44f };
+    std::string g_nightTracks = "monaco3"; // Strecken, die das Spiel selbst bei Nacht zeigt (kein Abdunkeln)
+    constexpr std::uintptr_t kTrackName = 0x657444; // Game_gTrackName
+    constexpr std::uintptr_t kFrontEnd = 0x65B928;  // != 0 im Frontend
+
+    bool NativeNight()
+    {
+        const char * name = reinterpret_cast<const char *>(kTrackName);
+        std::string lower;
+        for (int i = 0; i < 32 && name[i]; ++i)
+        {
+            lower += static_cast<char>(std::tolower(static_cast<unsigned char>(name[i])));
+        }
+        std::string list = "," + g_nightTracks + ",";
+        for (char & c : list)
+        {
+            c = c == ' ' ? ',' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return !lower.empty() && list.find("," + lower + ",") != std::string::npos;
+    }
     void __cdecl ClearNightHook()
     {
         *reinterpret_cast<unsigned char *>(0x628A28) = g_nightForce == 1 ? 1 : 0;
@@ -581,6 +605,7 @@ namespace
     void __cdecl SelectSpecHook(int weather, int time)
     {
         g_nightForce = -1;
+        g_nightActive = false;
         if (g_mode == 3)
         {
             g_effMode = static_cast<int>(Roll(3));
@@ -591,6 +616,8 @@ namespace
             const int night = g_timeMode == 3 ? static_cast<int>(Roll(2)) : g_timeMode - 1;
             Log("Wetter: Tageszeit %s (Wahl %d, Spiel %d)", night ? "Nacht" : "Tag", g_timeMode, time);
             g_nightForce = night;
+            g_nightActive = g_nightGrade && night == 1 && !NativeNight();
+            Log("Wetter: Abdunkeln %s (Strecke '%.16s')", g_nightActive ? "an" : "aus", reinterpret_cast<const char *>(kTrackName));
             time = night;
             *reinterpret_cast<int *>(kTimeVar) = night;
         }
@@ -845,6 +872,14 @@ void lfsp_weather::Install(const char * ini, LogFn log)
     g_mode = GetPrivateProfileIntA("Weather", "Mode", 0, ini);
     g_mode = g_mode < 0 || g_mode > 3 ? 0 : g_mode;
     g_effMode = g_mode == 3 ? 0 : g_mode;
+    g_nightGrade = GetPrivateProfileIntA("Weather", "NightGrade", 1, ini) != 0;
+    {
+        const unsigned long colour = std::strtoul(ReadString(ini, "NightLight", "38466F").c_str(), nullptr, 16);
+        g_nightMul[0] = ((colour >> 16) & 0xFF) / 255.0f;
+        g_nightMul[1] = ((colour >> 8) & 0xFF) / 255.0f;
+        g_nightMul[2] = (colour & 0xFF) / 255.0f;
+        g_nightTracks = ReadString(ini, "NightTracks", "monaco3");
+    }
     g_timeMode = GetPrivateProfileIntA("Weather", "TimeMode", 0, ini);
     g_timeMode = g_timeMode < 0 || g_timeMode > 3 ? 0 : g_timeMode;
     g_menu = GetPrivateProfileIntA("Weather", "Menu", 1, ini);
@@ -909,4 +944,25 @@ void lfsp_weather::Install(const char * ini, LogFn log)
             Log("Wetter: Menuepunkt fehlt (Hook fehlgeschlagen), Accessor wird trotzdem angelegt");
         }
     }
+}
+
+// Nacht-Abdunkeln für dx11z (doc/PLAN.md 15.1): Faktor je Farbkanal für die Welt. 1 = aktiv (Rennen, „Nacht“ auf
+// einer Strecke, die das Spiel bei Tag zeigt), 0 = nichts tun.
+extern "C" __declspec(dllexport) int LfspNightGrade(float * rgb)
+{
+    if (!lfsp_weather::NightGradeActive(rgb))
+    {
+        return 0;
+    }
+    return 1;
+}
+
+bool lfsp_weather::NightGradeActive(float * rgb)
+{
+    if (!g_nightActive || *reinterpret_cast<const int *>(kFrontEnd) != 0)
+    {
+        return false;
+    }
+    std::memcpy(rgb, g_nightMul, sizeof(g_nightMul));
+    return true;
 }

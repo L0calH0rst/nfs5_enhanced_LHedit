@@ -33,6 +33,7 @@ cbuffer DrawConstants : register( b0 )
     row_major float4x4 g_RearViewToLight[16];
     float4 g_Test; // test switches (BUGS.md B21): x '[Dx11] TestVertexAlpha'
     float4 g_Clip; // clip rectangle of the game in game pixels: left, top, right, bottom
+    float4 g_Night; // rgb: factor of the world at night (LFSP LfspNightGrade), w: 1 = on
 };
 
 Texture2D g_Texture0 : register( t0 );
@@ -274,6 +275,7 @@ float4 MainPS( PixelIn input ) : SV_Target
     if ( g_Test.x > 0 )
         diffuse.a = 1.0;
     float4 specular = input.m_Specular;
+    float3 nightMul = g_Night.w > 0.0 ? g_Night.rgb : float3( 1.0, 1.0, 1.0 );
 
     // The game's headlight model per pixel (doc/LICHT.md 7.2): light map lookup in the ground
     // plane of the headlight, minus height, added to the vertex colour before the texture.
@@ -288,7 +290,7 @@ float4 MainPS( PixelIn input ) : SV_Target
             // Not clamped before the texture (PLAN.md 9.9b): with a coloured ambient (orange street light) a
             // channel near 1 would cap and the spot would turn to the headlight colour. RunStage clamps after
             // the texture, so it is texture x (ambient + headlight).
-            diffuse.rgb = diffuse.rgb + g_HeadColour.rgb * factor;
+            diffuse.rgb = diffuse.rgb + g_HeadColour.rgb * factor / nightMul;
         }
 
         // The other racers' headlights, same map and scales, each with its own matrix and colour.
@@ -301,7 +303,7 @@ float4 MainPS( PixelIn input ) : SV_Target
             {
                 float map = g_HeadMap.SampleLevel( g_HeadSampler, float2( ( jx + 64.5 ) / 128.0, ( jz + 0.5 ) / 128.0 ), 0 ).r * 255.0;
                 float factor = max( map - abs( light.y * g_Head.w ), 0.0 ) / 256.0;
-                diffuse.rgb = diffuse.rgb + g_ExtraColour[i].rgb * factor;
+                diffuse.rgb = diffuse.rgb + g_ExtraColour[i].rgb * factor / nightMul;
             }
         }
 
@@ -317,7 +319,7 @@ float4 MainPS( PixelIn input ) : SV_Target
                 float spread = g_RearShape.w * ( 1.0 + max( d, 0.0 ) * 0.5 );
                 float left = exp( -( rear.x - g_RearShape.z ) * ( rear.x - g_RearShape.z ) / ( spread * spread ) );
                 float right = exp( -( rear.x + g_RearShape.z ) * ( rear.x + g_RearShape.z ) / ( spread * spread ) );
-                diffuse.rgb = diffuse.rgb + ( g_RearLeft[r].rgb * left + g_RearRight[r].rgb * right ) * along * up;
+                diffuse.rgb = diffuse.rgb + ( g_RearLeft[r].rgb * left + g_RearRight[r].rgb * right ) * along * up / nightMul;
             }
         }
     }
@@ -383,6 +385,10 @@ float4 MainPS( PixelIn input ) : SV_Target
             fog = specular.a;
         current.rgb = lerp( g_FogColor.rgb, current.rgb, saturate( fog ) );
     }
+
+    // Night over a day track: the whole world (fog and sky included) darker; the lights above were divided by it.
+    if ( g_Night.w > 0.0 )
+        current.rgb *= nightMul;
 
     if ( g_Debug.x > 0 )
         current.rgb = lerp( current.rgb, float3( 1, 0, 1 ), 0.7 );

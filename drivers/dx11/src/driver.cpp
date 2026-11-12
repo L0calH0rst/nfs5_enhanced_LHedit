@@ -4739,6 +4739,32 @@ namespace dx11z
         constants.m_Clip[2] = static_cast<float>(m_Clip.right);
         constants.m_Clip[3] = static_cast<float>(m_Clip.bottom);
 
+        // Night over a day track (LFSP 'NightGrade'): depth tested draws that are opaque or normally alpha blended;
+        // additive and multiplying passes (lamps, flares) and everything without a depth test (HUD) stay as they are.
+        {
+            using NightFn = int( __cdecl * )(float *);
+            static NightFn night_fn = nullptr;
+            static bool night_resolved = false;
+            if (!night_resolved)
+            {
+                night_resolved = true;
+                if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
+                    night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGrade" ));
+                Log( "Night grade: LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+            }
+            const std::uint32_t night_source = render[rs::SRCBLEND];
+            const std::uint32_t night_destination = render[rs::DESTBLEND];
+            const bool night_blend = render[rs::ALPHABLENDENABLE] == 0 || night_source == 12 || (night_source == 5 && night_destination == 6);
+            float rgb[3] = {};
+            if (night_fn != nullptr && render[rs::ZENABLE] != 0 && night_blend && night_fn( rgb ) != 0)
+            {
+                constants.m_Night[0] = rgb[0];
+                constants.m_Night[1] = rgb[1];
+                constants.m_Night[2] = rgb[2];
+                constants.m_Night[3] = 1.0f;
+            }
+        }
+
         // Other draws of the frame (cars, signs, objects) with the light of the last track mesh (PLAN.md 11.4, doc/LICHT.md 9.7):
         // only depth tested, opaque or normally alpha blended draws; additive and multiplying passes stay as they are.
         bool object_light = false;
