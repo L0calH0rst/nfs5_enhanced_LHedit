@@ -4740,21 +4740,19 @@ namespace dx11z
         constants.m_Clip[3] = static_cast<float>(m_Clip.bottom);
 
         float flat_z[2] = { 1e30f, -1e30f }, flat_rhw[2] = { 1e30f, -1e30f }, flat_n[2] = { 1e30f, -1e30f };
-        std::size_t odd_n = 0;
         for (const TlVertex & v : m_BatchVertices)
         {
             // World vertices follow z = 1 - n / w = 1 - n * rhw with n the near plane (0.15 bonnet, 0.5 chase view).
             const float n = v.m_Rhw > 1e-9f ? (1.0f - v.m_Z) / v.m_Rhw : 1e9f;
             flat_n[0] = std::min( flat_n[0], n );
             flat_n[1] = std::max( flat_n[1], n );
-            odd_n += (n < 0.05f || n > 0.8f) ? 1 : 0;
             flat_z[0] = std::min( flat_z[0], v.m_Z );
             flat_z[1] = std::max( flat_z[1], v.m_Z );
             flat_rhw[0] = std::min( flat_rhw[0], v.m_Rhw );
             flat_rhw[1] = std::max( flat_rhw[1], v.m_Rhw );
         }
         const bool flat_draw = !m_BatchVertices.empty() && (flat_rhw[0] >= 0.999f || (flat_z[1] - flat_z[0] < 1e-7f && flat_rhw[1] - flat_rhw[0] < 1e-7f) ||
-            odd_n * 2 > m_BatchVertices.size());
+            render[rs::ZFUNC] == 8); // the HUD phase (Hud_Draw) runs R_SetZFunc 7 = depth func ALWAYS, the world uses LESSEQUAL
 
         // Night over a day track (LFSP 'NightGrade'): depth tested draws that are opaque or normally alpha blended;
         // additive and multiplying passes (lamps, flares) and everything without a depth test (HUD) stay as they are.
@@ -4767,7 +4765,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGrade" ));
-                Log( "Night grade: LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9c, HUD by depth func ALWAYS): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -4791,9 +4789,9 @@ namespace dx11z
                 if (night_examples < 60 && (flat_draw || !night_blend || night_counts[0] % 50000 == 1) && night_counts[0] % 7 == 0)
                 {
                     ++night_examples;
-                    Log( "Night grade example: %s, %u vertices, z %g..%g, rhw %g..%g, n %g..%g, zwrite %u, blend %u, texture %08X",
+                    Log( "Night grade example: %s, %u vertices, z %g..%g, rhw %g..%g, n %g..%g, zfunc %u, zwrite %u, blend %u, texture %08X",
                         flat_draw ? "2D" : (night_blend ? "graded" : "sprite"), static_cast<unsigned>(m_BatchVertices.size()), flat_z[0], flat_z[1],
-                        flat_rhw[0], flat_rhw[1], flat_n[0], flat_n[1], static_cast<unsigned>(render[rs::ZWRITEENABLE]),
+                        flat_rhw[0], flat_rhw[1], flat_n[0], flat_n[1], static_cast<unsigned>(render[rs::ZFUNC]), static_cast<unsigned>(render[rs::ZWRITEENABLE]),
                         static_cast<unsigned>(render[rs::ALPHABLENDENABLE]), m_Bound[0] != nullptr ? static_cast<unsigned>(m_Bound[0]->m_Hash) : 0u );
                 }
                 if (!depth || !night_blend)
