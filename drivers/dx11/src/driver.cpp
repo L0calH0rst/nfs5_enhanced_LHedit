@@ -4739,6 +4739,16 @@ namespace dx11z
         constants.m_Clip[2] = static_cast<float>(m_Clip.right);
         constants.m_Clip[3] = static_cast<float>(m_Clip.bottom);
 
+        float flat_z[2] = { 1e30f, -1e30f }, flat_rhw[2] = { 1e30f, -1e30f };
+        for (const TlVertex & v : m_BatchVertices)
+        {
+            flat_z[0] = std::min( flat_z[0], v.m_Z );
+            flat_z[1] = std::max( flat_z[1], v.m_Z );
+            flat_rhw[0] = std::min( flat_rhw[0], v.m_Rhw );
+            flat_rhw[1] = std::max( flat_rhw[1], v.m_Rhw );
+        }
+        const bool flat_draw = !m_BatchVertices.empty() && (flat_rhw[0] >= 0.999f || (flat_z[1] - flat_z[0] < 1e-7f && flat_rhw[1] - flat_rhw[0] < 1e-7f));
+
         // Night over a day track (LFSP 'NightGrade'): depth tested draws that are opaque or normally alpha blended;
         // additive and multiplying passes (lamps, flares) and everything without a depth test (HUD) stay as they are.
         {
@@ -4759,7 +4769,7 @@ namespace dx11z
             static std::uint64_t night_counts[4] = {};
             if (night_fn != nullptr && night_fn( rgb ) != 0)
             {
-                const bool depth = render[rs::ZENABLE] != 0;
+                const bool depth = render[rs::ZENABLE] != 0 && !flat_draw;
                 ++night_counts[depth ? (night_blend ? 0 : 1) : 2];
                 if ((night_counts[0] + night_counts[1] + night_counts[2]) % 20000 == 1)
                     Log( "Night grade: draws graded %llu, additive %llu, no depth test %llu (frame %u)",
@@ -4797,8 +4807,24 @@ namespace dx11z
                 ++m_ObjectStats.m_Blend;
             else
             {
-                ++m_ObjectStats.m_Lit;
-                object_light = true;
+                // HUD and menus (ESC menu over the frozen race) are drawn with depth test on and flat vertices: all the same
+                // depth and rhw 1 or higher (nothing nearer than a metre). The light of the world must not reach them.
+                if (flat_draw)
+                {
+                    static int flat_logged = 0;
+                    if (flat_logged < 12)
+                    {
+                        ++flat_logged;
+                        Log( "Headlights objects: flat draw left out (HUD/menu), %u vertices, z %g..%g, rhw %g..%g", static_cast<unsigned>(m_BatchVertices.size()),
+                            flat_z[0], flat_z[1], flat_rhw[0], flat_rhw[1] );
+                    }
+                    ++m_ObjectStats.m_NoDepth;
+                }
+                else
+                {
+                    ++m_ObjectStats.m_Lit;
+                    object_light = true;
+                }
             }
         }
 
