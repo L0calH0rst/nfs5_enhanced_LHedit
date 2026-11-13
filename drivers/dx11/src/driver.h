@@ -503,6 +503,7 @@ namespace dx11z
         };
         int m_ConfigOpponents = 1;
         float m_ConfigOpponentsStrength = 1.0f;
+        float m_ConfigTrafficGlow = 0.35f; // [Lights] TrafficHeadlightGlow: share of the opponents' light for traffic cars, 0 = off
         std::vector<CarLight> m_CarLights;
         std::uint32_t m_CarLightsFlip = 0xFFFFFFFFu;
         // Row layout of the rotation at car + 0x364: 0 not checked, 1 rows as stored, 2 transposed (checked at night
@@ -610,6 +611,9 @@ namespace dx11z
         // when it cannot be read. On the 356 the top holds the rear quarters too, on cells no glossy part covers: there
         // the colour tells paint from cloth.
         std::map<std::uint32_t, std::vector<std::uint32_t>> m_CarReflCellColours;
+        // Colours of the first page seen per size, the undamaged state (damage repaints the page under a new hash).
+        struct CarReflBaseline { std::uint32_t m_Width, m_Height; std::vector<std::uint32_t> m_Colours; };
+        std::vector<CarReflBaseline> m_CarReflBaselines;
         int m_CarPart = -1; // part << 8 | variant being drawn
         std::vector<std::uint16_t> m_CarReflIndices;
         std::set<std::uint64_t> m_CarReflMatteSeen;

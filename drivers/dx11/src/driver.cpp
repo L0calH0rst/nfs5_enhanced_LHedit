@@ -1719,6 +1719,7 @@ namespace dx11z
 
         m_ConfigOpponents = std::clamp( std::atoi( light_value( "HeadlightsOpponents", "1" ).c_str() ), 0, 1 );
         m_ConfigOpponentsStrength = std::clamp( static_cast<float>(std::atof( light_value( "HeadlightsOpponentsStrength", "1.0" ).c_str() )), 0.0f, 4.0f );
+        m_ConfigTrafficGlow = std::clamp( static_cast<float>(std::atof( light_value( "TrafficHeadlightGlow", "0.35" ).c_str() )), 0.0f, 4.0f );
         Log( "Config lights from '%s' [Lights] (missing keys from [Dx11]): HeadlightsOpponents %d strength %.2f", lights_ini.c_str(),
             m_ConfigOpponents, m_ConfigOpponentsStrength );
 
@@ -7839,10 +7840,50 @@ namespace dx11z
                     colours[static_cast<std::size_t>(cy) * 64 + cx] = (sums[1] / sums[0]) << 16 | (sums[2] / sums[0]) << 8 | sums[3] / sums[0];
             }
         m_Context->Unmap( staging.Get(), 0 );
+
+        // Damage paints into the page and changes its hash, so the page is read again, now with scratched cloth that looks
+        // like the paint (B28). A page that mostly matches a baseline of the same size (apart from the damaged cells)
+        // takes the baseline's colours: the undamaged state, the first one seen.
+        const auto near_colour = []( std::uint32_t a, std::uint32_t b )
+        {
+            int distance = 0;
+            for (int shift = 0; shift < 24; shift += 8)
+            {
+                const int d = static_cast<int>(a >> shift & 0xFF) - static_cast<int>(b >> shift & 0xFF);
+                distance += d * d;
+            }
+            return distance < 60 * 60;
+        };
+        bool inherited = false;
+        for (const auto & baseline : m_CarReflBaselines)
+        {
+            if (baseline.m_Width != desc.Width || baseline.m_Height != desc.Height)
+                continue;
+            std::size_t valid = 0, same = 0;
+            for (std::size_t i = 0; i < 64 * 64; ++i)
+                if (baseline.m_Colours[i] != 0xFFFFFFFFu && colours[i] != 0xFFFFFFFFu)
+                {
+                    ++valid;
+                    same += near_colour( baseline.m_Colours[i], colours[i] ) ? 1 : 0;
+                }
+            if (valid >= 64 && same * 10 >= valid * 6)
+            {
+                colours = baseline.m_Colours;
+                inherited = true;
+                break;
+            }
+        }
+        if (!inherited)
+        {
+            if (m_CarReflBaselines.size() >= 32)
+                m_CarReflBaselines.erase( m_CarReflBaselines.begin() );
+            m_CarReflBaselines.push_back( { desc.Width, desc.Height, colours } );
+        }
         if (m_CarReflLines < 300)
         {
             ++m_CarReflLines;
-            Log( "Car reflections: colours of paint texture %08X read (%ux%u)", texture->m_Hash, desc.Width, desc.Height );
+            Log( "Car reflections: colours of paint texture %08X read (%ux%u)%s", texture->m_Hash, desc.Width, desc.Height,
+                inherited ? ", undamaged colours kept" : "" );
         }
         return colours;
     }
@@ -8258,12 +8299,35 @@ namespace dx11z
 
         CollectRearLights( racers );
 
+        // Opponents and police first, then the traffic cars (flag 0x10 at car + 0x52C, doc/VERKEHR.md 1) nearest to the player,
+        // as many as the slots allow: traffic never pushes out an opponent. Traffic only glows weakly ('TrafficHeadlightGlow')
+        // and only in a night race (also a forced one), the traffic of a day race has its lights on without any need.
+        const bool race_night = *reinterpret_cast<const std::uint16_t *>(0x00628A28) != 0;
+        float player_pos[3] = {};
+        if (player_car != 0)
+            SafeCopy( reinterpret_cast<const void *>(player_car + 0x330), player_pos, sizeof( player_pos ) );
+        std::vector<std::pair<float, std::uint32_t>> traffic_order;
         std::uint32_t states = 0;
-        for (std::uint32_t i = 0; i < racers && m_ConfigOpponents != 0 && m_CarLights.size() < static_cast<std::size_t>(MAX_CAR_LIGHTS); ++i)
+        for (std::uint32_t i = 0; i < racers && m_ConfigOpponents != 0; ++i)
         {
             const std::uintptr_t car = RacerCar( i );
             std::uint8_t lights[2] = {};
             if (car == 0 || i == player || !CarLightsOn( car, lights ))
+                continue;
+            std::uint8_t kind = 0;
+            SafeCopy( reinterpret_cast<const void *>(car + 0x52C), &kind, 1 );
+            if ((kind & 0x10) != 0)
+            {
+                if (m_ConfigTrafficGlow > 0.0f && race_night)
+                {
+                    float position[3] = {};
+                    SafeCopy( reinterpret_cast<const void *>(car + 0x330), position, sizeof( position ) );
+                    const float dx = position[0] - player_pos[0], dy = position[1] - player_pos[1], dz = position[2] - player_pos[2];
+                    traffic_order.emplace_back( dx * dx + dy * dy + dz * dz, i );
+                }
+                continue;
+            }
+            if (m_CarLights.size() >= static_cast<std::size_t>(MAX_CAR_LIGHTS))
                 continue;
 
             CarLight light;
@@ -8279,12 +8343,33 @@ namespace dx11z
             states |= 1u << i;
             m_CarLights.push_back( light );
         }
+        std::sort( traffic_order.begin(), traffic_order.end() );
+        std::uint32_t traffic_lit = 0;
+        for (const auto & entry : traffic_order)
+        {
+            if (m_CarLights.size() >= static_cast<std::size_t>(MAX_CAR_LIGHTS))
+                break;
+            const std::uintptr_t car = RacerCar( entry.second );
+            CarLight light;
+            light.m_Car = car;
+            if (!CarObjectToLight( car, m_CarMatrixLayout, light.m_ObjectToLight.data() ))
+                continue;
+            float tint[3] = { 1.0f, 1.0f, 1.0f };
+            LfspTintForCar( car, tint );
+            for (std::size_t c = 0; c < 3; ++c)
+                light.m_Colour[c] = base[c] * tint[c] * m_ConfigTrafficGlow;
+            light.m_Colour[3] = 1.0f;
+            states |= 1u << entry.second;
+            ++traffic_lit;
+            m_CarLights.push_back( light );
+        }
 
         if (static_cast<int>(states) != m_CarLightsLogged)
         {
             m_CarLightsLogged = static_cast<int>(states);
-            Log( "Headlights opponents: %u of %u racers with light (%s, mask %03X, player %u)", static_cast<unsigned>(m_CarLights.size()),
-                racers, night ? "night" : "day", states, player );
+            Log( "Headlights opponents: %u of %u racers with light (%s, mask %03X, player %u, traffic with glow %u of %u candidates)",
+                static_cast<unsigned>(m_CarLights.size()), racers, night ? "night" : "day", states, player, traffic_lit,
+                static_cast<unsigned>(traffic_order.size()) );
         }
     }
 
