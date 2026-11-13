@@ -1722,6 +1722,7 @@ namespace dx11z
         m_ConfigOpponents = std::clamp( std::atoi( light_value( "HeadlightsOpponents", "1" ).c_str() ), 0, 1 );
         m_ConfigOpponentsStrength = std::clamp( static_cast<float>(std::atof( light_value( "HeadlightsOpponentsStrength", "1.0" ).c_str() )), 0.0f, 4.0f );
         m_ConfigTrafficGlow = std::clamp( static_cast<float>(std::atof( light_value( "TrafficHeadlightGlow", "0.35" ).c_str() )), 0.0f, 4.0f );
+        m_ConfigMaxCarLights = std::clamp( std::atoi( light_value( "MaxCarLights", "16" ).c_str() ), 1, MAX_CAR_LIGHTS );
         Log( "Config lights from '%s' [Lights] (missing keys from [Dx11]): HeadlightsOpponents %d strength %.2f", lights_ini.c_str(),
             m_ConfigOpponents, m_ConfigOpponentsStrength );
 
@@ -4772,7 +4773,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9g, world/sky/light sprites): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9h, world/sky/light sprites, max car lights 16): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -8302,13 +8303,26 @@ namespace dx11z
 
         CollectRearLights( racers );
 
-        // Opponents and police first, then the traffic cars (flag 0x10 at car + 0x52C, doc/VERKEHR.md 1) nearest to the player,
-        // as many as the slots allow: traffic never pushes out an opponent. Traffic only glows weakly ('TrafficHeadlightGlow')
-        // and only in a night race (also a forced one), the traffic of a day race has its lights on without any need.
+        // Light position: the camera (the light map reaches about 100 units, doc/LICHT.md 8.4); without a camera the player.
+        float eye[3] = {};
+        {
+            std::uintptr_t context = 0;
+            std::uintptr_t view = 0;
+            if (SafeCopy( reinterpret_cast<const void *>(0x00628130), &context, 4 ) && context != 0 &&
+                SafeCopy( reinterpret_cast<const void *>(context + 0x10), &view, 4 ) && view != 0)
+                SafeCopy( reinterpret_cast<const void *>(view + 0x10C), eye, sizeof( eye ) );
+            if (eye[0] == 0.0f && eye[1] == 0.0f && eye[2] == 0.0f && player_car != 0)
+                SafeCopy( reinterpret_cast<const void *>(player_car + 0x330), eye, sizeof( eye ) );
+        }
+        const float reach2 = 100.0f * 100.0f;
+        const std::size_t limit = static_cast<std::size_t>(std::clamp( m_ConfigMaxCarLights, 1, MAX_CAR_LIGHTS ));
+
+        // Opponents and police first, then the traffic cars (flag 0x10 at car + 0x52C, doc/VERKEHR.md 1), each group nearest
+        // to the camera first and only within reach, as many as the limit allows: traffic never pushes out an opponent.
+        // Traffic only glows weakly ('TrafficHeadlightGlow') and only in a night race (also a forced one).
         const bool race_night = *reinterpret_cast<const std::uint16_t *>(0x00628A28) != 0;
-        float player_pos[3] = {};
-        if (player_car != 0)
-            SafeCopy( reinterpret_cast<const void *>(player_car + 0x330), player_pos, sizeof( player_pos ) );
+        const std::int64_t collect_start = PerfNow();
+        std::vector<std::pair<float, std::uint32_t>> opponent_order;
         std::vector<std::pair<float, std::uint32_t>> traffic_order;
         std::uint32_t states = 0;
         for (std::uint32_t i = 0; i < racers && m_ConfigOpponents != 0; ++i)
@@ -8319,60 +8333,66 @@ namespace dx11z
                 continue;
             std::uint8_t kind = 0;
             SafeCopy( reinterpret_cast<const void *>(car + 0x52C), &kind, 1 );
-            if ((kind & 0x10) != 0)
-            {
-                if (m_ConfigTrafficGlow > 0.0f && race_night)
-                {
-                    float position[3] = {};
-                    SafeCopy( reinterpret_cast<const void *>(car + 0x330), position, sizeof( position ) );
-                    const float dx = position[0] - player_pos[0], dy = position[1] - player_pos[1], dz = position[2] - player_pos[2];
-                    traffic_order.emplace_back( dx * dx + dy * dy + dz * dz, i );
-                }
+            const bool traffic = (kind & 0x10) != 0;
+            if (traffic && (m_ConfigTrafficGlow <= 0.0f || !race_night))
                 continue;
-            }
-            if (m_CarLights.size() >= static_cast<std::size_t>(MAX_CAR_LIGHTS))
+            float position[3] = {};
+            SafeCopy( reinterpret_cast<const void *>(car + 0x330), position, sizeof( position ) );
+            const float dx = position[0] - eye[0], dy = position[1] - eye[1], dz = position[2] - eye[2];
+            const float distance2 = dx * dx + dy * dy + dz * dz;
+            if (distance2 > reach2)
                 continue;
-
-            CarLight light;
-            light.m_Car = car;
-            if (!CarObjectToLight( car, m_CarMatrixLayout, light.m_ObjectToLight.data() ))
-                continue;
-
-            float tint[3] = { 1.0f, 1.0f, 1.0f };
-            LfspTintForCar( car, tint );
-            for (std::size_t c = 0; c < 3; ++c)
-                light.m_Colour[c] = base[c] * tint[c] * m_ConfigOpponentsStrength;
-            light.m_Colour[3] = 1.0f;
-            states |= 1u << i;
-            m_CarLights.push_back( light );
+            (traffic ? traffic_order : opponent_order).emplace_back( distance2, i );
         }
+        std::sort( opponent_order.begin(), opponent_order.end() );
         std::sort( traffic_order.begin(), traffic_order.end() );
         std::uint32_t traffic_lit = 0;
-        for (const auto & entry : traffic_order)
+        for (int group = 0; group < 2; ++group)
         {
-            if (m_CarLights.size() >= static_cast<std::size_t>(MAX_CAR_LIGHTS))
-                break;
-            const std::uintptr_t car = RacerCar( entry.second );
-            CarLight light;
-            light.m_Car = car;
-            if (!CarObjectToLight( car, m_CarMatrixLayout, light.m_ObjectToLight.data() ))
-                continue;
-            float tint[3] = { 1.0f, 1.0f, 1.0f };
-            LfspTintForCar( car, tint );
-            for (std::size_t c = 0; c < 3; ++c)
-                light.m_Colour[c] = base[c] * tint[c] * m_ConfigTrafficGlow;
-            light.m_Colour[3] = 1.0f;
-            states |= 1u << entry.second;
-            ++traffic_lit;
-            m_CarLights.push_back( light );
+            const bool traffic = group == 1;
+            for (const auto & entry : (traffic ? traffic_order : opponent_order))
+            {
+                if (m_CarLights.size() >= limit)
+                    break;
+                const std::uintptr_t car = RacerCar( entry.second );
+                CarLight light;
+                light.m_Car = car;
+                if (!CarObjectToLight( car, m_CarMatrixLayout, light.m_ObjectToLight.data() ))
+                    continue;
+                float tint[3] = { 1.0f, 1.0f, 1.0f };
+                LfspTintForCar( car, tint );
+                const float strength = traffic ? m_ConfigTrafficGlow : m_ConfigOpponentsStrength;
+                for (std::size_t c = 0; c < 3; ++c)
+                    light.m_Colour[c] = base[c] * tint[c] * strength;
+                light.m_Colour[3] = 1.0f;
+                states |= 1u << entry.second;
+                traffic_lit += traffic ? 1 : 0;
+                m_CarLights.push_back( light );
+            }
+        }
+
+        // Cost of the collection (CPU) and the number of active lights, averaged over 600 frames.
+        m_CarLightsTicks += PerfNow() - collect_start;
+        m_CarLightsActive += static_cast<std::uint64_t>(m_CarLights.size());
+        if (++m_CarLightsFrames >= 600)
+        {
+            LARGE_INTEGER frequency = {};
+            ::QueryPerformanceFrequency( &frequency );
+            Log( "Car lights: %.1f active on average (limit %zu, reach 100, now %u: %u opponents, %u traffic), collection %.1f us per frame",
+                static_cast<double>(m_CarLightsActive) / static_cast<double>(m_CarLightsFrames), limit,
+                static_cast<unsigned>(m_CarLights.size()), static_cast<unsigned>(m_CarLights.size()) - traffic_lit, traffic_lit,
+                static_cast<double>(m_CarLightsTicks) * 1e6 / std::max( 1.0, static_cast<double>(frequency.QuadPart) ) / static_cast<double>(m_CarLightsFrames) );
+            m_CarLightsFrames = 0;
+            m_CarLightsTicks = 0;
+            m_CarLightsActive = 0;
         }
 
         if (static_cast<int>(states) != m_CarLightsLogged)
         {
             m_CarLightsLogged = static_cast<int>(states);
-            Log( "Headlights opponents: %u of %u racers with light (%s, mask %03X, player %u, traffic with glow %u of %u candidates)",
+            Log( "Headlights opponents: %u of %u racers with light (%s, mask %03X, player %u, traffic with glow %u of %u candidates, %u opponents in reach)",
                 static_cast<unsigned>(m_CarLights.size()), racers, night ? "night" : "day", states, player, traffic_lit,
-                static_cast<unsigned>(traffic_order.size()) );
+                static_cast<unsigned>(traffic_order.size()), static_cast<unsigned>(opponent_order.size()) );
         }
     }
 

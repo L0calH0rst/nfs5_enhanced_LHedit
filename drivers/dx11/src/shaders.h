@@ -23,8 +23,8 @@ cbuffer DrawConstants : register( b0 )
     float4 g_HeadProjection; // fx, fy, cx, cy of the game projection
     row_major float4x4 g_ViewToLight;
     int4 g_Extra; // x: number of other racers' headlights (PLAN.md 9.11)
-    float4 g_ExtraColour[7];
-    row_major float4x4 g_ExtraViewToLight[7];
+    float4 g_ExtraColour[16];
+    row_major float4x4 g_ExtraViewToLight[16];
     float4 g_HeadHigh; // high beam of the player's light: factors on the z, x and y scales (PLAN.md 9.10)
     int4 g_Rear; // x: number of tail light glows (PLAN.md 11.5)
     float4 g_RearShape; // rear offset, reach, lamp x, lamp spread

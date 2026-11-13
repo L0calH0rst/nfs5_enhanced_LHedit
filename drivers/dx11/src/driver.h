@@ -184,8 +184,8 @@ namespace dx11z
         float m_ViewToLight[16];
         // Other racers' headlights (PLAN.md 9.11): x count.
         std::int32_t m_Extra[4];
-        float m_ExtraColour[7][4];
-        float m_ExtraViewToLight[7][16];
+        float m_ExtraColour[16][4];
+        float m_ExtraViewToLight[16][16];
         // High beam of the player's light (PLAN.md 9.10): factors on the z, x and y scales.
         float m_HeadHigh[4];
         // Tail light glow of all racers (PLAN.md 11.5): x count; shape: rear offset, reach, lamp x, lamp spread.
@@ -199,6 +199,8 @@ namespace dx11z
         float m_Clip[4]; // clip rectangle of the game in game pixels: left, top, right, bottom
         float m_Night[4]; // rgb: factor of the world at night (LFSP LfspNightGrade), w: 1 = on
     };
+
+    static_assert( offsetof( DrawConstants, m_Night ) == 3200 && sizeof( DrawConstants ) == 3216, "DrawConstants must match the fxc listing of shaders::SCENE" );
 
     struct Texture
     {
@@ -495,7 +497,7 @@ namespace dx11z
 
         // Headlights of the other racers (PLAN.md 9.11, doc/LICHT.md 8.4a): '[Dx11] HeadlightsOpponents' and
         // 'HeadlightsOpponentsStrength'. Collected once per frame, object to light space like 0x0061BCCC.
-        static constexpr int MAX_CAR_LIGHTS = 7;
+        static constexpr int MAX_CAR_LIGHTS = 16;
         struct CarLight
         {
             std::uintptr_t m_Car = 0;
@@ -505,6 +507,10 @@ namespace dx11z
         int m_ConfigOpponents = 1;
         float m_ConfigOpponentsStrength = 1.0f;
         float m_ConfigTrafficGlow = 0.35f; // [Lights] TrafficHeadlightGlow: share of the opponents' light for traffic cars, 0 = off
+        int m_ConfigMaxCarLights = 16; // [Lights] MaxCarLights: active car lights (opponents and traffic), 1 to MAX_CAR_LIGHTS
+        std::int64_t m_CarLightsTicks = 0;
+        std::uint64_t m_CarLightsActive = 0;
+        int m_CarLightsFrames = 0;
         std::vector<CarLight> m_CarLights;
         std::uint32_t m_CarLightsFlip = 0xFFFFFFFFu;
         // Row layout of the rotation at car + 0x364: 0 not checked, 1 rows as stored, 2 transposed (checked at night
