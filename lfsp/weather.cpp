@@ -21,6 +21,7 @@ namespace lfsp_weather
     using LogFn = void (*)(const char *, ...);
     void Install(const char * ini, LogFn log);
     bool NightGradeActive(float * rgb);
+    bool NightSynthetic();
 }
 
 namespace
@@ -90,6 +91,11 @@ namespace
     // ---- Einstellungen ----
     int g_mode = 0;              // Menüwahl: 0 Original, 1 Regen, 2 Schnee, 3 Zufall
     int g_effMode = 0;           // gilt im Rennen: 0…2 (bei Zufall je Rennstart gewürfelt)
+    int g_nightForce = -1;         // -1 nichts, 0 Tag, 1 Nacht (Wahl dieses Rennens)
+    bool g_nightGrade = true;      // Welt abdunkeln, wenn „Nacht“ auf einer Tagstrecke gewählt ist
+    bool g_nightActive = false;    // Abdunkeln gilt für das laufende Rennen
+    bool g_nightSynthetic = false; // „Nacht“ auf einer Strecke ohne eigene Nacht: dort gibt es keine Nachtschichten im Spiel
+    bool g_flagLogPending = false;
     int g_timeMode = 0;          // Menüwahl: 0 Original, 1 Tag, 2 Nacht, 3 Zufall
     int g_menu = 1;
     std::string g_posLocation = "377,71"; // unter „records…“
@@ -378,6 +384,13 @@ namespace
     {
         float v = SkyValue(sky, kSkyLerpRain);
         UpdateCover();
+        if (g_flagLogPending)
+        {
+            g_flagLogPending = false;
+            Log("Wetter: Nachtflag im Rennen %u, Nacht gewaehlt %d, synthetisch %d, Abdunkeln %d",
+                static_cast<unsigned>(*reinterpret_cast<const unsigned short *>(0x628A28)), g_nightForce, g_nightSynthetic ? 1 : 0,
+                g_nightActive ? 1 : 0);
+        }
         if (g_effMode == 1)
         {
             v = g_rainAmount;
@@ -574,9 +587,6 @@ namespace
 
     // Trk_BWorldInit löscht das Nachtflag (Trk_ClearNightFlag 0x4B68E7: mov byte [0x628A28],0), danach setzen
     // Streckenschichten 0x8002/0x8003/0x8011 es wieder. Bei „Nacht“ bleibt es nach dem Löschen an.
-    int g_nightForce = -1;
-    bool g_nightGrade = true;      // Welt abdunkeln, wenn „Nacht“ auf einer Tagstrecke gewählt ist
-    bool g_nightActive = false;    // gilt für das laufende Rennen
     float g_nightMul[3] = { 0.22f, 0.27f, 0.44f };
     std::string g_nightTracks = "monaco3"; // Strecken, die das Spiel selbst bei Nacht zeigt (kein Abdunkeln)
     constexpr std::uintptr_t kTrackName = 0x657444; // Game_gTrackName
@@ -606,6 +616,7 @@ namespace
     {
         g_nightForce = -1;
         g_nightActive = false;
+        g_nightSynthetic = false;
         if (g_mode == 3)
         {
             g_effMode = static_cast<int>(Roll(3));
@@ -616,8 +627,10 @@ namespace
             const int night = g_timeMode == 3 ? static_cast<int>(Roll(2)) : g_timeMode - 1;
             Log("Wetter: Tageszeit %s (Wahl %d, Spiel %d)", night ? "Nacht" : "Tag", g_timeMode, time);
             g_nightForce = night;
-            g_nightActive = g_nightGrade && night == 1 && !NativeNight();
-            Log("Wetter: Abdunkeln %s (Strecke '%.16s')", g_nightActive ? "an" : "aus", reinterpret_cast<const char *>(kTrackName));
+            g_nightSynthetic = night == 1 && !NativeNight();
+            g_nightActive = g_nightGrade && g_nightSynthetic;
+            g_flagLogPending = true;
+            Log("Wetter: Abdunkeln %s (Strecke '%.16s')", g_nightActive ? "an" : "aus (dx11z)", reinterpret_cast<const char *>(kTrackName));
             time = night;
             *reinterpret_cast<int *>(kTimeVar) = night;
         }
@@ -965,4 +978,16 @@ bool lfsp_weather::NightGradeActive(float * rgb)
     }
     std::memcpy(rgb, g_nightMul, sizeof(g_nightMul));
     return true;
+}
+
+// dx11z: 1, wenn im Rennen „Nacht“ auf einer Strecke gilt, die das Spiel selbst bei Tag zeigt. Das Nachtflag ist dort
+// gesetzt, aber die Streckenschichten für das Scheinwerferlicht (LayerVertexLight) fehlen; dx11z nimmt dann den Tag-Pfad.
+extern "C" __declspec(dllexport) int LfspNightSynthetic()
+{
+    return lfsp_weather::NightSynthetic() ? 1 : 0;
+}
+
+bool lfsp_weather::NightSynthetic()
+{
+    return g_nightSynthetic && *reinterpret_cast<const int *>(kFrontEnd) == 0;
 }

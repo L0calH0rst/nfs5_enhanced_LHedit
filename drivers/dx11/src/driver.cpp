@@ -4756,7 +4756,19 @@ namespace dx11z
             const std::uint32_t night_destination = render[rs::DESTBLEND];
             const bool night_blend = render[rs::ALPHABLENDENABLE] == 0 || night_source == 12 || (night_source == 5 && night_destination == 6);
             float rgb[3] = {};
-            if (night_fn != nullptr && render[rs::ZENABLE] != 0 && night_blend && night_fn( rgb ) != 0)
+            static std::uint64_t night_counts[4] = {};
+            if (night_fn != nullptr && night_fn( rgb ) != 0)
+            {
+                const bool depth = render[rs::ZENABLE] != 0;
+                ++night_counts[depth ? (night_blend ? 0 : 1) : 2];
+                if ((night_counts[0] + night_counts[1] + night_counts[2]) % 20000 == 1)
+                    Log( "Night grade: draws graded %llu, additive %llu, no depth test %llu (frame %u)",
+                        static_cast<unsigned long long>(night_counts[0]), static_cast<unsigned long long>(night_counts[1]),
+                        static_cast<unsigned long long>(night_counts[2]), m_FlipCount );
+                if (!depth || !night_blend)
+                    rgb[0] = -1.0f;
+            }
+            if (rgb[0] >= 0.0f && rgb[1] > 0.0f)
             {
                 constants.m_Night[0] = rgb[0];
                 constants.m_Night[1] = rgb[1];
@@ -8094,6 +8106,22 @@ namespace dx11z
     }
 
 
+    // The game flags the race as night (0x628A28) and has the night track layers that light the meshes. LFSP sets the flag
+    // as well for "Night" on a track that is a day track in the game; it has no such layers, so the day path must light it.
+    static bool NightNative()
+    {
+        using SyntheticFn = int( __cdecl * )();
+        static SyntheticFn synthetic_fn = nullptr;
+        static bool resolved = false;
+        if (!resolved)
+        {
+            resolved = true;
+            if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
+                synthetic_fn = reinterpret_cast<SyntheticFn>(::GetProcAddress( lfsp, "LfspNightSynthetic" ));
+        }
+        return *reinterpret_cast<const std::uint16_t *>(0x00628A28) != 0 && (synthetic_fn == nullptr || synthetic_fn() == 0);
+    }
+
     // The other racers with their light on (PLAN.md 9.11), once per frame.
     void Driver::CollectCarLights()
     {
@@ -8108,7 +8136,7 @@ namespace dx11z
 
         const std::uint32_t player = *reinterpret_cast<const std::uint32_t *>(0x0065741C);
         const std::uint32_t racers = RacerCount();
-        const bool night = *reinterpret_cast<const std::uint16_t *>(0x00628A28) != 0;
+        const bool night = NightNative();
         const std::uintptr_t player_car = RacerCar( player );
 
         // Check the layout of the rotation once against the game's own player matrix: FUN_004526c0 builds it in
@@ -8310,7 +8338,7 @@ namespace dx11z
             std::memcpy( &m_HeadScale[0], &scale_x, sizeof( float ) );
             std::memcpy( &m_HeadScale[1], &scale_z, sizeof( float ) );
             // At night this path only runs for the other cars (player light off): no day range.
-            const bool night = *reinterpret_cast<const std::uint16_t *>(0x00628A28) != 0;
+            const bool night = NightNative();
             m_HeadScale[0] /= night ? 1.0f : m_ConfigDayRange;
             m_HeadScale[1] /= night ? 1.0f : m_ConfigDayRange;
             if (night)
@@ -8463,16 +8491,17 @@ namespace dx11z
 
         // The high beam key lights the player's own beam even with the switch off (flasher, 9.10c).
         const bool flasher = UpdateHighBeam() > 0.0f;
-        const bool player_on = flasher || (*night == 0 && (m_ConfigHeadlightsDay == 2 || (m_ConfigHeadlightsDay == 1 && switch_on)));
+        const bool native_night = NightNative();
+        const bool player_on = flasher || (!native_night && (m_ConfigHeadlightsDay == 2 || (m_ConfigHeadlightsDay == 1 && switch_on)));
 
         // Night with the player's light on: the game's own path through FUN_00452910 lights the meshes.
-        if (*night != 0 && switch_on)
+        if (native_night && switch_on)
         {
             ++m_DayStats.m_Night;
             return;
         }
 
-        if ((player_on || m_CarMatrixLayout == 0) && *night == 0 && m_DayLightFlip != m_FlipCount)
+        if ((player_on || m_CarMatrixLayout == 0) && !native_night && m_DayLightFlip != m_FlipCount)
         {
             m_DayLightFlip = m_FlipCount;
 
