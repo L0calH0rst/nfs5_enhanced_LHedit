@@ -4739,15 +4739,22 @@ namespace dx11z
         constants.m_Clip[2] = static_cast<float>(m_Clip.right);
         constants.m_Clip[3] = static_cast<float>(m_Clip.bottom);
 
-        float flat_z[2] = { 1e30f, -1e30f }, flat_rhw[2] = { 1e30f, -1e30f };
+        float flat_z[2] = { 1e30f, -1e30f }, flat_rhw[2] = { 1e30f, -1e30f }, flat_n[2] = { 1e30f, -1e30f };
+        std::size_t odd_n = 0;
         for (const TlVertex & v : m_BatchVertices)
         {
+            // World vertices follow z = 1 - n / w = 1 - n * rhw with n the near plane (0.15 bonnet, 0.5 chase view).
+            const float n = v.m_Rhw > 1e-9f ? (1.0f - v.m_Z) / v.m_Rhw : 1e9f;
+            flat_n[0] = std::min( flat_n[0], n );
+            flat_n[1] = std::max( flat_n[1], n );
+            odd_n += (n < 0.05f || n > 0.8f) ? 1 : 0;
             flat_z[0] = std::min( flat_z[0], v.m_Z );
             flat_z[1] = std::max( flat_z[1], v.m_Z );
             flat_rhw[0] = std::min( flat_rhw[0], v.m_Rhw );
             flat_rhw[1] = std::max( flat_rhw[1], v.m_Rhw );
         }
-        const bool flat_draw = !m_BatchVertices.empty() && (flat_rhw[0] >= 0.999f || (flat_z[1] - flat_z[0] < 1e-7f && flat_rhw[1] - flat_rhw[0] < 1e-7f));
+        const bool flat_draw = !m_BatchVertices.empty() && (flat_rhw[0] >= 0.999f || (flat_z[1] - flat_z[0] < 1e-7f && flat_rhw[1] - flat_rhw[0] < 1e-7f) ||
+            odd_n * 2 > m_BatchVertices.size());
 
         // Night over a day track (LFSP 'NightGrade'): depth tested draws that are opaque or normally alpha blended;
         // additive and multiplying passes (lamps, flares) and everything without a depth test (HUD) stay as they are.
@@ -4764,17 +4771,31 @@ namespace dx11z
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
-            const bool night_blend = render[rs::ALPHABLENDENABLE] == 0 || night_source == 12 || (night_source == 5 && night_destination == 6);
+            // Sprites (flares, light cones, smoke) are drawn without depth writing and keep their own brightness.
+            const bool night_blend = render[rs::ALPHABLENDENABLE] == 0 || ((night_source == 12 || (night_source == 5 && night_destination == 6)) && render[rs::ZWRITEENABLE] != 0);
             float rgb[3] = {};
             static std::uint64_t night_counts[4] = {};
             if (night_fn != nullptr && night_fn( rgb ) != 0)
             {
                 const bool depth = render[rs::ZENABLE] != 0 && !flat_draw;
                 ++night_counts[depth ? (night_blend ? 0 : 1) : 2];
-                if ((night_counts[0] + night_counts[1] + night_counts[2]) % 20000 == 1)
-                    Log( "Night grade: draws graded %llu, additive %llu, no depth test %llu (frame %u)",
+                static std::uint32_t night_logged_flip = 0;
+                static int night_examples = 0;
+                if (m_FlipCount / 600 != night_logged_flip)
+                {
+                    night_logged_flip = m_FlipCount / 600;
+                    Log( "Night grade: draws graded %llu, sprites/no zwrite %llu, 2D (flat or off-scale) %llu (frame %u)",
                         static_cast<unsigned long long>(night_counts[0]), static_cast<unsigned long long>(night_counts[1]),
                         static_cast<unsigned long long>(night_counts[2]), m_FlipCount );
+                }
+                if (night_examples < 60 && (flat_draw || !night_blend || night_counts[0] % 50000 == 1) && night_counts[0] % 7 == 0)
+                {
+                    ++night_examples;
+                    Log( "Night grade example: %s, %u vertices, z %g..%g, rhw %g..%g, n %g..%g, zwrite %u, blend %u, texture %08X",
+                        flat_draw ? "2D" : (night_blend ? "graded" : "sprite"), static_cast<unsigned>(m_BatchVertices.size()), flat_z[0], flat_z[1],
+                        flat_rhw[0], flat_rhw[1], flat_n[0], flat_n[1], static_cast<unsigned>(render[rs::ZWRITEENABLE]),
+                        static_cast<unsigned>(render[rs::ALPHABLENDENABLE]), m_Bound[0] != nullptr ? static_cast<unsigned>(m_Bound[0]->m_Hash) : 0u );
+                }
                 if (!depth || !night_blend)
                     rgb[0] = -1.0f;
             }

@@ -269,6 +269,20 @@ bool AlphaPasses( float a )
     }
 }
 
+float4 Pipeline( float4 diffuse, float4 specular, float4 tex0, float4 tex1 )
+{
+    float4 current = diffuse;
+    if ( g_ColorOp[0].x > 1 )
+    {
+        current = RunStage( 0, current, diffuse, specular, tex0 );
+        if ( g_ColorOp[1].x > 1 )
+            current = RunStage( 1, current, diffuse, specular, tex1 );
+    }
+    if ( g_Flags.y != 0 )
+        current.rgb = saturate( current.rgb + specular.rgb );
+    return current;
+}
+
 float4 MainPS( PixelIn input ) : SV_Target
 {
     float4 diffuse = input.m_Diffuse;
@@ -276,6 +290,7 @@ float4 MainPS( PixelIn input ) : SV_Target
         diffuse.a = 1.0;
     float4 specular = input.m_Specular;
     float3 nightMul = g_Night.w > 0.0 ? g_Night.rgb : float3( 1.0, 1.0, 1.0 );
+    float4 diffuseBase = diffuse; // without headlights: the night factor only darkens this part
 
     // The game's headlight model per pixel (doc/LICHT.md 7.2): light map lookup in the ground
     // plane of the headlight, minus height, added to the vertex colour before the texture.
@@ -290,7 +305,7 @@ float4 MainPS( PixelIn input ) : SV_Target
             // Not clamped before the texture (PLAN.md 9.9b): with a coloured ambient (orange street light) a
             // channel near 1 would cap and the spot would turn to the headlight colour. RunStage clamps after
             // the texture, so it is texture x (ambient + headlight).
-            diffuse.rgb = diffuse.rgb + g_HeadColour.rgb * factor / nightMul;
+            diffuse.rgb = diffuse.rgb + g_HeadColour.rgb * factor;
         }
 
         // The other racers' headlights, same map and scales, each with its own matrix and colour.
@@ -303,7 +318,7 @@ float4 MainPS( PixelIn input ) : SV_Target
             {
                 float map = g_HeadMap.SampleLevel( g_HeadSampler, float2( ( jx + 64.5 ) / 128.0, ( jz + 0.5 ) / 128.0 ), 0 ).r * 255.0;
                 float factor = max( map - abs( light.y * g_Head.w ), 0.0 ) / 256.0;
-                diffuse.rgb = diffuse.rgb + g_ExtraColour[i].rgb * factor / nightMul;
+                diffuse.rgb = diffuse.rgb + g_ExtraColour[i].rgb * factor;
             }
         }
 
@@ -319,7 +334,7 @@ float4 MainPS( PixelIn input ) : SV_Target
                 float spread = g_RearShape.w * ( 1.0 + max( d, 0.0 ) * 0.5 );
                 float left = exp( -( rear.x - g_RearShape.z ) * ( rear.x - g_RearShape.z ) / ( spread * spread ) );
                 float right = exp( -( rear.x + g_RearShape.z ) * ( rear.x + g_RearShape.z ) / ( spread * spread ) );
-                diffuse.rgb = diffuse.rgb + ( g_RearLeft[r].rgb * left + g_RearRight[r].rgb * right ) * along * up / nightMul;
+                diffuse.rgb = diffuse.rgb + ( g_RearLeft[r].rgb * left + g_RearRight[r].rgb * right ) * along * up;
             }
         }
     }
@@ -343,17 +358,15 @@ float4 MainPS( PixelIn input ) : SV_Target
         tex0.a *= 1.0 + lod * g_Debug.w;
     }
 
-    float4 current = diffuse;
+    float4 current = Pipeline( diffuse, specular, tex0, tex1 );
 
-    if ( g_ColorOp[0].x > 1 )
+    // Night over a day track (LFSP NightGrade): result = night factor x (world without lights) + the light of the lights.
+    // Dividing the lights by the factor before the texture clipped them, so the base pass and the lit pass run apart.
+    if ( g_Night.w > 0.0 )
     {
-        current = RunStage( 0, current, diffuse, specular, tex0 );
-        if ( g_ColorOp[1].x > 1 )
-            current = RunStage( 1, current, diffuse, specular, tex1 );
+        float4 baseColour = g_Head.x > 0.0 ? Pipeline( diffuseBase, specular, tex0, tex1 ) : current;
+        current.rgb = baseColour.rgb * nightMul + ( current.rgb - baseColour.rgb );
     }
-
-    if ( g_Flags.y != 0 )
-        current.rgb = saturate( current.rgb + specular.rgb );
 
     // Water fades out towards the far end of its surface ('[Water] FarFade'), the sea of the sky shows through.
     if ( g_AlphaRef.w > g_AlphaRef.z && g_AlphaRef.w > 0.0 )
@@ -383,12 +396,8 @@ float4 MainPS( PixelIn input ) : SV_Target
             fog = ( g_FogParams.y - depth ) / max( g_FogParams.y - g_FogParams.x, 1e-6 );
         else
             fog = specular.a;
-        current.rgb = lerp( g_FogColor.rgb, current.rgb, saturate( fog ) );
+        current.rgb = lerp( g_FogColor.rgb * nightMul, current.rgb, saturate( fog ) );
     }
-
-    // Night over a day track: the whole world (fog and sky included) darker; the lights above were divided by it.
-    if ( g_Night.w > 0.0 )
-        current.rgb *= nightMul;
 
     if ( g_Debug.x > 0 )
         current.rgb = lerp( current.rgb, float3( 1, 0, 1 ), 0.7 );
