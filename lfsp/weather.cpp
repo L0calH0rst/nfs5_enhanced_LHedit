@@ -100,7 +100,7 @@ namespace
     int g_menu = 1;
     std::string g_posLocation = "377,71"; // unter „records…“
     std::string g_posQuick;      // leer = kein Eintrag im Schnellen Rennen
-    std::string g_posTimeLocation = "377,95"; // unter „Wetter“
+    std::string g_posTimeLocation = "428,95"; // unter „Wetter“
     std::string g_posTimeQuick;
     float g_rainAmount = 0.8f;
     float g_snowAmount = 0.8f;
@@ -811,17 +811,23 @@ namespace
             return block;
         }
         const char * templ = nullptr;
+        const char * templTime = nullptr;
         const std::string * pos = nullptr;
         const std::string * posTime = nullptr;
         if (EndsWith(path, "location.lay"))
         {
+            // Treppe: je Zeile weiter unten um 24 nach außen (links x -51, y +24: Track 152,47 · Direction 101,71 · Traffic 50,95 ·
+            // Laps 9,119). Rechts records 326,47 · Wetter 377,71 · Tageszeit 428,95; die Verbindungslinie (stemleftheight) hat
+            // in der Zeile die Länge des linken Eintrags: Direction 17, Traffic 13.
             templ = "Track1.Direction(SHORT)"; // gleiche Zeile auf der linken Seite
+            templTime = "Track1.Traffic";
             pos = &g_posLocation;
             posTime = &g_posTimeLocation;
         }
         else if (EndsWith(path, "QuickRace.lay"))
         {
             templ = "Game.NumOpponents";
+            templTime = templ;
             pos = &g_posQuick;
             posTime = &g_posTimeQuick;
         }
@@ -838,7 +844,7 @@ namespace
         }
         if (!posTime->empty())
         {
-            changed = BuildLayout(text, templ, *posTime, "Track1.TimeOfDay", kStrTimeLabel, kStrTimeHelp) || changed;
+            changed = BuildLayout(text, templTime, *posTime, "Track1.TimeOfDay", kStrTimeLabel, kStrTimeHelp) || changed;
         }
         if (!changed)
         {
@@ -898,7 +904,7 @@ void lfsp_weather::Install(const char * ini, LogFn log)
     g_menu = GetPrivateProfileIntA("Weather", "Menu", 1, ini);
     g_posLocation = ReadString(ini, "MenuPosLocation", "377,71");
     g_posQuick = ReadString(ini, "MenuPosQuickRace", "");
-    g_posTimeLocation = ReadString(ini, "MenuPosTimeLocation", "377,95");
+    g_posTimeLocation = ReadString(ini, "MenuPosTimeLocation", "428,95");
     g_posTimeQuick = ReadString(ini, "MenuPosTimeQuickRace", "");
     g_rainAmount = ReadFloat(ini, "RainAmount", "0.8", 0.0f, 1.0f);
     g_snowAmount = ReadFloat(ini, "SnowAmount", "0.8", 0.0f, 1.0f);
