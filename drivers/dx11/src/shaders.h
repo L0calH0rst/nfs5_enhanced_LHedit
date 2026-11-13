@@ -33,7 +33,7 @@ cbuffer DrawConstants : register( b0 )
     row_major float4x4 g_RearViewToLight[16];
     float4 g_Test; // test switches (BUGS.md B21): x '[Dx11] TestVertexAlpha'
     float4 g_Clip; // clip rectangle of the game in game pixels: left, top, right, bottom
-    float4 g_Night; // rgb: factor of the world at night (LFSP LfspNightGrade), w: 1 = on
+    float4 g_Night; // rgb: factor, w: 0 off, 1 world, 2 sky, 3 light sprites (LFSP LfspNightGradeEx)
 };
 
 Texture2D g_Texture0 : register( t0 );
@@ -289,7 +289,8 @@ float4 MainPS( PixelIn input ) : SV_Target
     if ( g_Test.x > 0 )
         diffuse.a = 1.0;
     float4 specular = input.m_Specular;
-    float3 nightMul = g_Night.w > 0.0 ? g_Night.rgb : float3( 1.0, 1.0, 1.0 );
+    bool nightWorld = g_Night.w > 0.5 && g_Night.w < 1.5;
+    float3 nightMul = nightWorld ? g_Night.rgb : float3( 1.0, 1.0, 1.0 );
     float4 diffuseBase = diffuse; // without headlights: the night factor only darkens this part
 
     // The game's headlight model per pixel (doc/LICHT.md 7.2): light map lookup in the ground
@@ -362,7 +363,7 @@ float4 MainPS( PixelIn input ) : SV_Target
 
     // Night over a day track (LFSP NightGrade): result = night factor x (world without lights) + the light of the lights.
     // Dividing the lights by the factor before the texture clipped them, so the base pass and the lit pass run apart.
-    if ( g_Night.w > 0.0 )
+    if ( nightWorld )
     {
         float4 baseColour = g_Head.x > 0.0 ? Pipeline( diffuseBase, specular, tex0, tex1 ) : current;
         current.rgb = baseColour.rgb * nightMul + ( current.rgb - baseColour.rgb );
@@ -398,6 +399,10 @@ float4 MainPS( PixelIn input ) : SV_Target
             fog = specular.a;
         current.rgb = lerp( g_FogColor.rgb * nightMul, current.rgb, saturate( fog ) );
     }
+
+    // Night, sky (2) and light sprites (3): the factor of the draw.
+    if ( g_Night.w > 1.5 )
+        current.rgb *= g_Night.rgb;
 
     if ( g_Debug.x > 0 )
         current.rgb = lerp( current.rgb, float3( 1, 0, 1 ), 0.7 );

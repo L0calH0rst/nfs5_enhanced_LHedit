@@ -21,6 +21,7 @@ namespace lfsp_weather
     using LogFn = void (*)(const char *, ...);
     void Install(const char * ini, LogFn log);
     bool NightGradeActive(float * rgb);
+    bool NightGradeEx(float * out9);
     bool NightSynthetic();
 }
 
@@ -92,6 +93,8 @@ namespace
     int g_mode = 0;              // Menüwahl: 0 Original, 1 Regen, 2 Schnee, 3 Zufall
     int g_effMode = 0;           // gilt im Rennen: 0…2 (bei Zufall je Rennstart gewürfelt)
     int g_nightForce = -1;         // -1 nichts, 0 Tag, 1 Nacht (Wahl dieses Rennens)
+    float g_skyDarken = 0.6f;      // 0…1: Anteil des Welt-Faktors, der auf den Himmel wirkt
+    float g_lightBoost = 1.6f;     // Faktor auf Leuchtsprites (additive Draws) bei erzwungener Nacht
     bool g_nightGrade = true;      // Welt abdunkeln, wenn „Nacht“ auf einer Tagstrecke gewählt ist
     bool g_nightActive = false;    // Abdunkeln gilt für das laufende Rennen
     bool g_nightSynthetic = false; // „Nacht“ auf einer Strecke ohne eigene Nacht: dort gibt es keine Nachtschichten im Spiel
@@ -898,6 +901,8 @@ void lfsp_weather::Install(const char * ini, LogFn log)
         g_nightMul[1] = ((colour >> 8) & 0xFF) / 255.0f;
         g_nightMul[2] = (colour & 0xFF) / 255.0f;
         g_nightTracks = ReadString(ini, "NightTracks", "monaco3");
+        g_skyDarken = ReadFloat(ini, "SkyDarken", "0.6", 0.0f, 1.0f);
+        g_lightBoost = ReadFloat(ini, "NightLightBoost", "1.6", 0.5f, 8.0f);
     }
     g_timeMode = GetPrivateProfileIntA("Weather", "TimeMode", 0, ini);
     g_timeMode = g_timeMode < 0 || g_timeMode > 3 ? 0 : g_timeMode;
@@ -996,4 +1001,26 @@ extern "C" __declspec(dllexport) int LfspNightSynthetic()
 bool lfsp_weather::NightSynthetic()
 {
     return g_nightSynthetic && *reinterpret_cast<const int *>(kFrontEnd) == 0;
+}
+
+// dx11z (Build 9e): je 3 Werte Welt, Himmel, Leuchtsprites. 1 = Abdunkeln aktiv.
+extern "C" __declspec(dllexport) int LfspNightGradeEx(float * out)
+{
+    return lfsp_weather::NightGradeEx(out) ? 1 : 0;
+}
+
+bool lfsp_weather::NightGradeEx(float * out)
+{
+    float world[3] = {};
+    if (!NightGradeActive(world))
+    {
+        return false;
+    }
+    for (int i = 0; i < 3; ++i)
+    {
+        out[i] = world[i];
+        out[3 + i] = 1.0f + (world[i] - 1.0f) * g_skyDarken; // Himmel: nur ein Teil des Welt-Faktors, bleibt bläulich
+        out[6 + i] = g_lightBoost;
+    }
+    return true;
 }

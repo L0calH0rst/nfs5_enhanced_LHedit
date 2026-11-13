@@ -4754,8 +4754,11 @@ namespace dx11z
         const bool flat_draw = !m_BatchVertices.empty() && (flat_rhw[0] >= 0.999f || (flat_z[1] - flat_z[0] < 1e-7f && flat_rhw[1] - flat_rhw[0] < 1e-7f) ||
             render[rs::ZFUNC] == 8); // the HUD phase (Hud_Draw) runs R_SetZFunc 7 = depth func ALWAYS, the world uses LESSEQUAL
 
-        // Night over a day track (LFSP 'NightGrade'): depth tested draws that are opaque or normally alpha blended;
-        // additive and multiplying passes (lamps, flares) and everything without a depth test (HUD) stay as they are.
+        // Night over a day track (LFSP 'NightGrade'), per draw one of:
+        //  1 world: opaque or normally blended draws with depth writing, factor on the world without its lights;
+        //  2 sky: depth func ALWAYS at the far end (z near 1, rhw tiny), factor of 'SkyDarken' on the sky and its clouds;
+        //  3 light sprites: additive draws (flares, lamps, car light sprites), brightened by 'NightLightBoost'.
+        // The HUD (also depth func ALWAYS, but not far), sprites with normal blending and no depth write stay as they are.
         {
             using NightFn = int( __cdecl * )(float *);
             static NightFn night_fn = nullptr;
@@ -4764,45 +4767,55 @@ namespace dx11z
             {
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
-                    night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGrade" ));
-                Log( "Night grade (dx11z build 9c, HUD by depth func ALWAYS): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                    night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
+                Log( "Night grade (dx11z build 9e, world/sky/light sprites): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
-            // Sprites (flares, light cones, smoke) are drawn without depth writing and keep their own brightness.
-            const bool night_blend = render[rs::ALPHABLENDENABLE] == 0 || ((night_source == 12 || (night_source == 5 && night_destination == 6)) && render[rs::ZWRITEENABLE] != 0);
-            float rgb[3] = {};
-            static std::uint64_t night_counts[4] = {};
-            if (night_fn != nullptr && night_fn( rgb ) != 0)
+            const bool night_normal = night_source == 12 || (night_source == 5 && night_destination == 6);
+            const bool night_additive = render[rs::ALPHABLENDENABLE] != 0 && !night_normal && night_destination == 2;
+            float grade[9] = {}; // world rgb, sky rgb, light boost rgb
+            static std::uint64_t night_counts[6] = {};
+            int mode = 0;
+            if (night_fn != nullptr && night_fn( grade ) != 0)
             {
-                const bool depth = render[rs::ZENABLE] != 0 && !flat_draw;
-                ++night_counts[depth ? (night_blend ? 0 : 1) : 2];
+                const bool sky = render[rs::ZFUNC] == 8 && !m_BatchVertices.empty() && flat_z[0] >= 0.99f && flat_rhw[1] < 0.05f;
+                if (sky)
+                    mode = (render[rs::ALPHABLENDENABLE] == 0 || night_normal) ? 2 : 0;
+                else if (flat_draw)
+                    mode = 0;
+                else if (night_additive)
+                    mode = 3;
+                else if (render[rs::ZENABLE] != 0 && (render[rs::ALPHABLENDENABLE] == 0 || (night_normal && render[rs::ZWRITEENABLE] != 0)))
+                    mode = 1;
+                ++night_counts[mode == 0 ? (flat_draw && !sky ? 4 : 5) : mode - 1 + (mode > 0 ? 0 : 0)];
                 static std::uint32_t night_logged_flip = 0;
                 static int night_examples = 0;
                 if (m_FlipCount / 600 != night_logged_flip)
                 {
                     night_logged_flip = m_FlipCount / 600;
-                    Log( "Night grade: draws graded %llu, sprites/no zwrite %llu, 2D (flat or off-scale) %llu (frame %u)",
+                    Log( "Night grade: world %llu, sky %llu, light sprites %llu, HUD/2D %llu, other sprites %llu (frame %u)",
                         static_cast<unsigned long long>(night_counts[0]), static_cast<unsigned long long>(night_counts[1]),
-                        static_cast<unsigned long long>(night_counts[2]), m_FlipCount );
+                        static_cast<unsigned long long>(night_counts[2]), static_cast<unsigned long long>(night_counts[4]),
+                        static_cast<unsigned long long>(night_counts[5]), m_FlipCount );
                 }
-                if (night_examples < 60 && (flat_draw || !night_blend || night_counts[0] % 50000 == 1) && night_counts[0] % 7 == 0)
+                if (night_examples < 60 && (mode == 2 || mode == 3 || flat_draw) && (night_counts[mode == 0 ? 4 : mode - 1] % 4000 == 1))
                 {
                     ++night_examples;
-                    Log( "Night grade example: %s, %u vertices, z %g..%g, rhw %g..%g, n %g..%g, zfunc %u, zwrite %u, blend %u, texture %08X",
-                        flat_draw ? "2D" : (night_blend ? "graded" : "sprite"), static_cast<unsigned>(m_BatchVertices.size()), flat_z[0], flat_z[1],
-                        flat_rhw[0], flat_rhw[1], flat_n[0], flat_n[1], static_cast<unsigned>(render[rs::ZFUNC]), static_cast<unsigned>(render[rs::ZWRITEENABLE]),
-                        static_cast<unsigned>(render[rs::ALPHABLENDENABLE]), m_Bound[0] != nullptr ? static_cast<unsigned>(m_Bound[0]->m_Hash) : 0u );
+                    Log( "Night grade example: mode %d, %u vertices, z %g..%g, rhw %g..%g, zfunc %u, zwrite %u, blend %u src %u dst %u, texture %08X",
+                        mode, static_cast<unsigned>(m_BatchVertices.size()), flat_z[0], flat_z[1], flat_rhw[0], flat_rhw[1],
+                        static_cast<unsigned>(render[rs::ZFUNC]), static_cast<unsigned>(render[rs::ZWRITEENABLE]),
+                        static_cast<unsigned>(render[rs::ALPHABLENDENABLE]), night_source, night_destination,
+                        m_Bound[0] != nullptr ? static_cast<unsigned>(m_Bound[0]->m_Hash) : 0u );
                 }
-                if (!depth || !night_blend)
-                    rgb[0] = -1.0f;
             }
-            if (rgb[0] >= 0.0f && rgb[1] > 0.0f)
+            if (mode > 0)
             {
+                const float * rgb = &grade[(mode - 1) * 3];
                 constants.m_Night[0] = rgb[0];
                 constants.m_Night[1] = rgb[1];
                 constants.m_Night[2] = rgb[2];
-                constants.m_Night[3] = 1.0f;
+                constants.m_Night[3] = static_cast<float>(mode);
             }
         }
 
