@@ -31,7 +31,7 @@ cbuffer DrawConstants : register( b0 )
     float4 g_RearLeft[16]; // w: offset of this glow, 0 = g_RearShape.x (front glow of the turn signals, 11.5d)
     float4 g_RearRight[16];
     row_major float4x4 g_RearViewToLight[16];
-    float4 g_Test; // test switches (BUGS.md B21): x '[Dx11] TestVertexAlpha'
+    float4 g_Test; // test switches (BUGS.md B21): x '[Dx11] TestVertexAlpha', y '[Weather] NightEdgeLight'
     float4 g_Clip; // clip rectangle of the game in game pixels: left, top, right, bottom
     float4 g_Night; // rgb: factor, w: 0 off, 1 world, 2 sky, 3 light sprites (LFSP LfspNightGradeEx)
 };
@@ -363,10 +363,17 @@ float4 MainPS( PixelIn input ) : SV_Target
 
     // Night over a day track (LFSP NightGrade): result = night factor x (world without lights) + the light of the lights.
     // Dividing the lights by the factor before the texture clipped them, so the base pass and the lit pass run apart.
-    if ( nightWorld )
+    // '[Weather] NightEdgeLight' (g_Test.y): on alpha tested textures the faint edge (alpha below the edge reference) keeps
+    // the colour of its padding, bright texels; lit by the headlights they showed a yellow rim around leaves. The light
+    // part fades out with the alpha there.
+    bool edgeLight = g_Test.y > 0.0 && g_Head.x > 0.0 && g_Flags.z != 8;
+    if ( nightWorld || edgeLight )
     {
         float4 baseColour = g_Head.x > 0.0 ? Pipeline( diffuseBase, specular, tex0, tex1 ) : current;
-        current.rgb = baseColour.rgb * nightMul + ( current.rgb - baseColour.rgb );
+        float3 lightPart = current.rgb - baseColour.rgb;
+        if ( edgeLight )
+            lightPart *= saturate( current.a / max( g_Debug.z, 0.004 ) );
+        current.rgb = baseColour.rgb * nightMul + lightPart;
     }
 
     // Water fades out towards the far end of its surface ('[Water] FarFade'), the sea of the sky shows through.

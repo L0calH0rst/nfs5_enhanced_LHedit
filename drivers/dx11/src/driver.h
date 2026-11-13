@@ -451,6 +451,7 @@ namespace dx11z
         bool m_DayMesh = false;
         // '[Dx11] HeadlightsDayStrength', 'HeadlightsDayColour', 'HeadlightsDayRange'.
         float m_ConfigDayStrength = 1.0f;
+        bool m_ConfigNightEdgeLight = true; // '[Weather] NightEdgeLight' of lfsp.ini: light fades out on the faint alpha edge
         std::uint32_t m_ConfigDayColour = 0x808080u;
         float m_ConfigDayRange = 1.0f;
 

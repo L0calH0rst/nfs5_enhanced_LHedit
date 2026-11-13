@@ -1619,6 +1619,8 @@ namespace dx11z
             return text;
         };
 
+        m_ConfigNightEdgeLight = ::GetPrivateProfileIntA( "Weather", "NightEdgeLight", 1, lights_ini.c_str() ) != 0;
+        Log( "Config NightEdgeLight %d", m_ConfigNightEdgeLight ? 1 : 0 );
         m_ConfigHeadlights = std::clamp( std::atoi( light_value( "Headlights", "0" ).c_str() ), 0, 2 );
         m_ConfigHeadlightsDay = std::clamp( std::atoi( light_value( "HeadlightsDay", "0" ).c_str() ), 0, 2 );
         m_ConfigDayStrength = std::clamp( static_cast<float>(std::atof( light_value( "HeadlightsDayStrength", "1.0" ).c_str() )), 0.0f, 4.0f );
@@ -4735,6 +4737,7 @@ namespace dx11z
         constants.m_Debug[2] = static_cast<float>(m_ConfigAlphaEdgeRef) / 255.0f;
         constants.m_Debug[3] = m_ConfigAlphaMipScale;
         constants.m_Test[0] = m_ConfigTestVertexAlpha ? 1.0f : 0.0f;
+        constants.m_Test[1] = m_ConfigNightEdgeLight ? 1.0f : 0.0f;
         constants.m_Clip[0] = static_cast<float>(m_Clip.left);
         constants.m_Clip[1] = static_cast<float>(m_Clip.top);
         constants.m_Clip[2] = static_cast<float>(m_Clip.right);
@@ -4769,7 +4772,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9e, world/sky/light sprites): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9g, world/sky/light sprites): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
