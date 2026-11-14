@@ -344,6 +344,7 @@ float4 MainPS( PixelIn input ) : SV_Target
     }
 
     float4 current = baseColour;
+    float3 nightLight = float3( 0.0, 0.0, 0.0 ); // night: the light of the lights on the darkened world
 
     // MIRROR_PASS ('[Water] ReflectionSimpleShader'): the mirrored scene of the water has no light loops.
 #ifndef MIRROR_PASS
@@ -351,6 +352,7 @@ float4 MainPS( PixelIn input ) : SV_Target
     // plane of the headlight, minus height, added to the vertex colour before the texture.
     if ( g_Head.x > 0.0 )
     {
+        float3 lightAdd = float3( 0.0, 0.0, 0.0 );
         float iz = input.m_Light.z * g_Head.z * g_HeadHigh.x;
         float ix = input.m_Light.x * g_Head.y * g_HeadHigh.y;
         if ( iz > 0.5 && iz < 126.5 && abs( ix ) < 62.5 )
@@ -360,7 +362,7 @@ float4 MainPS( PixelIn input ) : SV_Target
             // Not clamped before the texture (PLAN.md 9.9b): with a coloured ambient (orange street light) a
             // channel near 1 would cap and the spot would turn to the headlight colour. RunStage clamps after
             // the texture, so it is texture x (ambient + headlight).
-            diffuse.rgb = diffuse.rgb + g_HeadColour.rgb * factor;
+            lightAdd += g_HeadColour.rgb * factor;
         }
 
         // The other racers' headlights, same map and scales, each with its own matrix and colour.
@@ -373,7 +375,7 @@ float4 MainPS( PixelIn input ) : SV_Target
             {
                 float map = g_HeadMap.SampleLevel( g_HeadSampler, float2( ( jx + 64.5 ) / 128.0, ( jz + 0.5 ) / 128.0 ), 0 ).r * 255.0;
                 float factor = max( map - abs( light.y * g_Head.w ), 0.0 ) / 256.0;
-                diffuse.rgb = diffuse.rgb + g_ExtraColour[i].rgb * factor;
+                lightAdd += g_ExtraColour[i].rgb * factor;
             }
         }
 
@@ -389,11 +391,19 @@ float4 MainPS( PixelIn input ) : SV_Target
                 float spread = g_RearShape.w * ( 1.0 + max( d, 0.0 ) * 0.5 );
                 float left = exp( -( rear.x - g_RearShape.z ) * ( rear.x - g_RearShape.z ) / ( spread * spread ) );
                 float right = exp( -( rear.x + g_RearShape.z ) * ( rear.x + g_RearShape.z ) / ( spread * spread ) );
-                diffuse.rgb = diffuse.rgb + ( g_RearLeft[r].rgb * left + g_RearRight[r].rgb * right ) * along * up;
+                lightAdd += ( g_RearLeft[r].rgb * left + g_RearRight[r].rgb * right ) * along * up;
             }
         }
 
-        current = Pipeline( diffuse, specular, tex0, tex1 );
+        // Night (PLAN.md 9.14a test): the light goes onto the vertex colour already darkened by the night factor. On the
+        // day colour a white texture (road markings) was at 1 before any light, the clamp ate the light part.
+        if ( nightWorld )
+        {
+            float4 dark = float4( diffuseBase.rgb * nightMul, diffuseBase.a );
+            nightLight = Pipeline( float4( dark.rgb + lightAdd, dark.a ), specular, tex0, tex1 ).rgb - Pipeline( dark, specular, tex0, tex1 ).rgb;
+        }
+        else
+            current = Pipeline( float4( diffuse.rgb + lightAdd, diffuse.a ), specular, tex0, tex1 );
     }
 #endif
 
@@ -409,7 +419,7 @@ float4 MainPS( PixelIn input ) : SV_Target
 #endif
     if ( nightWorld || edgeLight )
     {
-        float3 lightPart = current.rgb - baseColour.rgb;
+        float3 lightPart = nightWorld ? nightLight : current.rgb - baseColour.rgb;
         if ( edgeLight )
             lightPart *= saturate( baseColour.a / max( g_Debug.z, 0.004 ) );
         current.rgb = baseColour.rgb * nightMul + lightPart;
@@ -558,6 +568,7 @@ cbuffer ReflectConstants : register( b0 )
     float4 g_Fresnel; // x: share of the reflection looking straight down (1 = no Fresnel), y: weight target bound, z/w: water far fade start/end (w)
     float4 g_Edge; // x: edge fade radius (pixels at 1080 lines, 0 = off), y: 'ReflectionDebug' 3 or 4, z: frame, depth and stencil copies bound, w: strength looking along the water
     float4 g_Size; // xy: render size (the reflection target may be smaller), z: depth scale n of z = 1 - n / w
+    float4 g_Light; // mirrored lights (9.14a): x boost, y streak step (pixels at 1080 lines, 0 = none), z: light target bound
 };
 
 Texture2D g_Reflection : register( t0 );
@@ -570,6 +581,7 @@ Texture2D<float> g_Weight : register( t2 ); // 1 water, 1 - alpha on the shore
 Texture2D g_Frame : register( t4 );
 Texture2D<uint> g_Stencil : register( t3 );
 Texture2D<float> g_Depth : register( t5 );
+Texture2D g_Lights : register( t6 ); // mirrored additive lights (9.14a), the size of the reflection target
 uint StencilAt( int2 p ) { return g_Stencil.Load( int3( p, 0 ) ); }
 float DepthAt( int2 p ) { return g_Depth.Load( int3( p, 0 ) ); }
 
@@ -732,6 +744,23 @@ float4 MainPS( float4 position : SV_Position ) : SV_Target
     // Looking along the water it mirrors almost everything ('[Water] ReflectionGrazing'): far water takes the
     // colour of the reflected sky, like the far sea of the game next to it.
     alpha = lerp( alpha, saturate( colour.a ) * max( g_Tint.a, g_Edge.w ) * weight, pow( 1.0 - steep, 8.0 ) );
+    // Mirrored lights (9.14a, '[Water] ReflectionLights'): their own target, so only lights are boosted and streaked, never a
+    // bright wall by day. Six lookups above the pixel draw the streak down the water towards the camera, fading out.
+    if ( g_Light.z > 0.5 )
+    {
+        float3 lights = g_Lights.SampleLevel( g_SkySampler, uv, 0 ).rgb;
+        if ( g_Light.y > 0.0 )
+        {
+            [unroll] for ( int s = 1; s <= 6; ++s )
+                lights += g_Lights.SampleLevel( g_SkySampler, uv - float2( 0.0, s * g_Light.y * scale / size.y ), 0 ).rgb * ( 1.0 - s / 7.0 ) * 0.5;
+        }
+        lights *= g_Light.x * weight;
+        // Added to the reflection; the blend over the frame takes the larger coverage, so a light on clear water shows.
+        float added = saturate( max( lights.r, max( lights.g, lights.b ) ) );
+        float3 total = mirrored * alpha + lights;
+        alpha = max( alpha, added );
+        mirrored = saturate( total / max( alpha, 1e-4 ) );
+    }
     // The hole shows ground, not the water: the water around it (frame before the composite) with the
     // reflection over it as on the water, laid over the hole.
     if ( hole > 0.0 )

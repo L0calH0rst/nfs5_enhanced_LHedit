@@ -596,7 +596,7 @@ namespace dx11z
         m_Device->CreateBuffer( &desc, nullptr, m_PresentConstants.Put() );
         desc.ByteWidth = sizeof( ClearConstants );
         m_Device->CreateBuffer( &desc, nullptr, m_ClearConstants.Put() );
-        desc.ByteWidth = 240; // MirrorConstants of the scene shader, also the constants of the reflection composite
+        desc.ByteWidth = 256; // MirrorConstants of the scene shader, also the constants of the reflection composite
         m_Device->CreateBuffer( &desc, nullptr, m_MirrorConstants.Put() );
         desc.ByteWidth = 256; // CarReflectConstants
         m_Device->CreateBuffer( &desc, nullptr, m_CarReflConstants.Put() );
@@ -1738,6 +1738,11 @@ namespace dx11z
             m_ConfigReflectionMinSize = std::clamp( static_cast<float>(std::atof( water_value( "ReflectionMinSize", "0" ).c_str() )), 0.0f, 200.0f );
             m_ConfigReflectionMirrorView = std::clamp( std::atoi( water_value( "ReflectionMirrorView", "1" ).c_str() ), 0, 1 );
             m_ConfigReflectionSkyScale = std::atof( water_value( "ReflectionSkyScale", "1" ).c_str() ) < 0.75 ? 0.5f : 1.0f;
+            m_ConfigReflectionLights = std::clamp( std::atoi( water_value( "ReflectionLights", "0" ).c_str() ), 0, 1 );
+            m_ConfigReflectionLightBoost = std::clamp( static_cast<float>(std::atof( water_value( "ReflectionLightBoost", "3" ).c_str() )), 0.0f, 16.0f );
+            m_ConfigReflectionLightStreak = std::clamp( static_cast<float>(std::atof( water_value( "ReflectionLightStreak", "6" ).c_str() )), 0.0f, 40.0f );
+            Log( "Config water: ReflectionLights %d, ReflectionLightBoost %.1f, ReflectionLightStreak %.1f", m_ConfigReflectionLights,
+                m_ConfigReflectionLightBoost, m_ConfigReflectionLightStreak );
             Log( "Config water: ReflectionSimpleShader %d, ReflectionMinSize %.0f, ReflectionMirrorView %d, ReflectionSkyScale %.1f",
                 m_ConfigReflectionSimpleShader, m_ConfigReflectionMinSize, m_ConfigReflectionMirrorView, m_ConfigReflectionSkyScale );
 
@@ -5235,7 +5240,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9t, shared blur chain for the car reflections): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9v, headlights on the darkened night colour): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -5865,8 +5870,11 @@ namespace dx11z
         const std::uint32_t capture_source = render[rs::SRCBLEND];
         const std::uint32_t capture_destination = render[rs::DESTBLEND];
         // Not kept in the rear view mirror with '[Water] ReflectionMirrorView' 0, it gets no reflection.
+        // '[Water] ReflectionLights' (9.14a): additive lights (SrcAlpha or One onto One) too, mirrored into a target of their own.
+        const bool capture_light = m_ConfigReflectionLights != 0 && render[rs::ALPHABLENDENABLE] != 0 &&
+            (capture_source == 5 || capture_source == 2) && capture_destination == 2;
         m_ReflCapture = reflections && !water && !m_SkidDraw && render[rs::ZENABLE] != 0 && (m_ConfigReflectionMirrorView != 0 || m_ReflViewIsMain) &&
-            (render[rs::ALPHABLENDENABLE] == 0 || capture_source == 12 || (capture_source == 5 && capture_destination == 6));
+            (render[rs::ALPHABLENDENABLE] == 0 || capture_source == 12 || (capture_source == 5 && capture_destination == 6) || capture_light);
 
         // The sky comes before the first queue run of the frame (list 0); kept as well and put in front of
         // every reflection of the frame, so water reflecting the sky is not left empty.
@@ -10819,11 +10827,11 @@ namespace dx11z
                         Log( "Water: GPU time per reflection (mean of %u) %.3f ms: mirrored scene and sky %.3f, stencil pack and frame copy %.3f, composite %.3f",
                             m_ReflTimingCount, (m_ReflTimingSum[0] + m_ReflTimingSum[1] + m_ReflTimingSum[2]) / n, m_ReflTimingSum[0] / n,
                             m_ReflTimingSum[1] / n, m_ReflTimingSum[2] / n );
-                        Log( "Water: mirrored draws kept %llu, under the water left out %llu, smaller than ReflectionMinSize left out %llu; "
-                            "rear view mirror runs left out %llu", static_cast<unsigned long long>(m_ReflKept),
+                        Log( "Water: mirrored draws kept %llu (lights %llu), under the water left out %llu, smaller than ReflectionMinSize left out %llu; "
+                            "rear view mirror runs left out %llu", static_cast<unsigned long long>(m_ReflKept), static_cast<unsigned long long>(m_ReflLightsKept),
                             static_cast<unsigned long long>(m_ReflCulledBelow), static_cast<unsigned long long>(m_ReflCulledSmall),
                             static_cast<unsigned long long>(m_ReflMirrorViewSkipped) );
-                        m_ReflKept = m_ReflCulledBelow = m_ReflCulledSmall = m_ReflMirrorViewSkipped = 0;
+                        m_ReflKept = m_ReflCulledBelow = m_ReflCulledSmall = m_ReflMirrorViewSkipped = m_ReflLightsKept = 0;
                         m_ReflTimingSum = {};
                         m_ReflTimingCount = 0;
                     }
@@ -10936,6 +10944,9 @@ namespace dx11z
         batch.m_Indices.assign( m_BatchIndices.begin(), m_BatchIndices.end() );
         batch.m_Constants = m_ReflConstants;
         batch.m_BlendKey = render[rs::ALPHABLENDENABLE] != 0 ? 1u : 0u;
+        // Additive lights (9.14a): One onto the frame, kept only with '[Water] ReflectionLights'.
+        if (render[rs::ALPHABLENDENABLE] != 0 && render[rs::DESTBLEND] == 2 && (render[rs::SRCBLEND] == 5 || render[rs::SRCBLEND] == 2))
+            batch.m_BlendKey = render[rs::SRCBLEND] == 2 ? 3u : 2u; // 2: SrcAlpha + One, 3: One + One
         batch.m_DepthWrite = render[rs::ZWRITEENABLE] != 0;
         batch.m_Cull = render[rs::CULLMODE];
         batch.m_Hash = hash;
@@ -11213,6 +11224,39 @@ namespace dx11z
         if (!m_ReflTargetView || !m_ReflDepthView || !m_ReflTargetSrv)
             return;
 
+        // Target of the mirrored lights (9.14a), half float: lights add up past 1, the composite boosts them.
+        if (m_ConfigReflectionLights != 0)
+        {
+            D3D11_TEXTURE2D_DESC have = {};
+            if (m_ReflLight)
+                m_ReflLight->GetDesc( &have );
+            if (!m_ReflLight || have.Width != static_cast<UINT>(refl_width) || have.Height != static_cast<UINT>(refl_height))
+            {
+                m_ReflLightView.Reset();
+                m_ReflLightSrv.Reset();
+                m_ReflLight.Reset();
+                D3D11_TEXTURE2D_DESC desc = {};
+                desc.Width = static_cast<UINT>(refl_width);
+                desc.Height = static_cast<UINT>(refl_height);
+                desc.MipLevels = 1;
+                desc.ArraySize = 1;
+                desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                desc.SampleDesc.Count = 1;
+                desc.Usage = D3D11_USAGE_DEFAULT;
+                desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+                const bool made = SUCCEEDED( m_Device->CreateTexture2D( &desc, nullptr, m_ReflLight.Put() ) ) &&
+                    SUCCEEDED( m_Device->CreateRenderTargetView( m_ReflLight.Get(), nullptr, m_ReflLightView.Put() ) ) &&
+                    SUCCEEDED( m_Device->CreateShaderResourceView( m_ReflLight.Get(), nullptr, m_ReflLightSrv.Put() ) );
+                Log( "Water: light target %dx%d %s", refl_width, refl_height, made ? "created" : "FAILED" );
+                if (!made)
+                {
+                    m_ReflLightView.Reset();
+                    m_ReflLightSrv.Reset();
+                    m_ReflLight.Reset();
+                }
+            }
+        }
+
         ReflTiming * timing = ReflTimingBegin();
         const auto timing_mark = [&]( std::size_t stamp )
         {
@@ -11285,6 +11329,12 @@ namespace dx11z
         ID3D11Buffer * buffers[2] = { m_DrawConstants.Get(), m_MirrorConstants.Get() };
         m_Context->VSSetConstantBuffers( 0, 2, buffers );
         m_Context->PSSetConstantBuffers( 0, 1, buffers );
+        // '[Water] ReflectionLights' (9.14a): the additive lights go into a target of their own (same depth), boosted and
+        // streaked by the composite.
+        bool lights_bound = false;
+        const bool lights_target = m_ConfigReflectionLights != 0 && m_ReflLightView;
+        if (lights_target)
+            m_Context->ClearRenderTargetView( m_ReflLightView.Get(), transparent );
         ID3D11ShaderResourceView * no_view = nullptr;
         m_Context->PSSetShaderResources( 2, 1, &no_view );
 
@@ -11364,6 +11414,19 @@ namespace dx11z
                 ++m_ReflKept;
             }
 
+            // Additive lights (9.14a) into their own target, everything else into the reflection target.
+            const bool light = batch.m_BlendKey >= 2;
+            if (light && !lights_target)
+                continue;
+            if (light != lights_bound)
+            {
+                lights_bound = light;
+                ID3D11RenderTargetView * target = light ? m_ReflLightView.Get() : m_ReflTargetView.Get();
+                m_Context->OMSetRenderTargets( 1, &target, m_ReflDepthView.Get() );
+            }
+            if (light)
+                ++m_ReflLightsKept;
+
             if (!upload( batch ))
                 continue;
 
@@ -11377,7 +11440,16 @@ namespace dx11z
                 target.BlendOp = D3D11_BLEND_OP_ADD;
                 target.BlendOpAlpha = D3D11_BLEND_OP_ADD;
                 target.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-                if (batch.m_BlendKey != 0)
+                if (batch.m_BlendKey >= 2)
+                {
+                    // Lights add up in their own target, as the game adds them to the frame.
+                    target.SrcBlend = batch.m_BlendKey == 3 ? D3D11_BLEND_ONE : D3D11_BLEND_SRC_ALPHA;
+                    target.DestBlend = D3D11_BLEND_ONE;
+                    target.SrcBlendAlpha = D3D11_BLEND_ONE;
+                    target.DestBlendAlpha = D3D11_BLEND_ONE;
+                    target.BlendOpAlpha = D3D11_BLEND_OP_MAX;
+                }
+                else if (batch.m_BlendKey != 0)
                 {
                     target.SrcBlend = D3D11_BLEND_SRC_ALPHA;
                     target.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
@@ -11551,6 +11623,11 @@ namespace dx11z
             out[57] = static_cast<float>(m_RenderHeight);
             out[58] = depth_scale;
             out[59] = 0.0f;
+            // Mirrored lights (9.14a): boost, streak step (pixels at 1080 lines), light target bound.
+            out[60] = m_ConfigReflectionLightBoost;
+            out[61] = m_ConfigReflectionLightStreak;
+            out[62] = lights_target ? 1.0f : 0.0f;
+            out[63] = 0.0f;
             m_Context->Unmap( m_MirrorConstants.Get(), 0 );
         }
 
@@ -11608,9 +11685,10 @@ namespace dx11z
         m_Context->PSSetShader( m_ReflCompositePs.Get(), nullptr, 0 );
         ID3D11Buffer * tint_buffer = m_MirrorConstants.Get();
         m_Context->PSSetConstantBuffers( 0, 1, &tint_buffer );
-        ID3D11ShaderResourceView * reflection[6] = { m_ReflTargetSrv.Get(), m_ReflSkyView.Get(), m_ReflWeightSrv.Get(),
-            stencil ? m_ReflMaskSrv.Get() : nullptr, stencil ? m_ReflFrameCopyView.Get() : nullptr, stencil ? m_ReflMaskDepthSrv.Get() : nullptr };
-        m_Context->PSSetShaderResources( 0, 6, reflection );
+        ID3D11ShaderResourceView * reflection[7] = { m_ReflTargetSrv.Get(), m_ReflSkyView.Get(), m_ReflWeightSrv.Get(),
+            stencil ? m_ReflMaskSrv.Get() : nullptr, stencil ? m_ReflFrameCopyView.Get() : nullptr, stencil ? m_ReflMaskDepthSrv.Get() : nullptr,
+            lights_target ? m_ReflLightSrv.Get() : nullptr };
+        m_Context->PSSetShaderResources( 0, 7, reflection );
         ID3D11SamplerState * sky_sampler = m_PresentSampler.Get();
         m_Context->PSSetSamplers( 1, 1, &sky_sampler );
         m_Context->Draw( 3, 0 );
@@ -11623,8 +11701,8 @@ namespace dx11z
         }
 
         // The next draws set their own state; the target must not stay bound as a texture.
-        ID3D11ShaderResourceView * none[6] = {};
-        m_Context->PSSetShaderResources( 0, 6, none );
+        ID3D11ShaderResourceView * none[7] = {};
+        m_Context->PSSetShaderResources( 0, 7, none );
     }
 
 

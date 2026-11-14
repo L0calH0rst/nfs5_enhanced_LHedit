@@ -1203,7 +1203,7 @@ namespace dx11z
             std::vector<TlVertex> m_Vertices;
             std::vector<std::uint16_t> m_Indices;
             std::vector<std::uint8_t> m_Constants; // DrawConstants of the original draw
-            std::uint64_t m_BlendKey = 0;
+            std::uint64_t m_BlendKey = 0; // 0 opaque, 1 alpha blended, 2/3 additive light SrcAlpha/One + One (9.14a)
             bool m_DepthWrite = true;
             std::uint32_t m_Cull = 1;
             std::array<ID3D11ShaderResourceView *, 2> m_Views = {};
@@ -1267,6 +1267,15 @@ namespace dx11z
         float m_ConfigReflectionMinSize = 0.0f; // '[Water] ReflectionMinSize': draws smaller than this (pixels of 1440 lines) are not mirrored
         int m_ConfigReflectionMirrorView = 1; // '[Water] ReflectionMirrorView': 0 = no reflection in the rear view mirror
         float m_ConfigReflectionSkyScale = 1.0f; // '[Water] ReflectionSkyScale': size of the sky image, 1 or 0.5
+        // Lights in the water (9.14a): additive draws (lamp glows, light sprites) are mirrored too, into m_ReflLight; the composite
+        // brightens them and draws streaks.
+        int m_ConfigReflectionLights = 0; // '[Water] ReflectionLights'
+        float m_ConfigReflectionLightBoost = 3.0f; // '[Water] ReflectionLightBoost': factor on their colour
+        float m_ConfigReflectionLightStreak = 6.0f; // '[Water] ReflectionLightStreak': step of the streak lookups (pixels at 1080 lines, 0 = none)
+        std::uint64_t m_ReflLightsKept = 0;
+        ComPtr<ID3D11Texture2D> m_ReflLight;
+        ComPtr<ID3D11RenderTargetView> m_ReflLightView;
+        ComPtr<ID3D11ShaderResourceView> m_ReflLightSrv;
         bool m_ReflViewIsMain = false; // the current queue run follows the sky phase (main view, not the rear view mirror)
         std::uint64_t m_ReflCulledBelow = 0, m_ReflCulledSmall = 0, m_ReflKept = 0, m_ReflMirrorViewSkipped = 0;
         ComPtr<ID3D11PixelShader> m_MirrorPs;
