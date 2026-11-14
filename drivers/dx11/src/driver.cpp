@@ -101,6 +101,9 @@ namespace dx11z
         constexpr float DEPTH_BIAS_UNIT = 1.0f / 32768.0f;
         constexpr std::size_t RAW_VERTICES = 65536;
         constexpr std::size_t RAW_INDICES = RAW_VERTICES * 4;
+    // Ring of the car reflections (CarReflBatch), apart from the one of the game's batches.
+    constexpr std::size_t CAR_REFL_VERTICES = 65536;
+    constexpr std::size_t CAR_REFL_INDICES = CAR_REFL_VERTICES * 4;
 
         const char AUTHOR[] = "NFS5 Enhanced D3D11 THRASH driver by iArtorias";
 
@@ -578,6 +581,14 @@ namespace dx11z
         desc.BindFlags = D3D11_BIND_INDEX_BUFFER;
         m_Device->CreateBuffer( &desc, nullptr, m_IndexBuffer.Put() );
 
+        desc.ByteWidth = static_cast<UINT>(CAR_REFL_VERTICES * sizeof( CarReflVertex ));
+        desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        m_Device->CreateBuffer( &desc, nullptr, m_CarReflVertexBuffer.Put() );
+
+        desc.ByteWidth = static_cast<UINT>(CAR_REFL_INDICES * sizeof( std::uint16_t ));
+        desc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+        m_Device->CreateBuffer( &desc, nullptr, m_CarReflIndexBuffer.Put() );
+
         desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         desc.ByteWidth = sizeof( DrawConstants );
         m_Device->CreateBuffer( &desc, nullptr, m_DrawConstants.Put() );
@@ -636,6 +647,8 @@ namespace dx11z
         // Full, so the first batch maps the new buffers with a discard.
         m_VertexCursor = RAW_VERTICES;
         m_IndexCursor = RAW_INDICES;
+        m_CarReflVertexCursor = CAR_REFL_VERTICES;
+        m_CarReflIndexCursor = CAR_REFL_INDICES;
         InvalidatePipeline();
         return true;
     }
@@ -2110,6 +2123,8 @@ namespace dx11z
         m_ClearConstants.Reset();
         m_VertexBuffer.Reset();
         m_IndexBuffer.Reset();
+        m_CarReflVertexBuffer.Reset();
+        m_CarReflIndexBuffer.Reset();
         m_PresentSampler.Reset();
         m_PointSampler.Reset();
         m_OpaqueBlend.Reset();
@@ -5171,7 +5186,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9p, car reflection profile and CPU cuts): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9q, car reflections in their own buffer ring): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -5865,14 +5880,8 @@ namespace dx11z
             CaptureMirrorBatch();
         }
 
-        // The car reflections draw the indices of a car part batch once more, from the start of the buffer: such a
-        // batch starts the ring anew (a few per frame).
+        // Car reflections draw a car part batch once more from a ring of their own (CarReflBatch).
         const bool car_reflection = m_CarLodMask != 0 && m_ConfigCarRefl > 0;
-        if (car_reflection)
-        {
-            m_VertexCursor = RAW_VERTICES;
-            m_IndexCursor = RAW_INDICES;
-        }
         UINT base_vertex = 0;
         UINT first_index = 0;
         if (!UploadRing( m_BatchVertices.data(), m_BatchVertices.size(), m_BatchIndices.data(), m_BatchIndices.size(), base_vertex, first_index ))
@@ -5954,9 +5963,6 @@ namespace dx11z
         if (car_reflection)
         {
             CarReflBatch();
-            // It discarded the buffers for its own vertices.
-            m_VertexCursor = RAW_VERTICES;
-            m_IndexCursor = RAW_INDICES;
         }
 
         m_BatchVertices.clear();
@@ -8089,7 +8095,7 @@ namespace dx11z
         }
 
         if (!m_CarReflSourceValid || !m_CarReflVs || !m_CarReflPs || !m_CarReflLayout || !m_CarReflConstants ||
-            count * sizeof( CarReflVertex ) > RAW_VERTICES * sizeof( TlVertex ))
+            !m_CarReflVertexBuffer || !m_CarReflIndexBuffer || count > CAR_REFL_VERTICES || m_BatchIndices.size() > CAR_REFL_INDICES)
             return;
 
         // Small and far parts: a reflection a few pixels wide is not seen ('[CarReflections] MinSize', in pixels of 1440 lines).
@@ -8226,11 +8232,38 @@ namespace dx11z
             out.m_Uv[2] = blended ? static_cast<float>(v.m_Diffuse >> 24) / 255.0f : 1.0f;
         }
 
+        // Paint of a matte part: its triangles instead of those of the batch.
+        const std::vector<std::uint16_t> & indices = matte_paint ? m_CarReflIndices : m_BatchIndices;
+
+        // Vertices and indices into the own ring, as UploadRing: appended without overwrite, both anew together when full.
         D3D11_MAPPED_SUBRESOURCE mapped = {};
-        if (FAILED( m_Context->Map( m_VertexBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
+        const bool wrap = m_CarReflVertexCursor + count > CAR_REFL_VERTICES || m_CarReflIndexCursor + indices.size() > CAR_REFL_INDICES;
+        if (wrap)
+        {
+            m_CarReflVertexCursor = 0;
+            m_CarReflIndexCursor = 0;
+        }
+        const D3D11_MAP ring_map = wrap ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE;
+        if (FAILED( m_Context->Map( m_CarReflVertexBuffer.Get(), 0, ring_map, 0, &mapped ) ))
+        {
+            m_CarReflVertexCursor = CAR_REFL_VERTICES;
+            m_CarReflIndexCursor = CAR_REFL_INDICES;
             return;
-        std::memcpy( mapped.pData, m_CarReflVertices.data(), count * sizeof( CarReflVertex ) );
-        m_Context->Unmap( m_VertexBuffer.Get(), 0 );
+        }
+        std::memcpy( static_cast<CarReflVertex *>(mapped.pData) + m_CarReflVertexCursor, m_CarReflVertices.data(), count * sizeof( CarReflVertex ) );
+        m_Context->Unmap( m_CarReflVertexBuffer.Get(), 0 );
+        if (FAILED( m_Context->Map( m_CarReflIndexBuffer.Get(), 0, ring_map, 0, &mapped ) ))
+        {
+            m_CarReflVertexCursor = CAR_REFL_VERTICES;
+            m_CarReflIndexCursor = CAR_REFL_INDICES;
+            return;
+        }
+        std::memcpy( static_cast<std::uint16_t *>(mapped.pData) + m_CarReflIndexCursor, indices.data(), indices.size() * sizeof( std::uint16_t ) );
+        m_Context->Unmap( m_CarReflIndexBuffer.Get(), 0 );
+        const UINT base_vertex = static_cast<UINT>(m_CarReflVertexCursor);
+        const UINT first_index = static_cast<UINT>(m_CarReflIndexCursor);
+        m_CarReflVertexCursor += count;
+        m_CarReflIndexCursor += indices.size();
 
         // Layout of 'CarReflectConstants' in shaders::CAR_REFLECT.
         if (SUCCEEDED( m_Context->Map( m_CarReflConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
@@ -8313,8 +8346,9 @@ namespace dx11z
         m_Context->IASetInputLayout( m_CarReflLayout.Get() );
         UINT stride = sizeof( CarReflVertex );
         UINT offset = 0;
-        ID3D11Buffer * vertex_buffer = m_VertexBuffer.Get();
+        ID3D11Buffer * vertex_buffer = m_CarReflVertexBuffer.Get();
         m_Context->IASetVertexBuffers( 0, 1, &vertex_buffer, &stride, &offset );
+        m_Context->IASetIndexBuffer( m_CarReflIndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0 );
         m_Context->IASetPrimitiveTopology( D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST );
         m_Context->VSSetShader( m_CarReflVs.Get(), nullptr, 0 );
         m_Context->PSSetShader( m_CarReflPs.Get(), nullptr, 0 );
@@ -8329,28 +8363,23 @@ namespace dx11z
         m_Context->OMSetBlendState( m_CarReflBlend.Get(), factor, 0xFFFFFFFF );
         m_Context->OMSetDepthStencilState( m_CarReflDepth.Get(), 0 );
         m_Context->RSSetState( raster.Get() );
-        // Paint of a matte part: its triangles over those of the batch, which the game's draw no longer needs.
-        const std::vector<std::uint16_t> & indices = matte_paint ? m_CarReflIndices : m_BatchIndices;
-        bool uploaded = !matte_paint;
-        if (matte_paint && SUCCEEDED( m_Context->Map( m_IndexBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
+        if (m_ConfigProfile > 0)
         {
-            std::memcpy( mapped.pData, indices.data(), indices.size() * sizeof( std::uint16_t ) );
-            m_Context->Unmap( m_IndexBuffer.Get(), 0 );
-            uploaded = true;
+            ProfileMark( 10 );
+            ++m_ProfileCarBatches;
+            m_ProfileCarVertices += count;
         }
-        if (uploaded)
-        {
-            if (m_ConfigProfile > 0)
-            {
-                ProfileMark( 10 );
-                ++m_ProfileCarBatches;
-                m_ProfileCarVertices += count;
-            }
-            m_Context->DrawIndexed( static_cast<UINT>(indices.size()), 0, 0 );
-        }
+        m_Context->DrawIndexed( static_cast<UINT>(indices.size()), first_index, static_cast<INT>(base_vertex) );
 
         ID3D11ShaderResourceView * none[2] = {};
         m_Context->PSSetShaderResources( 0, 2, none );
+
+        // The game's ring back in place (ApplyPipeline binds it for every draw as well).
+        m_Context->IASetInputLayout( m_SceneLayout.Get() );
+        stride = sizeof( TlVertex );
+        vertex_buffer = m_VertexBuffer.Get();
+        m_Context->IASetVertexBuffers( 0, 1, &vertex_buffer, &stride, &offset );
+        m_Context->IASetIndexBuffer( m_IndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0 );
         InvalidatePipeline();
 
         ++stats.m_Drawn;

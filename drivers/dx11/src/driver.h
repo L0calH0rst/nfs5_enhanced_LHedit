@@ -708,6 +708,11 @@ namespace dx11z
         ComPtr<ID3D11BlendState> m_CarReflBlend;
         ComPtr<ID3D11DepthStencilState> m_CarReflDepth;
         std::vector<CarReflVertex> m_CarReflVertices;
+        // Own ring for the reflection draws (9.13b), so the ring of the game's batches is never started anew for them.
+        ComPtr<ID3D11Buffer> m_CarReflVertexBuffer;
+        ComPtr<ID3D11Buffer> m_CarReflIndexBuffer;
+        std::size_t m_CarReflVertexCursor = 0;
+        std::size_t m_CarReflIndexCursor = 0;
         std::vector<std::uint32_t> m_CarReflOrder;
         std::vector<std::uint32_t> m_CarReflGroup;
         std::vector<std::array<double, 3>> m_CarReflView;
