@@ -1723,6 +1723,8 @@ namespace dx11z
         m_ConfigOpponentsStrength = std::clamp( static_cast<float>(std::atof( light_value( "HeadlightsOpponentsStrength", "1.0" ).c_str() )), 0.0f, 4.0f );
         m_ConfigTrafficGlow = std::clamp( static_cast<float>(std::atof( light_value( "TrafficHeadlightGlow", "0.35" ).c_str() )), 0.0f, 4.0f );
         m_ConfigMaxCarLights = std::clamp( std::atoi( light_value( "MaxCarLights", "16" ).c_str() ), 1, MAX_CAR_LIGHTS );
+        m_ConfigLightCulling = std::clamp( std::atoi( light_value( "LightCulling", "1" ).c_str() ), 0, 1 );
+        m_ConfigProfile = std::clamp( std::atoi( light_value( "FrameProfile", "0" ).c_str() ), 0, 600 );
         Log( "Config lights from '%s' [Lights] (missing keys from [Dx11]): HeadlightsOpponents %d strength %.2f", lights_ini.c_str(),
             m_ConfigOpponents, m_ConfigOpponentsStrength );
 
@@ -2282,6 +2284,7 @@ namespace dx11z
         if (m_ConfigCarRefl > 0)
             CarReflReport();
         ProbeFlip();
+        ProfileFrameEnd();
 
         if (m_ConfigMeasure > 0 && ::GetTickCount64() >= m_MeasureNextReport)
         {
@@ -4669,9 +4672,48 @@ namespace dx11z
     )
     {
         size = std::min( size, sizeof( DrawConstants ) );
-        // Unchanged since the last upload: most batches of a frame share their state, only the texture differs.
-        if (m_ConstantsValid && size == sizeof( DrawConstants ) && std::memcmp( &m_LastConstants, data, size ) == 0)
+        if (size != sizeof( DrawConstants ))
+        {
+            // A shorter block leaves the rest of the buffer undefined, the next upload compares against nothing.
+            D3D11_MAPPED_SUBRESOURCE mapped = {};
+            m_ConstantsValid = false;
+            if (SUCCEEDED( m_Context->Map( m_DrawConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
+            {
+                std::memcpy( mapped.pData, data, size );
+                m_Context->Unmap( m_DrawConstants.Get(), 0 );
+            }
             return;
+        }
+
+        // The block is the head (everything before the light arrays) and the first m_Extra / m_Rear entries of each array: the
+        // shader reads no more of them, so only these are compared and written (a draw without lights moves 400 bytes, not 3216).
+        const auto & constants = *static_cast<const DrawConstants *>(data);
+        const std::size_t extra = static_cast<std::size_t>(std::clamp( constants.m_Extra[0], 0, MAX_CAR_LIGHTS ));
+        const std::size_t rear = static_cast<std::size_t>(std::clamp( constants.m_Rear[0], 0, MAX_REAR_LIGHTS ));
+        struct Region
+        {
+            std::size_t m_Offset;
+            std::size_t m_Size;
+        };
+        const Region regions[6] = {
+            { 0, offsetof( DrawConstants, m_ExtraColour ) },
+            { offsetof( DrawConstants, m_ExtraColour ), extra * sizeof( constants.m_ExtraColour[0] ) },
+            { offsetof( DrawConstants, m_ExtraViewToLight ), extra * sizeof( constants.m_ExtraViewToLight[0] ) },
+            { offsetof( DrawConstants, m_RearLeft ), rear * sizeof( constants.m_RearLeft[0] ) },
+            { offsetof( DrawConstants, m_RearRight ), rear * sizeof( constants.m_RearRight[0] ) },
+            { offsetof( DrawConstants, m_RearViewToLight ), rear * sizeof( constants.m_RearViewToLight[0] ) } };
+        const auto * source = static_cast<const std::uint8_t *>(data);
+        auto * last = reinterpret_cast<std::uint8_t *>(&m_LastConstants);
+
+        // Unchanged since the last upload: most batches of a frame share their state, only the texture differs.
+        if (m_ConstantsValid)
+        {
+            bool same = true;
+            for (const Region & region : regions)
+                same = same && (region.m_Size == 0 || std::memcmp( last + region.m_Offset, source + region.m_Offset, region.m_Size ) == 0);
+            if (same)
+                return;
+        }
 
         D3D11_MAPPED_SUBRESOURCE mapped = {};
         if (FAILED( m_Context->Map( m_DrawConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
@@ -4679,18 +4721,196 @@ namespace dx11z
             m_ConstantsValid = false;
             return;
         }
-        std::memcpy( mapped.pData, data, size );
+        std::size_t written = 0;
+        for (const Region & region : regions)
+        {
+            if (region.m_Size == 0)
+                continue;
+            std::memcpy( static_cast<std::uint8_t *>(mapped.pData) + region.m_Offset, source + region.m_Offset, region.m_Size );
+            std::memcpy( last + region.m_Offset, source + region.m_Offset, region.m_Size );
+            written += region.m_Size;
+        }
         m_Context->Unmap( m_DrawConstants.Get(), 0 );
+        m_ConstantsValid = true;
+        ++m_ProfileUploads;
+        m_ProfileUploadBytes += written;
+    }
 
-        // A shorter block leaves the rest of the buffer undefined, the next upload compares against nothing.
-        m_ConstantsValid = size == sizeof( DrawConstants );
-        if (m_ConstantsValid)
-            std::memcpy( &m_LastConstants, data, size );
+
+
+    // The bounding sphere of the batch in view space, from the same vertex transform as the vertex shader (screen position and
+    // rhw back to the camera space of the game). False when the vertices do not allow it (rhw 0, no projection yet).
+    bool Driver::BatchViewSphere(
+        float * centre,
+        float & radius
+    ) const
+    {
+        if (m_BatchVertices.empty() || m_HeadProjection[0] == 0.0f || m_HeadProjection[1] == 0.0f)
+            return false;
+
+        float low[3] = { 1e30f, 1e30f, 1e30f };
+        float high[3] = { -1e30f, -1e30f, -1e30f };
+        for (const TlVertex & vertex : m_BatchVertices)
+        {
+            if (!(vertex.m_Rhw > 0.0f && vertex.m_Rhw < 1e30f))
+                return false;
+            const float w = 1.0f / vertex.m_Rhw;
+            const float view[3] = { (vertex.m_X - m_HeadProjection[2]) * w / m_HeadProjection[0],
+                (vertex.m_Y - m_HeadProjection[3]) * w / m_HeadProjection[1], w };
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                low[axis] = std::min( low[axis], view[axis] );
+                high[axis] = std::max( high[axis], view[axis] );
+            }
+        }
+        float half = 0.0f;
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            centre[axis] = 0.5f * (low[axis] + high[axis]);
+            const float extent = 0.5f * (high[axis] - low[axis]);
+            half += extent * extent;
+        }
+        // A margin for a light matrix with a little scale and for float noise.
+        radius = std::sqrt( half ) * 1.1f + 0.5f;
+        return true;
+    }
+
+
+    // Frame profile: one timestamp query whenever the draw category changes, the stamps of a frame resolved a few frames later.
+    void Driver::ProfileMark(
+        int category
+    )
+    {
+        ++m_ProfileDraws[static_cast<std::size_t>(category)];
+        if (!m_Context || !m_Device)
+            return;
+
+        if (m_ProfileCurrent < 0)
+        {
+            for (std::size_t i = 0; i < m_ProfileSlots.size(); ++i)
+            {
+                ProfileSlot & slot = m_ProfileSlots[i];
+                if (slot.m_Pending)
+                    continue;
+                if (!slot.m_Disjoint)
+                {
+                    D3D11_QUERY_DESC desc = { D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
+                    bool made = SUCCEEDED( m_Device->CreateQuery( &desc, slot.m_Disjoint.Put() ) );
+                    desc.Query = D3D11_QUERY_TIMESTAMP;
+                    for (auto & stamp : slot.m_Stamps)
+                        made = made && SUCCEEDED( m_Device->CreateQuery( &desc, stamp.Put() ) );
+                    if (!made)
+                    {
+                        slot = {};
+                        continue;
+                    }
+                }
+                slot.m_Count = 0;
+                m_Context->Begin( slot.m_Disjoint.Get() );
+                m_ProfileCurrent = static_cast<int>(i);
+                m_ProfileCategory = -1;
+                break;
+            }
+            if (m_ProfileCurrent < 0)
+                return;
+        }
+
+        ProfileSlot & slot = m_ProfileSlots[static_cast<std::size_t>(m_ProfileCurrent)];
+        if (category == m_ProfileCategory || slot.m_Count >= PROFILE_STAMPS)
+            return;
+        m_Context->End( slot.m_Stamps[static_cast<std::size_t>(slot.m_Count)].Get() );
+        slot.m_Category[static_cast<std::size_t>(slot.m_Count)] = static_cast<std::uint8_t>(category);
+        ++slot.m_Count;
+        m_ProfileCategory = category;
+    }
+
+    void Driver::ProfileFrameEnd()
+    {
+        if (m_ConfigProfile <= 0 || !m_Context)
+            return;
+
+        if (m_ProfileCurrent >= 0)
+        {
+            ProfileSlot & slot = m_ProfileSlots[static_cast<std::size_t>(m_ProfileCurrent)];
+            if (slot.m_Count > 0)
+                m_Context->End( slot.m_Stamps[static_cast<std::size_t>(slot.m_Count)].Get() );
+            m_Context->End( slot.m_Disjoint.Get() );
+            slot.m_Pending = slot.m_Count > 0;
+            m_ProfileCurrent = -1;
+            m_ProfileCategory = -1;
+        }
+        ++m_ProfileFlips;
+
+        // Finished frames, without waiting for the GPU.
+        for (ProfileSlot & slot : m_ProfileSlots)
+        {
+            if (!slot.m_Pending)
+                continue;
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint = {};
+            if (m_Context->GetData( slot.m_Disjoint.Get(), &disjoint, sizeof( disjoint ), D3D11_ASYNC_GETDATA_DONOTFLUSH ) != S_OK)
+                continue;
+            std::array<UINT64, PROFILE_STAMPS + 1> stamps = {};
+            bool ready = true;
+            for (int i = 0; i <= slot.m_Count && ready; ++i)
+                ready = m_Context->GetData( slot.m_Stamps[static_cast<std::size_t>(i)].Get(), &stamps[static_cast<std::size_t>(i)], sizeof( UINT64 ),
+                    D3D11_ASYNC_GETDATA_DONOTFLUSH ) == S_OK;
+            if (!ready)
+                continue;
+            slot.m_Pending = false;
+            if (disjoint.Disjoint || disjoint.Frequency == 0)
+                continue;
+            for (int i = 0; i < slot.m_Count; ++i)
+                m_ProfileMs[slot.m_Category[static_cast<std::size_t>(i)]] +=
+                    static_cast<double>(stamps[static_cast<std::size_t>(i + 1)] - stamps[static_cast<std::size_t>(i)]) * 1000.0 / static_cast<double>(disjoint.Frequency);
+            ++m_ProfileGpuFrames;
+        }
+
+        const std::uint64_t now = ::GetTickCount64();
+        if (m_ProfileReportTick == 0)
+            m_ProfileReportTick = now + static_cast<std::uint64_t>(m_ConfigProfile) * 1000;
+        if (now < m_ProfileReportTick)
+            return;
+        m_ProfileReportTick = now + static_cast<std::uint64_t>(m_ConfigProfile) * 1000;
+        ProfileCollect();
+    }
+
+    void Driver::ProfileCollect()
+    {
+        static const char * const names[PROFILE_CATEGORIES] = { "world", "world lit", "sky", "additive", "HUD/2D", "edge pass 2" };
+        const double gpu_frames = static_cast<double>(std::max<std::uint64_t>( m_ProfileGpuFrames, 1 ));
+        const double frames = static_cast<double>(std::max<std::uint64_t>( m_ProfileFlips, 1 ));
+        LARGE_INTEGER frequency = {};
+        ::QueryPerformanceFrequency( &frequency );
+        const double us = 1e6 / static_cast<double>(std::max<LONGLONG>( frequency.QuadPart, 1 )) / frames;
+        double total = 0.0;
+        for (double value : m_ProfileMs)
+            total += value;
+        Log( "Profile: %llu frames (%llu with GPU time), GPU %.2f ms per frame in the draws, CPU ApplyPipeline %.0f us per frame",
+            static_cast<unsigned long long>(m_ProfileFlips), static_cast<unsigned long long>(m_ProfileGpuFrames), total / gpu_frames,
+            static_cast<double>(m_ProfileApplyTicks) * us );
+        for (int i = 0; i < PROFILE_CATEGORIES; ++i)
+            Log( "Profile:   %-11s GPU %.3f ms per frame, %.0f draws per frame", names[i], m_ProfileMs[static_cast<std::size_t>(i)] / gpu_frames,
+                static_cast<double>(m_ProfileDraws[static_cast<std::size_t>(i)]) / frames );
+        const double lit = static_cast<double>(std::max<std::uint64_t>( m_ProfileLitDraws, 1 ));
+        Log( "Profile:   constants %.0f uploads per frame, %.0f bytes per upload (block %zu); lit draws %.0f per frame, car lights %.1f -> %.1f, "
+            "tail glows %.1f -> %.1f per lit draw (LightCulling %d, MaxCarLights %d)",
+            static_cast<double>(m_ProfileUploads) / frames, static_cast<double>(m_ProfileUploadBytes) / static_cast<double>(std::max<std::uint64_t>( m_ProfileUploads, 1 )),
+            sizeof( DrawConstants ), static_cast<double>(m_ProfileLitDraws) / frames, static_cast<double>(m_ProfileExtraBefore) / lit,
+            static_cast<double>(m_ProfileExtraAfter) / lit, static_cast<double>(m_ProfileRearBefore) / lit, static_cast<double>(m_ProfileRearAfter) / lit,
+            m_ConfigLightCulling, m_ConfigMaxCarLights );
+        m_ProfileMs = {};
+        m_ProfileDraws = {};
+        m_ProfileGpuFrames = 0;
+        m_ProfileFlips = 0;
+        m_ProfileUploads = m_ProfileUploadBytes = m_ProfileLitDraws = 0;
+        m_ProfileExtraBefore = m_ProfileExtraAfter = m_ProfileRearBefore = m_ProfileRearAfter = 0;
+        m_ProfileApplyTicks = 0;
     }
 
 
     void Driver::ApplyPipeline()
     {
+        const PerfScope profile_scope( m_ConfigProfile > 0, m_ProfileApplyTicks, m_ProfileDepth );
         const auto & render = m_D3D.m_Render;
 
         // Constants.
@@ -4773,7 +4993,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9h, world/sky/light sprites, max car lights 16): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9i, world/sky/light sprites, max car lights, light culling, compact constants): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -4879,27 +5099,72 @@ namespace dx11z
             }
             std::memcpy( constants.m_HeadProjection, m_HeadProjection.data(), sizeof( constants.m_HeadProjection ) );
             std::memcpy( constants.m_ViewToLight, m_HeadViewToLight.data(), sizeof( constants.m_ViewToLight ) );
-            const int extra = std::min( m_HeadExtraCount, std::min( static_cast<int>(m_CarLights.size()), MAX_CAR_LIGHTS ) );
-            constants.m_Extra[0] = extra;
+            const int extra_all = std::min( m_HeadExtraCount, std::min( static_cast<int>(m_CarLights.size()), MAX_CAR_LIGHTS ) );
+            const int rear_all = std::min( m_HeadRearCount, std::min( static_cast<int>(m_RearLights.size()), MAX_REAR_LIGHTS ) );
             std::memcpy( constants.m_HeadHigh, m_HeadHigh.data(), sizeof( constants.m_HeadHigh ) );
-            const int rear = std::min( m_HeadRearCount, std::min( static_cast<int>(m_RearLights.size()), MAX_REAR_LIGHTS ) );
-            constants.m_Rear[0] = rear;
             constants.m_RearShape[0] = m_ConfigTailOffset;
             constants.m_RearShape[1] = m_ConfigTailReach;
             constants.m_RearShape[2] = m_ConfigTailWidth;
             constants.m_RearShape[3] = m_ConfigTailSpread;
-            for (int i = 0; i < rear; ++i)
+
+            // Light culling (exact, '[Lights] LightCulling'): a light whose area the bounding sphere of this batch does not touch
+            // adds nothing to any of its pixels, so it stays out of the constants. The areas are those the shader tests: car lights
+            // z in (0.5, 126.5) / z scale, x within 62.5 / x scale, height (map 255) / y scale; tail glows z behind the lamps up to
+            // 6 reaches (the shader's own cut) and height up to 8.4 (e^(-height / 1.2) below 1/1000).
+            float centre[3] = {};
+            float radius = 0.0f;
+            const bool cull = m_ConfigLightCulling != 0 && (extra_all > 0 || rear_all > 0) && m_HeadScale[0] > 1e-4f && m_HeadScale[1] > 1e-4f && m_HeadScale[2] > 1e-4f &&
+                BatchViewSphere( centre, radius );
+            int extra = 0;
+            for (int i = 0; i < extra_all; ++i)
+            {
+                const float * m = m_HeadExtraViewToLight.data() + i * 16;
+                if (cull)
+                {
+                    const float lx = centre[0] * m[0] + centre[1] * m[4] + centre[2] * m[8] + m[12];
+                    const float ly = centre[0] * m[1] + centre[1] * m[5] + centre[2] * m[9] + m[13];
+                    const float lz = centre[0] * m[2] + centre[1] * m[6] + centre[2] * m[10] + m[14];
+                    if (lz + radius < 0.5f / m_HeadScale[1] || lz - radius > 126.5f / m_HeadScale[1] ||
+                        std::abs( lx ) - radius > 62.5f / m_HeadScale[0] || std::abs( ly ) - radius > 255.0f / m_HeadScale[2])
+                        continue;
+                }
+                std::memcpy( constants.m_ExtraColour[extra], m_CarLights[static_cast<std::size_t>(i)].m_Colour.data(), sizeof( constants.m_ExtraColour[extra] ) );
+                std::memcpy( constants.m_ExtraViewToLight[extra], m, sizeof( constants.m_ExtraViewToLight[extra] ) );
+                ++extra;
+            }
+            constants.m_Extra[0] = extra;
+            int rear = 0;
+            for (int i = 0; i < rear_all; ++i)
             {
                 const RearLight & light = m_RearLights[static_cast<std::size_t>(i)];
-                std::memcpy( constants.m_RearLeft[i], light.m_Left.data(), sizeof( constants.m_RearLeft[i] ) );
-                std::memcpy( constants.m_RearRight[i], light.m_Right.data(), sizeof( constants.m_RearRight[i] ) );
-                std::memcpy( constants.m_RearViewToLight[i], m_HeadRearViewToLight.data() + i * 16, sizeof( constants.m_RearViewToLight[i] ) );
+                const float * m = m_HeadRearViewToLight.data() + i * 16;
+                if (cull)
+                {
+                    const float ly = centre[0] * m[1] + centre[1] * m[5] + centre[2] * m[9] + m[13];
+                    const float lz = centre[0] * m[2] + centre[1] * m[6] + centre[2] * m[10] + m[14];
+                    const float offset = light.m_Left[3] > 0.0f ? light.m_Left[3] : m_ConfigTailOffset;
+                    if (lz - offset + radius < -0.3f || lz - offset - radius > m_ConfigTailReach * 6.0f || std::abs( ly ) - radius > 8.4f)
+                        continue;
+                }
+                std::memcpy( constants.m_RearLeft[rear], light.m_Left.data(), sizeof( constants.m_RearLeft[rear] ) );
+                std::memcpy( constants.m_RearRight[rear], light.m_Right.data(), sizeof( constants.m_RearRight[rear] ) );
+                std::memcpy( constants.m_RearViewToLight[rear], m, sizeof( constants.m_RearViewToLight[rear] ) );
+                ++rear;
             }
-            for (int i = 0; i < extra; ++i)
-            {
-                std::memcpy( constants.m_ExtraColour[i], m_CarLights[static_cast<std::size_t>(i)].m_Colour.data(), sizeof( constants.m_ExtraColour[i] ) );
-                std::memcpy( constants.m_ExtraViewToLight[i], m_HeadExtraViewToLight.data() + i * 16, sizeof( constants.m_ExtraViewToLight[i] ) );
-            }
+            constants.m_Rear[0] = rear;
+            ++m_ProfileLitDraws;
+            m_ProfileExtraBefore += static_cast<std::uint64_t>(extra_all);
+            m_ProfileExtraAfter += static_cast<std::uint64_t>(extra);
+            m_ProfileRearBefore += static_cast<std::uint64_t>(rear_all);
+            m_ProfileRearAfter += static_cast<std::uint64_t>(rear);
+        }
+
+        if (m_ConfigProfile > 0)
+        {
+            const bool sky = render[rs::ZFUNC] == 8 && !m_BatchVertices.empty() && flat_z[0] >= 0.99f && flat_rhw[1] < 0.05f;
+            const int category = sky ? 2 : flat_draw ? 4 : m_EdgePass == 2 ? 5 : constants.m_Head[0] > 0.0f ? 1 :
+                (render[rs::ALPHABLENDENABLE] != 0 && render[rs::DESTBLEND] == 2) ? 3 : 0;
+            ProfileMark( category );
         }
 
         UploadDrawConstants( &constants, sizeof( constants ) );

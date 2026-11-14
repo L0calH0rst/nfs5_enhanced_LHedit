@@ -184,23 +184,26 @@ namespace dx11z
         float m_ViewToLight[16];
         // Other racers' headlights (PLAN.md 9.11): x count.
         std::int32_t m_Extra[4];
-        float m_ExtraColour[16][4];
-        float m_ExtraViewToLight[16][16];
         // High beam of the player's light (PLAN.md 9.10): factors on the z, x and y scales.
         float m_HeadHigh[4];
         // Tail light glow of all racers (PLAN.md 11.5): x count; shape: rear offset, reach, lamp x, lamp spread.
         std::int32_t m_Rear[4];
         float m_RearShape[4];
-        float m_RearLeft[16][4];
-        float m_RearRight[16][4];
-        float m_RearViewToLight[16][16];
         // Test switches (BUGS.md B21): x vertex alpha forced to 1.
         float m_Test[4];
         float m_Clip[4]; // clip rectangle of the game in game pixels: left, top, right, bottom
         float m_Night[4]; // rgb: factor of the world at night (LFSP LfspNightGrade), w: 1 = on
+        // The light arrays come last: a draw uploads only the head of the block and the first m_Extra[0] / m_Rear[0] entries of each array.
+        float m_ExtraColour[16][4];
+        float m_ExtraViewToLight[16][16];
+        float m_RearLeft[16][4];
+        float m_RearRight[16][4];
+        float m_RearViewToLight[16][16];
     };
 
-    static_assert( offsetof( DrawConstants, m_Night ) == 3200 && sizeof( DrawConstants ) == 3216, "DrawConstants must match the fxc listing of shaders::SCENE" );
+    static_assert( offsetof( DrawConstants, m_ExtraColour ) == 400 && offsetof( DrawConstants, m_ExtraViewToLight ) == 656 &&
+        offsetof( DrawConstants, m_RearLeft ) == 1680 && offsetof( DrawConstants, m_RearRight ) == 1936 &&
+        offsetof( DrawConstants, m_RearViewToLight ) == 2192 && sizeof( DrawConstants ) == 3216, "DrawConstants must match the fxc listing of shaders::SCENE" );
 
     struct Texture
     {
@@ -508,6 +511,40 @@ namespace dx11z
         float m_ConfigOpponentsStrength = 1.0f;
         float m_ConfigTrafficGlow = 0.35f; // [Lights] TrafficHeadlightGlow: share of the opponents' light for traffic cars, 0 = off
         int m_ConfigMaxCarLights = 16; // [Lights] MaxCarLights: active car lights (opponents and traffic), 1 to MAX_CAR_LIGHTS
+        int m_ConfigLightCulling = 1; // [Lights] LightCulling: lights out of reach of a batch stay out of its constants (no visible change)
+        int m_ConfigProfile = 0; // [Lights] FrameProfile: seconds between GPU phase timings in the log, 0 = off
+
+        // Frame profile ('[Lights] FrameProfile'): GPU time per draw category from timestamp queries (a few frames late) and the
+        // CPU side of the light constants. Categories: 0 world without light, 1 world with light, 2 sky, 3 additive sprites,
+        // 4 HUD and 2D, 5 second pass of the alpha edge fix.
+        static constexpr int PROFILE_CATEGORIES = 6;
+        static constexpr int PROFILE_STAMPS = 255;
+        struct ProfileSlot
+        {
+            ComPtr<ID3D11Query> m_Disjoint;
+            std::array<ComPtr<ID3D11Query>, PROFILE_STAMPS + 1> m_Stamps;
+            std::array<std::uint8_t, PROFILE_STAMPS + 1> m_Category = {};
+            int m_Count = 0; // stamps written
+            bool m_Pending = false;
+        };
+        std::array<ProfileSlot, 4> m_ProfileSlots;
+        int m_ProfileCurrent = -1;
+        int m_ProfileCategory = -1;
+        std::array<double, PROFILE_CATEGORIES> m_ProfileMs = {};
+        std::array<std::uint64_t, PROFILE_CATEGORIES> m_ProfileDraws = {};
+        std::uint64_t m_ProfileGpuFrames = 0;
+        std::uint64_t m_ProfileUploads = 0;
+        std::uint64_t m_ProfileUploadBytes = 0;
+        std::uint64_t m_ProfileLitDraws = 0;
+        std::uint64_t m_ProfileExtraBefore = 0, m_ProfileExtraAfter = 0, m_ProfileRearBefore = 0, m_ProfileRearAfter = 0;
+        std::int64_t m_ProfileApplyTicks = 0;
+        int m_ProfileDepth = 0;
+        std::uint64_t m_ProfileReportTick = 0;
+        std::uint64_t m_ProfileFlips = 0;
+        void ProfileMark( int category );
+        void ProfileFrameEnd();
+        void ProfileCollect();
+        bool BatchViewSphere( float * centre, float & radius ) const;
         std::int64_t m_CarLightsTicks = 0;
         std::uint64_t m_CarLightsActive = 0;
         int m_CarLightsFrames = 0;
