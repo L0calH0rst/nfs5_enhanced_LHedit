@@ -219,6 +219,9 @@ namespace dx11z
         // Share of the top level texels with a half transparent alpha (32 to 224): cut outs (leaves, fences) have almost none,
         // gradients (water edges, shadows, smoke, glass) many.
         float m_AlphaMid = 0.0f;
+        // Smallest alpha of the top level (0 when unknown, as DXT1 with punch through): a texture with a high minimum never loses a
+        // pixel to the alpha test.
+        std::uint8_t m_AlphaMin = 255;
         // Size of all levels as uploaded, for the memory report of '[Dx11] Measure'.
         std::uint64_t m_Bytes = 0;
         // FNV-1a over the converted top level, names the texture in the measure log.
@@ -518,7 +521,7 @@ namespace dx11z
         int m_ConfigNightGradeBlended = 1; // [Lights] NightGradeBlended: normal blended draws without depth write (foliage fringe) are darkened too
         std::map<std::uint32_t, std::array<std::uint64_t, 3>> m_NightTextures;
         float m_ConfigCoverageMid = 0.12f; // [Lights] AlphaCoverageMid: textures with a larger half transparent share keep the two pass fix
-        int m_ConfigEarlyZ = 1; // [Lights] EarlyZ: forced early depth test for draws that cannot discard (feature level 11)
+        int m_ConfigEarlyZ = 2; // [Lights] EarlyZ: forced early depth test for draws that cannot discard (feature level 11)
         ComPtr<ID3D11PixelShader> m_ScenePsEarly;
         int m_ConfigLightCulling = 1; // [Lights] LightCulling: lights out of reach of a batch stay out of its constants (no visible change)
         int m_ConfigProfile = 0; // [Lights] FrameProfile: seconds between GPU phase timings in the log, 0 = off
@@ -526,7 +529,7 @@ namespace dx11z
         // Frame profile ('[Lights] FrameProfile'): GPU time per draw category from timestamp queries (a few frames late) and the
         // CPU side of the light constants. Categories: 0 opaque world without light, 1 opaque world with light, 2 sky, 3 additive
         // sprites, 4 HUD and 2D, 5 second pass of the alpha edge fix, 6 alpha tested or blended world with light, 7 the same without.
-        static constexpr int PROFILE_CATEGORIES = 8;
+        static constexpr int PROFILE_CATEGORIES = 9;
         static constexpr int PROFILE_STAMPS = 255;
         struct ProfileSlot
         {
@@ -555,9 +558,16 @@ namespace dx11z
         std::uint64_t m_ProfileFlips = 0;
         void ProfileMark( int category );
         void ProfileFrameEnd();
+        void FpsFlip();
+        int m_ConfigFpsLog = 0; // [Lights] FpsLog: seconds between fps lines, 0 = off (no queries, cheap)
+        std::int64_t m_FpsStart = 0, m_FpsLast = 0;
+        std::uint64_t m_FpsFrames = 0, m_FpsSlow = 0;
+        double m_FpsWorst = 0.0;
+        std::array<std::uint64_t, 32> m_ProfileUploadField = {}; // which constants field differed first, per upload
         void ProfileCollect( double window_ms );
         std::uint64_t m_ProfileWindowStart = 0;
         bool BatchViewSphere( float * centre, float & radius ) const;
+        bool CannotDiscard( const DrawConstants & constants ) const;
         std::int64_t m_CarLightsTicks = 0;
         std::uint64_t m_CarLightsActive = 0;
         int m_CarLightsFrames = 0;

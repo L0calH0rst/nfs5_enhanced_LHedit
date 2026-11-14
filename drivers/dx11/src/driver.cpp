@@ -1738,7 +1738,8 @@ namespace dx11z
         m_ConfigTrafficRange = std::clamp( static_cast<float>(std::atof( light_value( "TrafficHeadlightRange", "0.5" ).c_str() )), 0.1f, 2.0f );
         m_ConfigMaxCarLights = std::clamp( std::atoi( light_value( "MaxCarLights", "16" ).c_str() ), 1, MAX_CAR_LIGHTS );
         m_ConfigCoverageMid = std::clamp( static_cast<float>(std::atof( light_value( "AlphaCoverageMid", "0.12" ).c_str() )), 0.0f, 1.0f );
-        m_ConfigEarlyZ = std::clamp( std::atoi( light_value( "EarlyZ", "1" ).c_str() ), 0, 1 );
+        m_ConfigFpsLog = std::clamp( std::atoi( light_value( "FpsLog", "0" ).c_str() ), 0, 600 );
+        m_ConfigEarlyZ = std::clamp( std::atoi( light_value( "EarlyZ", "2" ).c_str() ), 0, 2 );
         m_ConfigLightCulling = std::clamp( std::atoi( light_value( "LightCulling", "1" ).c_str() ), 0, 1 );
         m_ConfigNightGradeBlended = std::clamp( std::atoi( light_value( "NightGradeBlended", "1" ).c_str() ), 0, 1 );
         m_ConfigProfile = std::clamp( std::atoi( light_value( "FrameProfile", "0" ).c_str() ), 0, 600 );
@@ -2303,6 +2304,7 @@ namespace dx11z
             CarReflReport();
         ProbeFlip();
         ProfileFrameEnd();
+        FpsFlip();
 
         if (m_ConfigMeasure > 0 && ::GetTickCount64() >= m_MeasureNextReport)
         {
@@ -3310,6 +3312,7 @@ namespace dx11z
                     // DXT1 may punch through and DXT3 carries alpha, not worth decoding here.
                     texture->m_Translucent = true;
                     texture->m_AlphaMid = 0.0f;
+                    texture->m_AlphaMin = 0;
                     if (texture->m_Format == formats::DXT3)
                     {
                         // 16 blocks of 4 bit alpha ahead of the colour of each 16 byte block.
@@ -3322,6 +3325,11 @@ namespace dx11z
                                 mid += ((pair & 0x0F) >= 2 && (pair & 0x0F) <= 13 ? 1u : 0u) + ((pair >> 4) >= 2 && (pair >> 4) <= 13 ? 1u : 0u);
                             }
                         texture->m_AlphaMid = blocks > 0 ? static_cast<float>(mid) / static_cast<float>(blocks * 16) : 0.0f;
+                        std::uint8_t lowest = 15;
+                        for (std::size_t block = 0; block < blocks; ++block)
+                            for (std::size_t i = 0; i < 8; ++i)
+                                lowest = std::min<std::uint8_t>( lowest, std::min<std::uint8_t>( converted[block * 16 + i] & 0x0F, converted[block * 16 + i] >> 4 ) );
+                        texture->m_AlphaMin = static_cast<std::uint8_t>(lowest * 17);
                     }
                 }
                 else
@@ -3339,6 +3347,10 @@ namespace dx11z
                         return alpha >= 32 && alpha <= 224;
                     } ));
                     texture->m_AlphaMid = count > 0 ? static_cast<float>(mid) / static_cast<float>(count) : 0.0f;
+                    std::uint32_t lowest = 255;
+                    for (std::size_t i = 0; i < count; ++i)
+                        lowest = std::min( lowest, texels[i] >> 24 );
+                    texture->m_AlphaMin = static_cast<std::uint8_t>(lowest);
                 }
             }
             m_Context->UpdateSubresource( texture->m_Texture.Get(), static_cast<UINT>( level ), nullptr, converted.data(), static_cast<UINT>( pitch ), 0 );
@@ -4751,6 +4763,17 @@ namespace dx11z
                 same = same && (region.m_Size == 0 || std::memcmp( last + region.m_Offset, source + region.m_Offset, region.m_Size ) == 0);
             if (same)
                 return;
+            if (m_ConfigProfile > 0)
+            {
+                std::size_t field = 31;
+                for (std::size_t chunk = 0; chunk < regions[0].m_Size / 16; ++chunk)
+                    if (std::memcmp( last + chunk * 16, source + chunk * 16, 16 ) != 0)
+                    {
+                        field = std::min<std::size_t>( chunk, 25 );
+                        break;
+                    }
+                ++m_ProfileUploadField[field];
+            }
         }
 
         D3D11_MAPPED_SUBRESOURCE mapped = {};
@@ -4775,6 +4798,34 @@ namespace dx11z
     }
 
 
+
+    // True when nothing in the scene shader can throw a pixel of this draw away: no alpha test, or an alpha test that the texture
+    // cannot fail. The alpha of a pixel is at least the product of the smallest texture alphas, the vertex alpha (all opaque) and
+    // the texture factor alpha; the shore and far fade of the water change the alpha and stay out.
+    bool Driver::CannotDiscard(
+        const DrawConstants & constants
+    ) const
+    {
+        const auto & render = m_D3D.m_Render;
+        if (render[rs::ALPHATESTENABLE] == 0 || constants.m_Flags[2] == 8)
+            return true;
+        if (m_ConfigEarlyZ < 2 || constants.m_AlphaRef[1] > 0.0f || constants.m_AlphaRef[3] > 0.0f)
+            return false;
+        const std::int32_t func = constants.m_Flags[2];
+        if (func != 5 && func != 7)
+            return false;
+        float least = static_cast<float>(render[rs::TEXTUREFACTOR] >> 24) / 255.0f;
+        for (const Texture * texture : { m_Bound[0], m_Bound[1] })
+            if (texture != nullptr)
+                least *= static_cast<float>(texture->m_AlphaMin) / 255.0f;
+        if (m_BatchVertices.empty())
+            return false;
+        for (const TlVertex & vertex : m_BatchVertices)
+            if ((vertex.m_Diffuse >> 24) != 0xFF)
+                return false;
+        const float reference = static_cast<float>(render[rs::ALPHAREF] & 0xFF);
+        return least * 255.0f >= reference + 1.0f;
+    }
 
     // The bounding sphere of the batch in view space, from the same vertex transform as the vertex shader (screen position and
     // rhw back to the camera space of the game). False when the vertices do not allow it (rhw 0, no projection yet).
@@ -4933,11 +4984,38 @@ namespace dx11z
         ProfileCollect( window_ms );
     }
 
+    // Frames per second without queries or measuring: the interval between two flips on the CPU clock.
+    void Driver::FpsFlip()
+    {
+        if (m_ConfigFpsLog <= 0)
+            return;
+        LARGE_INTEGER now = {}, frequency = {};
+        ::QueryPerformanceCounter( &now );
+        ::QueryPerformanceFrequency( &frequency );
+        const double tick_ms = 1000.0 / static_cast<double>(std::max<LONGLONG>( frequency.QuadPart, 1 ));
+        if (m_FpsStart == 0)
+            m_FpsStart = m_FpsLast = now.QuadPart;
+        const double frame_ms = static_cast<double>(now.QuadPart - m_FpsLast) * tick_ms;
+        m_FpsLast = now.QuadPart;
+        ++m_FpsFrames;
+        m_FpsWorst = std::max( m_FpsWorst, frame_ms );
+        m_FpsSlow += frame_ms > 1000.0 / 60.0 ? 1 : 0;
+        const double window = static_cast<double>(now.QuadPart - m_FpsStart) * tick_ms;
+        if (window < static_cast<double>(m_ConfigFpsLog) * 1000.0)
+            return;
+        Log( "Fps: %.1f fps over %.1f s (%llu frames), frame time mean %.2f ms, worst %.2f ms, %llu frames slower than 60 fps", static_cast<double>(m_FpsFrames) * 1000.0 / window,
+            window / 1000.0, static_cast<unsigned long long>(m_FpsFrames), window / static_cast<double>(std::max<std::uint64_t>( m_FpsFrames, 1 )), m_FpsWorst,
+            static_cast<unsigned long long>(m_FpsSlow) );
+        m_FpsStart = now.QuadPart;
+        m_FpsFrames = m_FpsSlow = 0;
+        m_FpsWorst = 0.0;
+    }
+
     void Driver::ProfileCollect(
         double window_ms
     )
     {
-        static const char * const names[PROFILE_CATEGORIES] = { "opaque", "opaque lit", "sky", "additive", "HUD/2D", "edge pass 2", "alpha lit", "alpha unlit" };
+        static const char * const names[PROFILE_CATEGORIES] = { "opaque", "opaque lit", "sky", "additive", "HUD/2D", "edge pass 2", "alpha lit", "alpha unlit", "back pass" };
         const double gpu_frames = static_cast<double>(std::max<std::uint64_t>( m_ProfileGpuFrames, 1 ));
         const double frames = static_cast<double>(std::max<std::uint64_t>( m_ProfileFlips, 1 ));
         LARGE_INTEGER frequency = {};
@@ -4966,6 +5044,25 @@ namespace dx11z
             sizeof( DrawConstants ), static_cast<double>(m_ProfileLitDraws) / frames, static_cast<double>(m_ProfileExtraBefore) / lit,
             static_cast<double>(m_ProfileExtraAfter) / lit, static_cast<double>(m_ProfileRearBefore) / lit, static_cast<double>(m_ProfileRearAfter) / lit,
             m_ConfigLightCulling, m_ConfigMaxCarLights );
+        {
+            static const char * const fields[26] = { "target", "colour op 0", "colour op 1", "alpha op 0", "alpha op 1", "texture factor", "fog colour", "fog params",
+                "flags (fog, specular, alpha func, texture mask)", "alpha ref", "debug (edge pass)", "head light on", "head colour", "head projection", "view to light 0",
+                "view to light 1", "view to light 2", "view to light 3", "car light count", "high beam", "tail glow count", "tail shape", "test", "clip", "night", "light arrays" };
+            std::vector<std::pair<std::uint64_t, std::size_t>> top;
+            for (std::size_t i = 0; i < m_ProfileUploadField.size(); ++i)
+                if (m_ProfileUploadField[i] > 0)
+                    top.emplace_back( m_ProfileUploadField[i], i );
+            std::sort( top.begin(), top.end(), []( const auto & a, const auto & b ) { return a.first > b.first; } );
+            std::string line;
+            for (std::size_t i = 0; i < top.size() && i < 6; ++i)
+            {
+                char item[96] = {};
+                std::snprintf( item, sizeof( item ), "; %s %.0f", top[i].second < 26 ? fields[top[i].second] : "?", static_cast<double>(top[i].first) / frames );
+                line += item;
+            }
+            Log( "Profile:   constants first changed field per upload (per frame)%s", line.c_str() );
+            m_ProfileUploadField = {};
+        }
         m_ProfileMs = {};
         m_ProfileDraws = {};
         m_ProfilePs = {};
@@ -5064,7 +5161,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9n, alpha to coverage only for cut out textures): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9o, early depth by texture alpha, back pass profile, fps log): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -5266,7 +5363,7 @@ namespace dx11z
             const bool lit = constants.m_Head[0] > 0.0f;
             const bool additive = render[rs::ALPHABLENDENABLE] != 0 && render[rs::DESTBLEND] == 2;
             const bool alpha = render[rs::ALPHABLENDENABLE] != 0 || render[rs::ALPHATESTENABLE] != 0;
-            const int category = sky ? 2 : flat_draw ? 4 : m_EdgePass == 2 ? 5 : additive ? 3 : alpha ? (lit ? 6 : 7) : (lit ? 1 : 0);
+            const int category = m_BackPass ? 8 : sky ? 2 : flat_draw ? 4 : m_EdgePass == 2 ? 5 : additive ? 3 : alpha ? (lit ? 6 : 7) : (lit ? 1 : 0);
             ProfileMark( category );
         }
 
@@ -5504,7 +5601,7 @@ namespace dx11z
         m_Context->IASetIndexBuffer( m_IndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0 );
         m_Context->VSSetShader( m_SceneVs.Get(), nullptr, 0 );
         // No alpha test and no edge pass: nothing in the shader can discard this draw, so the depth test may run before it.
-        const bool early_depth = m_ScenePsEarly && m_ConfigEarlyZ != 0 && render[rs::ALPHATESTENABLE] == 0 && m_EdgePass == 0 && !m_ShorePass;
+        const bool early_depth = m_ScenePsEarly && m_ConfigEarlyZ != 0 && m_EdgePass == 0 && !m_ShorePass && CannotDiscard( constants );
         m_Context->PSSetShader( early_depth ? m_ScenePsEarly.Get() : m_ScenePs.Get(), nullptr, 0 );
         ID3D11Buffer * constant_buffer = m_DrawConstants.Get();
         m_Context->VSSetConstantBuffers( 0, 1, &constant_buffer );
