@@ -6,12 +6,18 @@
 // Dazu der Hauptspeicher „RAM“ (Pool 0): Sys_PlatformInit ruft Mem_InitPools(0x1800000, …) auf (push bei 0x4A541F),
 // ebenfalls fest 24 MB. Daraus legt das Spiel u. a. die Texturseiten der Autos als Fenster an (LoadTexPages ->
 // Sys_WindowCreateDefault); ist er voll, stürzt Car_BlitShape ab (0x444627). Größe aus RamPoolMB.
+// Dazu die Speicherabfrage Sys_GetTotalPhys (0x53C3D0, GlobalMemoryStatus.dwTotalPhys): Porsche.exe ist Large Address
+// Aware, ab 4 GB RAM liefert Windows dort 0xFFFFFFFF. Fast alle Aufrufer werten das vorzeichenbehaftet aus (−1 bzw.
+// „0 MB“): gröbere Auto-LOD in R3DCar__SelectLod, Grafikstufen-Erkennung R_Detect*, FE_IsLowMemory (Menü „lite“,
+// Gegnerwahl ohne „random car“, doc/BUGS.md B27). TotalPhysFix leitet die Funktion auf eine eigene um, die den
+// Speicher über GlobalMemoryStatusEx liest und auf 0x7FFFFFFF (2 GB) begrenzt.
 
 #include <windows.h>
 
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace
@@ -26,6 +32,10 @@ namespace
     constexpr std::uintptr_t kRamSite = 0x4A5420;
     // Mem_gPoolTable: Eintrag 0 ist „RAM“, gesetzt erst durch Mem_InitPools
     constexpr std::uintptr_t kPoolTable = 0x6B4F20;
+
+    // Sys_GetTotalPhys: sub esp,0x20 / lea eax,[esp]
+    constexpr std::uintptr_t kTotalPhys = 0x53C3D0;
+    constexpr std::uint8_t kTotalPhysBytes[] = {0x83, 0xEC, 0x20, 0x8D, 0x44};
 
     std::string g_logPath;
 
@@ -76,6 +86,35 @@ namespace
         Log("Hauptspeicher: %d MB statt 24 MB", megabytes);
     }
 
+    SIZE_T __cdecl TotalPhys()
+    {
+        MEMORYSTATUSEX status = {};
+        status.dwLength = sizeof(status);
+        if (!GlobalMemoryStatusEx(&status))
+            return 0x7FFFFFFF;
+        return status.ullTotalPhys > 0x7FFFFFFFull ? 0x7FFFFFFF : static_cast<SIZE_T>(status.ullTotalPhys);
+    }
+
+    void PatchTotalPhys(const std::string& ini)
+    {
+        if (!GetPrivateProfileIntA("General", "TotalPhysFix", 1, ini.c_str()))
+            return;
+        auto* code = reinterpret_cast<std::uint8_t*>(kTotalPhys);
+        if (std::memcmp(code, kTotalPhysBytes, sizeof(kTotalPhysBytes)) != 0)
+        {
+            Log("Stelle %08X hat unerwartete Bytes, Speicherabfrage nicht geändert", static_cast<unsigned>(kTotalPhys));
+            return;
+        }
+        DWORD old;
+        VirtualProtect(code, 5, PAGE_EXECUTE_READWRITE, &old);
+        code[0] = 0xE9;
+        *reinterpret_cast<std::int32_t*>(code + 1) =
+            static_cast<std::int32_t>(reinterpret_cast<std::uintptr_t>(&TotalPhys) - (kTotalPhys + 5));
+        VirtualProtect(code, 5, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), code, 5);
+        Log("Speicherabfrage: %u MB gemeldet (begrenzt auf 2048)", static_cast<unsigned>(TotalPhys() >> 20));
+    }
+
     void Install(HMODULE self)
     {
         char path[MAX_PATH];
@@ -96,6 +135,7 @@ namespace
 
         const std::string ini = base + ".ini";
         PatchRam(ini);
+        PatchTotalPhys(ini);
 
         int megabytes = GetPrivateProfileIntA("General", "TexturePoolMB", 256, ini.c_str());
         if (megabytes < 24)

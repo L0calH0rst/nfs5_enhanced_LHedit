@@ -171,6 +171,10 @@ namespace nfs5
         // factor] are tested against the walls as well, '0' tests the centre only like the game.
         float m_OcclusionEdge = 1.0f;
         float m_OcclusionEdgeRange = 300.0f;
+
+        // Smallest depth bias step [game units, positive] of the lamp glow sprites, 1 is the minimum the glow
+        // needs not to vanish in the lens, more also clears glass parts with a bias of their own (BUGS.md B23).
+        int m_LampGlowMinBias = 6;
     };
 
     struct ControllerSettings

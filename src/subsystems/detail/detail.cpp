@@ -87,9 +87,9 @@ namespace nfs5
         safetyhook::Context & context
     )
     {
-        // Keep the glow at least one step in front of the lamp lens at any distance.
+        // Keep the glow in front of the lamp lens at any distance, the game's bias falls with 1/d^2 and rounds to 0 at ~92 m.
         auto & bias = *reinterpret_cast<std::int32_t *>(context.ebp + game::detail::LAMP_GLOW_DEPTH_BIAS_EBP);
-        bias = std::min( bias, -1 );
+        bias = std::min( bias, -GetInstance().m_Settings.m_LampGlowMinBias );
     }
 
 

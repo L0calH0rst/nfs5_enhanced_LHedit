@@ -308,6 +308,7 @@ namespace
     int g_cineInCycle = 1;     // Cinematic als fünfte Ansicht der Kamerataste des Spiels (C)
     int g_cineKey = 0;         // eigene Taste zum Umschalten, 0 = keine
     int g_cineEngine = 1;      // Motor in Cinematic laut wie in der Wiederholung
+    int g_sprayColour = -1;    // B29: RGB der Wasser-Gischt (WTSP), -1 = Original
     int g_action = 1;          // Verfolgerkameras reagieren auf die Fahrt
     int g_actionKey = 0;       // Taste: Action an/aus, 0 = keine
     unsigned g_actionCams = (1u << 2) | (1u << 3) | (1u << 4); // Kameratypen mit Action-Verhalten (TailCam0..2)
@@ -637,6 +638,13 @@ namespace
         g_cineInCycle = GetPrivateProfileIntA("Camera", "CinematicInCycle", 1, ini);
         g_cineKey = readOptionalKey("CinematicKey");
         g_cineEngine = GetPrivateProfileIntA("Camera", "CinematicEngineSound", 1, ini);
+        {
+            char text[32] = {};
+            GetPrivateProfileStringA("Weather", "SprayColour", "B4BCC4", text, sizeof(text), ini);
+            char * end = nullptr;
+            const unsigned long rgb = std::strtoul(text, &end, 16);
+            g_sprayColour = text[0] && end && *end == 0 ? static_cast<int>(rgb & 0xFFFFFF) : -1;
+        }
         g_action = GetPrivateProfileIntA("Camera", "Action", 1, ini);
         g_actionKey = readOptionalKey("ActionKey");
         char cams[128] = {};
@@ -5366,6 +5374,67 @@ namespace
         }
     }
 
+    // B29: Wasser-Gischt der Autos (System WTSP in GameData/Render/carpart.dat) ist im Original hellblau
+    // (color.0 = 0x38599BD0, color.1 = 0x1C5A9ABC, ARGB). R_LoadParticleFiles 0x455570 (fastcall, ecx = Halter der
+    // Map Tag -> Definition) liest particle.dat und carpart.dat in eine Map: map = *halter = {Kopf, Anzahl},
+    // Kopf = *map, Wurzel = Kopf + 4 (vgl. das Leeren am Anfang: R_ParticleTreeA_EraseSubtree(*(*map + 4)), map[1] = 0),
+    // Knoten +8 links, +0xC rechts (leer = 0), +0x10 Tag, ab +0x14 die 124 Byte der Definition (Farben +0x6C/+0x70).
+    // Nach dem Laden ersetzt LFSP dort das RGB, Alpha bleibt; nur wenn noch die Originalwerte stehen.
+    constexpr std::uintptr_t kLoadParticles = 0x455570;
+    constexpr std::uint32_t kSprayTag = 0x50535457; // WTSP
+    using LoadParticlesFn = void (__fastcall *)(void *);
+    LoadParticlesFn g_origLoadParticles = nullptr;
+
+    unsigned char * FindParticleNode(unsigned char * node, unsigned char * head, std::uint32_t tag, int depth)
+    {
+        // Zur Sicherheit: jeder Zeiger wird geprueft, Fehlgriffe werden abgefangen
+        __try
+        {
+            while (node && node != head && depth < 64)
+            {
+                if (reinterpret_cast<std::uintptr_t>(node) < 0x10000 || IsBadReadPtr(node, 0x14 + 0x74))
+                {
+                    return nullptr;
+                }
+                const std::uint32_t key = *reinterpret_cast<std::uint32_t *>(node + 0x10);
+                if (key == tag)
+                {
+                    return node;
+                }
+                node = *reinterpret_cast<unsigned char **>(node + (tag < key ? 8 : 0xC));
+                ++depth;
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+        return nullptr;
+    }
+
+    void __fastcall HookLoadParticles(void * holder)
+    {
+        g_origLoadParticles(holder);
+        // Erste Fassung nahm map als Kopf und las bei +4 die Anzahl (0x47) als Wurzel -> Absturz.
+        auto * map = holder && !IsBadReadPtr(holder, 4) ? *static_cast<unsigned char **>(holder) : nullptr;
+        auto * head = map && !IsBadReadPtr(map, 8) ? *reinterpret_cast<unsigned char **>(map) : nullptr;
+        unsigned char * node = head && !IsBadReadPtr(head, 0x10) ? FindParticleNode(*reinterpret_cast<unsigned char **>(head + 4), head, kSprayTag, 0) : nullptr;
+        if (!node)
+        {
+            Log("Gischt: System WTSP nicht gefunden (%u Systeme), Farbe unveraendert", map && !IsBadReadPtr(map, 8) ? reinterpret_cast<unsigned *>(map)[1] : 0u);
+            return;
+        }
+        auto * colour = reinterpret_cast<std::uint32_t *>(node + 0x14 + 0x6C);
+        if (colour[0] != 0x38599BD0u || colour[1] != 0x1C5A9ABCu)
+        {
+            Log("Gischt: Farben %08X/%08X nicht original, unveraendert", colour[0], colour[1]);
+            return;
+        }
+        const std::uint32_t rgb = static_cast<std::uint32_t>(g_sprayColour);
+        colour[0] = (colour[0] & 0xFF000000u) | rgb;
+        colour[1] = (colour[1] & 0xFF000000u) | rgb;
+        Log("Gischt: Farbe %08X/%08X", colour[0], colour[1]);
+    }
+
     void InstallTrafficFollowGap()
     {
         static const unsigned char kOld[] = { 0x83, 0xF9, 0x01, 0x75, 0x2A }; // CMP ECX,1 / JNZ 0x4020C4
@@ -6373,6 +6442,13 @@ namespace
             static const unsigned char kOld[] = { 0x7C, 0x1A };
             static const unsigned char kNew[] = { 0x90, 0x90 };
             PatchBytes("Cinematic Motorgeraeusch", 0x4AA083, kOld, kNew, sizeof(kOld));
+        }
+
+        if (g_sprayColour >= 0)
+        {
+            static const unsigned char kLoad[] = { 0x81, 0xEC, 0x34, 0x02, 0x00, 0x00 };
+            InstallHook("Gischt-Farbe", kLoadParticles, kLoad, sizeof(kLoad), reinterpret_cast<void *>(&HookLoadParticles),
+                        reinterpret_cast<void **>(&g_origLoadParticles));
         }
 
         // 11.1/11.2: Kamera (Takt für Cinematic und Tasten, View-Aufbau für Action, Kamerataste für den Wechsel)

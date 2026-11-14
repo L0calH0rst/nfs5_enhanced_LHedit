@@ -267,6 +267,7 @@ namespace nfs5
         s.m_Detail.m_OcclusionRange = std::clamp( ReadFloat( L"Detail", L"OcclusionRange", 220.0f ), 0.0f, 20000.0f );
         s.m_Detail.m_OcclusionEdge = std::clamp( ReadFloat( L"Detail", L"OcclusionEdge", 1.0f ), 0.0f, 4.0f );
         s.m_Detail.m_OcclusionEdgeRange = std::clamp( ReadFloat( L"Detail", L"OcclusionEdgeRange", 300.0f ), 0.0f, 20000.0f );
+        s.m_Detail.m_LampGlowMinBias = std::clamp( ReadInt( L"Detail", L"LampGlowMinBias", 6 ), 1, 64 );
 
         s.m_Controller.m_Enabled = ReadBool( L"Controller", L"Enabled", true );
         s.m_Controller.m_HideHandledDevices = ReadBool( L"Controller", L"HideHandledDevices", true );
