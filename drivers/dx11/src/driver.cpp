@@ -1737,6 +1737,7 @@ namespace dx11z
         m_ConfigTrafficGlow = std::clamp( static_cast<float>(std::atof( light_value( "TrafficHeadlightGlow", "0.35" ).c_str() )), 0.0f, 4.0f );
         m_ConfigTrafficRange = std::clamp( static_cast<float>(std::atof( light_value( "TrafficHeadlightRange", "0.5" ).c_str() )), 0.1f, 2.0f );
         m_ConfigMaxCarLights = std::clamp( std::atoi( light_value( "MaxCarLights", "16" ).c_str() ), 1, MAX_CAR_LIGHTS );
+        m_ConfigCoverageMid = std::clamp( static_cast<float>(std::atof( light_value( "AlphaCoverageMid", "0.12" ).c_str() )), 0.0f, 1.0f );
         m_ConfigEarlyZ = std::clamp( std::atoi( light_value( "EarlyZ", "1" ).c_str() ), 0, 1 );
         m_ConfigLightCulling = std::clamp( std::atoi( light_value( "LightCulling", "1" ).c_str() ), 0, 1 );
         m_ConfigNightGradeBlended = std::clamp( std::atoi( light_value( "NightGradeBlended", "1" ).c_str() ), 0, 1 );
@@ -3308,6 +3309,20 @@ namespace dx11z
                 {
                     // DXT1 may punch through and DXT3 carries alpha, not worth decoding here.
                     texture->m_Translucent = true;
+                    texture->m_AlphaMid = 0.0f;
+                    if (texture->m_Format == formats::DXT3)
+                    {
+                        // 16 blocks of 4 bit alpha ahead of the colour of each 16 byte block.
+                        std::size_t mid = 0;
+                        const std::size_t blocks = converted.size() / 16;
+                        for (std::size_t block = 0; block < blocks; ++block)
+                            for (std::size_t i = 0; i < 8; ++i)
+                            {
+                                const std::uint8_t pair = converted[block * 16 + i];
+                                mid += ((pair & 0x0F) >= 2 && (pair & 0x0F) <= 13 ? 1u : 0u) + ((pair >> 4) >= 2 && (pair >> 4) <= 13 ? 1u : 0u);
+                            }
+                        texture->m_AlphaMid = blocks > 0 ? static_cast<float>(mid) / static_cast<float>(blocks * 16) : 0.0f;
+                    }
                 }
                 else
                 {
@@ -3318,6 +3333,12 @@ namespace dx11z
                     {
                         return (texel >> 24) != 0xFF;
                     } );
+                    const std::size_t mid = static_cast<std::size_t>(std::count_if( texels, texels + count, [] ( std::uint32_t texel )
+                    {
+                        const std::uint32_t alpha = texel >> 24;
+                        return alpha >= 32 && alpha <= 224;
+                    } ));
+                    texture->m_AlphaMid = count > 0 ? static_cast<float>(mid) / static_cast<float>(count) : 0.0f;
                 }
             }
             m_Context->UpdateSubresource( texture->m_Texture.Get(), static_cast<UINT>( level ), nullptr, converted.data(), static_cast<UINT>( pitch ), 0 );
@@ -5043,7 +5064,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9m, profile with pixel shader runs, early depth variant): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9n, alpha to coverage only for cut out textures): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -5696,16 +5717,29 @@ namespace dx11z
             for (const TlVertex & vertex : m_BatchVertices)
                 rhw_min = std::min( rhw_min, vertex.m_Rhw );
             coverage_world = *reinterpret_cast<const std::int32_t *>(0x0065B928) == 0 && render[rs::ZFUNC] != 8 && rhw_min < 0.999f;
-            static int coverage_logged = 0;
-            static int kept_logged = 0;
-            int & logged = coverage_world ? coverage_logged : kept_logged;
-            if (logged < 6)
+            // Only real cut outs: the alpha of water edges, shadows, smoke and glass is a gradient and the coverage of eight samples
+            // would turn it into bands. A fade through the vertex colour is a gradient as well.
+            float mid = 0.0f;
+            for (const Texture * texture : { m_Bound[0], m_Bound[1] })
+                if (texture != nullptr && texture->m_Translucent)
+                    mid = std::max( mid, texture->m_AlphaMid );
+            const bool vertex_fade = std::any_of( m_BatchVertices.begin(), m_BatchVertices.end(), [] ( const TlVertex & vertex )
             {
-                ++logged;
-                Log( "AlphaEdgeFix 3: %s, front end %d, zfunc %u, rhw min %g, %u vertices, texture %08X", coverage_world ? "alpha to coverage" : "two pass kept (menu/HUD)",
+                return (vertex.m_Diffuse >> 24) != 0xFF;
+            } );
+            const bool gradient = mid > m_ConfigCoverageMid || vertex_fade || IsWaterTexture() ||
+                (m_Bound[0] != nullptr && std::find( m_ConfigShoreTextures.begin(), m_ConfigShoreTextures.end(), m_Bound[0]->m_Hash ) != m_ConfigShoreTextures.end());
+            const bool menu = !coverage_world;
+            coverage_world = coverage_world && !gradient;
+            // One line per texture, the first 80: the decision and why.
+            static std::set<std::uint32_t> coverage_seen;
+            const std::uint32_t texture_hash = m_Bound[0] != nullptr ? static_cast<std::uint32_t>(m_Bound[0]->m_Hash) : 0u;
+            if (coverage_seen.size() < 80 && coverage_seen.insert( texture_hash ).second)
+                Log( "AlphaEdgeFix 3: texture %08X -> %s (%s, alpha 32..224 share %.3f of limit %.2f, vertex alpha %s, water %d, front end %d, zfunc %u, rhw min %g, %u vertices)",
+                    texture_hash, coverage_world ? "alpha to coverage" : "two pass", menu ? "menu/HUD" : gradient ? "gradient" : "cut out", mid,
+                    m_ConfigCoverageMid, vertex_fade ? "fades" : "opaque", IsWaterTexture() ? 1 : 0,
                     *reinterpret_cast<const std::int32_t *>(0x0065B928) != 0 ? 1 : 0, static_cast<unsigned>(render[rs::ZFUNC]), rhw_min,
-                    static_cast<unsigned>(m_BatchVertices.size()), m_Bound[0] != nullptr ? static_cast<unsigned>(m_Bound[0]->m_Hash) : 0u );
-            }
+                    static_cast<unsigned>(m_BatchVertices.size()) );
         }
         const bool edge_split = edge_candidate && (!m_ConfigAlphaToCoverage || !coverage_world);
 
@@ -8233,21 +8267,27 @@ namespace dx11z
                 const int d = static_cast<int>(a >> shift & 0xFF) - static_cast<int>(b >> shift & 0xFF);
                 distance += d * d;
             }
-            return distance < 60 * 60;
+            return distance < 40 * 40;
         };
         bool inherited = false;
         for (const auto & baseline : m_CarReflBaselines)
         {
             if (baseline.m_Width != desc.Width || baseline.m_Height != desc.Height)
                 continue;
-            std::size_t valid = 0, same = 0;
+            // The same layout (cells with and without texels, 95 %) and the same colours in 85 % of them: another model or
+            // another paint of the same size must not take over (its cloth would read as paint).
+            std::size_t valid = 0, either = 0, same = 0;
             for (std::size_t i = 0; i < 64 * 64; ++i)
-                if (baseline.m_Colours[i] != 0xFFFFFFFFu && colours[i] != 0xFFFFFFFFu)
+            {
+                const bool a = baseline.m_Colours[i] != 0xFFFFFFFFu, b = colours[i] != 0xFFFFFFFFu;
+                either += a || b ? 1 : 0;
+                if (a && b)
                 {
                     ++valid;
                     same += near_colour( baseline.m_Colours[i], colours[i] ) ? 1 : 0;
                 }
-            if (valid >= 64 && same * 10 >= valid * 6)
+            }
+            if (valid >= 64 && valid * 100 >= either * 95 && same * 100 >= valid * 85)
             {
                 colours = baseline.m_Colours;
                 inherited = true;

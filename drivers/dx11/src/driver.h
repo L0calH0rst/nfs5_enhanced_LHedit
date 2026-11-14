@@ -216,6 +216,9 @@ namespace dx11z
         std::int32_t m_Updates = 0;
         // Top level holds texels with alpha below 255, set on upload.
         bool m_Translucent = false;
+        // Share of the top level texels with a half transparent alpha (32 to 224): cut outs (leaves, fences) have almost none,
+        // gradients (water edges, shadows, smoke, glass) many.
+        float m_AlphaMid = 0.0f;
         // Size of all levels as uploaded, for the memory report of '[Dx11] Measure'.
         std::uint64_t m_Bytes = 0;
         // FNV-1a over the converted top level, names the texture in the measure log.
@@ -514,6 +517,7 @@ namespace dx11z
         int m_ConfigMaxCarLights = 16; // [Lights] MaxCarLights: active car lights (opponents and traffic), 1 to MAX_CAR_LIGHTS
         int m_ConfigNightGradeBlended = 1; // [Lights] NightGradeBlended: normal blended draws without depth write (foliage fringe) are darkened too
         std::map<std::uint32_t, std::array<std::uint64_t, 3>> m_NightTextures;
+        float m_ConfigCoverageMid = 0.12f; // [Lights] AlphaCoverageMid: textures with a larger half transparent share keep the two pass fix
         int m_ConfigEarlyZ = 1; // [Lights] EarlyZ: forced early depth test for draws that cannot discard (feature level 11)
         ComPtr<ID3D11PixelShader> m_ScenePsEarly;
         int m_ConfigLightCulling = 1; // [Lights] LightCulling: lights out of reach of a batch stay out of its constants (no visible change)
