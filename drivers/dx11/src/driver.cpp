@@ -1726,6 +1726,7 @@ namespace dx11z
         m_ConfigTrafficGlow = std::clamp( static_cast<float>(std::atof( light_value( "TrafficHeadlightGlow", "0.35" ).c_str() )), 0.0f, 4.0f );
         m_ConfigMaxCarLights = std::clamp( std::atoi( light_value( "MaxCarLights", "16" ).c_str() ), 1, MAX_CAR_LIGHTS );
         m_ConfigLightCulling = std::clamp( std::atoi( light_value( "LightCulling", "1" ).c_str() ), 0, 1 );
+        m_ConfigNightGradeBlended = std::clamp( std::atoi( light_value( "NightGradeBlended", "1" ).c_str() ), 0, 1 );
         m_ConfigProfile = std::clamp( std::atoi( light_value( "FrameProfile", "0" ).c_str() ), 0, 600 );
         Log( "Config lights from '%s' [Lights] (missing keys from [Dx11]): HeadlightsOpponents %d strength %.2f", lights_ini.c_str(),
             m_ConfigOpponents, m_ConfigOpponentsStrength );
@@ -4984,8 +4985,9 @@ namespace dx11z
             flat_rhw[0] = std::min( flat_rhw[0], v.m_Rhw );
             flat_rhw[1] = std::max( flat_rhw[1], v.m_Rhw );
         }
-        const bool flat_draw = !m_BatchVertices.empty() && (flat_rhw[0] >= 0.999f || (flat_z[1] - flat_z[0] < 1e-7f && flat_rhw[1] - flat_rhw[0] < 1e-7f) ||
-            render[rs::ZFUNC] == 8); // the HUD phase (Hud_Draw) runs R_SetZFunc 7 = depth func ALWAYS, the world uses LESSEQUAL
+        // The HUD phase (Hud_Draw) runs R_SetZFunc 7 = depth func ALWAYS, the world uses LESSEQUAL; rhw 1 and up is screen space. A batch of
+        // one camera facing quad (billboard foliage) also has one depth for all its vertices: that alone is no HUD.
+        const bool flat_draw = !m_BatchVertices.empty() && (flat_rhw[0] >= 0.999f || render[rs::ZFUNC] == 8);
 
         // Night over a day track (LFSP 'NightGrade'), per draw one of:
         //  1 world: opaque or normally blended draws with depth writing, factor on the world without its lights;
@@ -5001,7 +5003,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9j, world/sky/light sprites, early alpha discard, alpha to coverage (AlphaEdgeFix 3)): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9k, blended foliage graded, texture log): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -5019,18 +5021,48 @@ namespace dx11z
                     mode = 0;
                 else if (night_additive)
                     mode = 3;
-                else if (render[rs::ZENABLE] != 0 && (render[rs::ALPHABLENDENABLE] == 0 || (night_normal && render[rs::ZWRITEENABLE] != 0)))
+                else if (render[rs::ZENABLE] != 0 && (render[rs::ALPHABLENDENABLE] == 0 ||
+                    (night_normal && (render[rs::ZWRITEENABLE] != 0 || m_ConfigNightGradeBlended != 0))))
                     mode = 1;
+                // Which textures stay bright (not graded, not HUD) and which alpha tested ones are graded, to find rims (log below).
+                {
+                    const std::uint32_t texture = m_Bound[0] != nullptr ? static_cast<std::uint32_t>(m_Bound[0]->m_Hash) : 0u;
+                    auto & seen = m_NightTextures[texture];
+                    if (mode == 0 && !flat_draw)
+                        ++seen[0];
+                    else if (mode == 1 && render[rs::ALPHATESTENABLE] != 0)
+                        ++seen[1];
+                    else if (mode == 0)
+                        ++seen[2];
+                }
                 ++night_counts[mode == 0 ? (flat_draw && !sky ? 4 : 5) : mode - 1 + (mode > 0 ? 0 : 0)];
                 static std::uint32_t night_logged_flip = 0;
                 static int night_examples = 0;
                 if (m_FlipCount / 600 != night_logged_flip)
                 {
                     night_logged_flip = m_FlipCount / 600;
-                    Log( "Night grade: world %llu, sky %llu, light sprites %llu, HUD/2D %llu, other sprites %llu (frame %u)",
+                    Log( "Night grade: world %llu, sky %llu, light sprites %llu, HUD/2D %llu, other sprites %llu (frame %u, blended without depth write %s)",
                         static_cast<unsigned long long>(night_counts[0]), static_cast<unsigned long long>(night_counts[1]),
                         static_cast<unsigned long long>(night_counts[2]), static_cast<unsigned long long>(night_counts[4]),
-                        static_cast<unsigned long long>(night_counts[5]), m_FlipCount );
+                        static_cast<unsigned long long>(night_counts[5]), m_FlipCount, m_ConfigNightGradeBlended != 0 ? "graded" : "not graded" );
+                    // The textures with the most draws since the last report: kept bright (column 0), graded and alpha tested (1), HUD (2).
+                    for (int column = 0; column < 3; ++column)
+                    {
+                        std::vector<std::pair<std::uint64_t, std::uint32_t>> top;
+                        for (const auto & entry : m_NightTextures)
+                            if (entry.second[static_cast<std::size_t>(column)] > 0)
+                                top.emplace_back( entry.second[static_cast<std::size_t>(column)], entry.first );
+                        std::sort( top.begin(), top.end(), []( const auto & a, const auto & b ) { return a.first > b.first; } );
+                        std::string line;
+                        for (std::size_t i = 0; i < top.size() && i < 8; ++i)
+                        {
+                            char item[40] = {};
+                            std::snprintf( item, sizeof( item ), " %08X:%llu", top[i].second, static_cast<unsigned long long>(top[i].first) );
+                            line += item;
+                        }
+                        Log( "Night grade textures (%s):%s", column == 0 ? "kept bright" : column == 1 ? "graded, alpha tested" : "HUD/2D", line.c_str() );
+                    }
+                    m_NightTextures.clear();
                 }
                 if (night_examples < 60 && (mode == 2 || mode == 3 || flat_draw) && (night_counts[mode == 0 ? 4 : mode - 1] % 4000 == 1))
                 {

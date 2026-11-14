@@ -511,6 +511,8 @@ namespace dx11z
         float m_ConfigOpponentsStrength = 1.0f;
         float m_ConfigTrafficGlow = 0.35f; // [Lights] TrafficHeadlightGlow: share of the opponents' light for traffic cars, 0 = off
         int m_ConfigMaxCarLights = 16; // [Lights] MaxCarLights: active car lights (opponents and traffic), 1 to MAX_CAR_LIGHTS
+        int m_ConfigNightGradeBlended = 1; // [Lights] NightGradeBlended: normal blended draws without depth write (foliage fringe) are darkened too
+        std::map<std::uint32_t, std::array<std::uint64_t, 3>> m_NightTextures;
         int m_ConfigLightCulling = 1; // [Lights] LightCulling: lights out of reach of a batch stay out of its constants (no visible change)
         int m_ConfigProfile = 0; // [Lights] FrameProfile: seconds between GPU phase timings in the log, 0 = off
 
