@@ -1770,6 +1770,8 @@ namespace dx11z
             m_ConfigCarReflBlur = std::clamp( static_cast<float>(std::atof( car_value( "Blur", "2.0" ).c_str() )), 0.0f, 8.0f );
             m_ConfigCarReflFresnel = std::clamp( static_cast<float>(std::atof( car_value( "Fresnel", "3.0" ).c_str() )), 1.0f, 8.0f );
             m_ConfigCarReflGlass = std::clamp( std::atoi( car_value( "Glass", "0" ).c_str() ), 0, 1 );
+            m_ConfigCarReflInterval = std::clamp( std::atoi( car_value( "UpdateInterval", "1" ).c_str() ), 1, 8 );
+            m_ConfigCarReflMinSize = std::clamp( static_cast<float>(std::atof( car_value( "MinSize", "0" ).c_str() )), 0.0f, 400.0f );
             m_ConfigCarReflDebug = std::clamp( std::atoi( car_value( "Debug", "0" ).c_str() ), 0, 3 );
             // The game's light decal (Y2T1, Y2T2, doc/LICHT.md 12) is blended over the body with the same state as glass.
             const std::string skip = car_value( "SkipTextures", "4A522215,984E4128" );
@@ -5015,7 +5017,7 @@ namespace dx11z
         double window_ms
     )
     {
-        static const char * const names[PROFILE_CATEGORIES] = { "opaque", "opaque lit", "sky", "additive", "HUD/2D", "edge pass 2", "alpha lit", "alpha unlit", "back pass" };
+        static const char * const names[PROFILE_CATEGORIES] = { "opaque", "opaque lit", "sky", "additive", "HUD/2D", "edge pass 2", "alpha lit", "alpha unlit", "back pass", "car copy", "car reflect" };
         const double gpu_frames = static_cast<double>(std::max<std::uint64_t>( m_ProfileGpuFrames, 1 ));
         const double frames = static_cast<double>(std::max<std::uint64_t>( m_ProfileFlips, 1 ));
         LARGE_INTEGER frequency = {};
@@ -5062,6 +5064,14 @@ namespace dx11z
             }
             Log( "Profile:   constants first changed field per upload (per frame)%s", line.c_str() );
             m_ProfileUploadField = {};
+        }
+        if (m_ProfileCarCopies > 0 || m_ProfileCarBatches > 0)
+        {
+            Log( "Profile:   car reflections per frame: %.1f frame copies, CPU copy %.0f us, CPU batches %.0f us (%.1f batches, %.0f vertices), GPU copy %.3f ms (resolve and mips), GPU reflect draws %.3f ms",
+                static_cast<double>(m_ProfileCarCopies) / frames, static_cast<double>(m_ProfileCarCopyTicks) * us, static_cast<double>(m_ProfileCarBatchTicks) * us,
+                static_cast<double>(m_ProfileCarBatches) / frames, static_cast<double>(m_ProfileCarVertices) / frames, m_ProfileMs[9] / gpu_frames, m_ProfileMs[10] / gpu_frames );
+            m_ProfileCarCopyTicks = m_ProfileCarBatchTicks = 0;
+            m_ProfileCarBatches = m_ProfileCarVertices = m_ProfileCarCopies = 0;
         }
         m_ProfileMs = {};
         m_ProfileDraws = {};
@@ -5161,7 +5171,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9o, early depth by texture alpha, back pass profile, fps log): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9p, car reflection profile and CPU cuts): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -7709,7 +7719,9 @@ namespace dx11z
         if (m_CarReflCopyFlip != m_FlipCount)
         {
             m_CarReflCopyFlip = m_FlipCount;
-            m_CarReflSourceValid = CopyCarReflSource();
+            // Every N frames only: the paint is no perfect mirror (Blur), the copy of the frame before looks nearly the same.
+            if (m_ConfigCarReflInterval <= 1 || !m_CarReflSourceValid || m_FlipCount % static_cast<std::uint64_t>(m_ConfigCarReflInterval) == 0)
+                m_CarReflSourceValid = CopyCarReflSource();
             ++m_CarReflFrames;
         }
 
@@ -7769,6 +7781,12 @@ namespace dx11z
     {
         if (!m_Frame)
             return false;
+        const PerfScope car_copy_scope( m_ConfigProfile > 0, m_ProfileCarCopyTicks, m_ProfileDepth3 );
+        if (m_ConfigProfile > 0)
+        {
+            ++m_ProfileCarCopies;
+            ProfileMark( 9 );
+        }
 
         D3D11_TEXTURE2D_DESC desc = {};
         m_Frame->GetDesc( &desc );
@@ -7819,6 +7837,7 @@ namespace dx11z
 
     void Driver::CarReflBatch()
     {
+        const PerfScope car_batch_scope( m_ConfigProfile > 0, m_ProfileCarBatchTicks, m_ProfileDepth2 );
         const std::uint32_t mask = m_CarLodMask;
         const auto & render = m_D3D.m_Render;
 
@@ -7875,13 +7894,21 @@ namespace dx11z
 
         // Glossy parts mark the cells of their textures they cover: the cells of their corners and those whose centre is
         // inside.
-        if (!m_CarPartMatte && hash != 0)
+        // The triangles of a part and level do not change from frame to frame: mark the cells once per (texture, part, pass, size).
+        const std::uint64_t cells_key = (static_cast<std::uint64_t>(hash) << 32) ^ (static_cast<std::uint64_t>(m_CarPart & 0xFFFF) << 16) ^
+            (static_cast<std::uint64_t>(mask & 0xFF) << 8) ^ (static_cast<std::uint64_t>(m_BatchIndices.size() / 3) * 0x9E3779B1ull);
+        if (!m_CarPartMatte && hash != 0 && m_CarReflCellsDone.insert( cells_key ).second)
         {
+            if (m_CarReflCellsDone.size() > 4096)
+                m_CarReflCellsDone = { cells_key };
             auto found = m_CarReflPaintCells.find( hash );
             if (found == m_CarReflPaintCells.end())
             {
                 if (m_CarReflPaintCells.size() > 256)
+                {
                     m_CarReflPaintCells.clear();
+                    m_CarReflCellsDone = { cells_key };
+                }
                 found = m_CarReflPaintCells.emplace( hash, std::array<std::uint64_t, 64>{} ).first;
             }
             auto & cells = found->second;
@@ -8065,6 +8092,24 @@ namespace dx11z
             count * sizeof( CarReflVertex ) > RAW_VERTICES * sizeof( TlVertex ))
             return;
 
+        // Small and far parts: a reflection a few pixels wide is not seen ('[CarReflections] MinSize', in pixels of 1440 lines).
+        if (m_ConfigCarReflMinSize > 0.0f)
+        {
+            float low_x = 1e30f, high_x = -1e30f, low_y = 1e30f, high_y = -1e30f;
+            for (const TlVertex & v : m_BatchVertices)
+            {
+                low_x = std::min( low_x, v.m_X );
+                high_x = std::max( high_x, v.m_X );
+                low_y = std::min( low_y, v.m_Y );
+                high_y = std::max( high_y, v.m_Y );
+            }
+            if (std::max( high_x - low_x, high_y - low_y ) * 1440.0f / static_cast<float>(std::max( m_Height, 1 )) < m_ConfigCarReflMinSize)
+            {
+                ++stats.m_Skipped;
+                return;
+            }
+        }
+
         // Up of the car: row 1 of object x view (camera + 0x188, row vectors, as PrepareHeadMesh) of the part drawn last.
         const std::uintptr_t renderer = *reinterpret_cast<const std::uintptr_t *>(0x0069E0D4);
         std::uintptr_t camera = 0;
@@ -8102,26 +8147,33 @@ namespace dx11z
         }
 
         // Corners at the same point are one vertex for the normals (the driver gets the triangles one by one).
-        const auto key = [&]( std::uint32_t i )
+        // The keys once, then sorted with the index: the same groups as comparing the vertices over and over.
+        struct WeldKey
+        {
+            std::uint32_t m_Key[3];
+            std::uint32_t m_Index;
+        };
+        static thread_local std::vector<WeldKey> weld;
+        weld.resize( count );
+        for (std::size_t i = 0; i < count; ++i)
         {
             const TlVertex & v = m_BatchVertices[i];
-            std::array<std::uint32_t, 3> k = {};
-            std::memcpy( &k[0], &v.m_X, 4 );
-            std::memcpy( &k[1], &v.m_Y, 4 );
-            std::memcpy( &k[2], &v.m_Rhw, 4 );
-            return k;
-        };
-        m_CarReflOrder.resize( count );
-        for (std::size_t i = 0; i < count; ++i)
-            m_CarReflOrder[i] = static_cast<std::uint32_t>(i);
-        std::sort( m_CarReflOrder.begin(), m_CarReflOrder.end(), [&]( std::uint32_t a, std::uint32_t b ) { return key( a ) < key( b ); } );
+            std::memcpy( &weld[i].m_Key[0], &v.m_X, 4 );
+            std::memcpy( &weld[i].m_Key[1], &v.m_Y, 4 );
+            std::memcpy( &weld[i].m_Key[2], &v.m_Rhw, 4 );
+            weld[i].m_Index = static_cast<std::uint32_t>(i);
+        }
+        std::sort( weld.begin(), weld.end(), []( const WeldKey & a, const WeldKey & b )
+        {
+            return std::lexicographical_compare( a.m_Key, a.m_Key + 3, b.m_Key, b.m_Key + 3 );
+        } );
         m_CarReflGroup.resize( count );
         std::uint32_t groups = 0;
         for (std::size_t k = 0; k < count; ++k)
         {
-            if (k > 0 && key( m_CarReflOrder[k] ) != key( m_CarReflOrder[k - 1] ))
+            if (k > 0 && std::memcmp( weld[k].m_Key, weld[k - 1].m_Key, 12 ) != 0)
                 ++groups;
-            m_CarReflGroup[m_CarReflOrder[k]] = groups;
+            m_CarReflGroup[weld[k].m_Index] = groups;
         }
 
         // Area weighted face normals, each turned towards the camera, summed per point.
@@ -8287,7 +8339,15 @@ namespace dx11z
             uploaded = true;
         }
         if (uploaded)
+        {
+            if (m_ConfigProfile > 0)
+            {
+                ProfileMark( 10 );
+                ++m_ProfileCarBatches;
+                m_ProfileCarVertices += count;
+            }
             m_Context->DrawIndexed( static_cast<UINT>(indices.size()), 0, 0 );
+        }
 
         ID3D11ShaderResourceView * none[2] = {};
         m_Context->PSSetShaderResources( 0, 2, none );

@@ -529,7 +529,7 @@ namespace dx11z
         // Frame profile ('[Lights] FrameProfile'): GPU time per draw category from timestamp queries (a few frames late) and the
         // CPU side of the light constants. Categories: 0 opaque world without light, 1 opaque world with light, 2 sky, 3 additive
         // sprites, 4 HUD and 2D, 5 second pass of the alpha edge fix, 6 alpha tested or blended world with light, 7 the same without.
-        static constexpr int PROFILE_CATEGORIES = 9;
+        static constexpr int PROFILE_CATEGORIES = 11;
         static constexpr int PROFILE_STAMPS = 255;
         struct ProfileSlot
         {
@@ -559,6 +559,13 @@ namespace dx11z
         void ProfileMark( int category );
         void ProfileFrameEnd();
         void FpsFlip();
+        // Car reflections ([CarReflections] Reflections): CPU time of the frame copy and of the batches (normals, cells, upload), per report.
+        std::int64_t m_ProfileCarCopyTicks = 0, m_ProfileCarBatchTicks = 0;
+        std::uint64_t m_ProfileCarBatches = 0, m_ProfileCarVertices = 0, m_ProfileCarCopies = 0;
+        int m_ProfileDepth2 = 0, m_ProfileDepth3 = 0;
+        int m_ConfigCarReflInterval = 1; // [CarReflections] UpdateInterval: the frame copy is renewed every N frames
+        float m_ConfigCarReflMinSize = 0.0f; // [CarReflections] MinSize: parts smaller than this many pixels (of 1440 lines) get no reflection
+        std::set<std::uint64_t> m_CarReflCellsDone; // parts whose triangles have marked their texture cells already
         int m_ConfigFpsLog = 0; // [Lights] FpsLog: seconds between fps lines, 0 = off (no queries, cheap)
         std::int64_t m_FpsStart = 0, m_FpsLast = 0;
         std::uint64_t m_FpsFrames = 0, m_FpsSlow = 0;
