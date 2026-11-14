@@ -1575,7 +1575,9 @@ namespace dx11z
         m_MovieSharpness = static_cast<float>(std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Dx11", "MovieSharpness", 33, ini.c_str() )), 0, 100 )) / 100.0f;
         m_TraceLines = static_cast<int>(::GetPrivateProfileIntA( "Dx11", "Trace", 0, ini.c_str() ));
         m_ConfigMeasure = std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Dx11", "Measure", 0, ini.c_str() )), 0, 2 );
-        m_ConfigAlphaEdgeFix = ::GetPrivateProfileIntA( "Dx11", "AlphaEdgeFix", 0, ini.c_str() ) != 0;
+        const int alpha_edge_mode = static_cast<int>(::GetPrivateProfileIntA( "Dx11", "AlphaEdgeFix", 0, ini.c_str() ));
+        m_ConfigAlphaEdgeFix = alpha_edge_mode != 0 && alpha_edge_mode != 3; // 1 and 2: the two pass fix
+        m_ConfigAlphaToCoverage = alpha_edge_mode == 3; // 3: alpha to coverage, one pass
         m_ConfigAlphaEdgeRef = std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Dx11", "AlphaEdgeRef", 128, ini.c_str() )), 1, 255 );
         {
             char mip_scale[32] = {};
@@ -1595,7 +1597,7 @@ namespace dx11z
         Log( "Config TestNoZBias %d TestDraw %d", m_ConfigTestNoZBias ? 1 : 0, m_ConfigTestDraw );
         Log( "Config AlphaMipScale %.2f TestNoMips %d TestVertexAlpha %d", m_ConfigAlphaMipScale, m_ConfigTestNoMips ? 1 : 0,
             m_ConfigTestVertexAlpha ? 1 : 0 );
-        Log( "Config AlphaEdgeFix %d AlphaEdgeRef %d ForceTwoSided %d", m_ConfigAlphaEdgeFix ? 1 : 0, m_ConfigAlphaEdgeRef,
+        Log( "Config AlphaEdgeFix %d AlphaEdgeRef %d ForceTwoSided %d", m_ConfigAlphaToCoverage ? 3 : (m_ConfigAlphaEdgeFix ? 1 : 0), m_ConfigAlphaEdgeRef,
             m_ConfigForceTwoSided ? 1 : 0 );
 
         if (m_ConfigMeasure > 0)
@@ -4870,11 +4872,15 @@ namespace dx11z
             m_ProfileReportTick = now + static_cast<std::uint64_t>(m_ConfigProfile) * 1000;
         if (now < m_ProfileReportTick)
             return;
+        const double window_ms = m_ProfileWindowStart != 0 ? static_cast<double>(now - m_ProfileWindowStart) : static_cast<double>(m_ConfigProfile) * 1000.0;
+        m_ProfileWindowStart = now;
         m_ProfileReportTick = now + static_cast<std::uint64_t>(m_ConfigProfile) * 1000;
-        ProfileCollect();
+        ProfileCollect( window_ms );
     }
 
-    void Driver::ProfileCollect()
+    void Driver::ProfileCollect(
+        double window_ms
+    )
     {
         static const char * const names[PROFILE_CATEGORIES] = { "world", "world lit", "sky", "additive", "HUD/2D", "edge pass 2" };
         const double gpu_frames = static_cast<double>(std::max<std::uint64_t>( m_ProfileGpuFrames, 1 ));
@@ -4885,6 +4891,8 @@ namespace dx11z
         double total = 0.0;
         for (double value : m_ProfileMs)
             total += value;
+        Log( "Profile: window %.2f s, %llu frames = %.1f fps, frame time %.2f ms", window_ms / 1000.0, static_cast<unsigned long long>(m_ProfileFlips),
+            static_cast<double>(m_ProfileFlips) * 1000.0 / std::max( window_ms, 1.0 ), std::max( window_ms, 1.0 ) / frames );
         Log( "Profile: %llu frames (%llu with GPU time), GPU %.2f ms per frame in the draws, CPU ApplyPipeline %.0f us per frame",
             static_cast<unsigned long long>(m_ProfileFlips), static_cast<unsigned long long>(m_ProfileGpuFrames), total / gpu_frames,
             static_cast<double>(m_ProfileApplyTicks) * us );
@@ -4993,7 +5001,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9i, world/sky/light sprites, max car lights, light culling, compact constants): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9j, world/sky/light sprites, early alpha discard, alpha to coverage (AlphaEdgeFix 3)): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -5180,7 +5188,7 @@ namespace dx11z
         }
 
         // Blend.
-        const std::uint64_t blend_key = static_cast<std::uint64_t>(render[rs::ALPHABLENDENABLE] != 0) |
+        const std::uint64_t blend_key = static_cast<std::uint64_t>(render[rs::ALPHABLENDENABLE] != 0) | (static_cast<std::uint64_t>(m_EdgePass == 3) << 32) |
             (static_cast<std::uint64_t>(render[rs::SRCBLEND] & 0xFF) << 8) |
             (static_cast<std::uint64_t>(render[rs::DESTBLEND] & 0xFF) << 16);
 
@@ -5206,6 +5214,12 @@ namespace dx11z
             }
 
             target.BlendEnable = render[rs::ALPHABLENDENABLE] != 0;
+            // Alpha to coverage (AlphaEdgeFix = 3): the alpha picks the covered samples of the MSAA target, no blending on top.
+            if (m_EdgePass == 3)
+            {
+                desc.AlphaToCoverageEnable = TRUE;
+                target.BlendEnable = FALSE;
+            }
             target.SrcBlend = ToBlend( source_blend, false );
             target.DestBlend = ToBlend( destination_blend, false );
             target.BlendOp = D3D11_BLEND_OP_ADD;
@@ -5593,11 +5607,12 @@ namespace dx11z
             m_ReflCapture = true;
         // Only with alpha test on, as the world is drawn. Without it the front end writes depth
         // with fully transparent quads on purpose, the profile list is masked that way (B10).
-        const bool edge_split = m_ConfigAlphaEdgeFix && m_BatchPrimitive == Primitive::TRIANGLES &&
+        const bool edge_candidate = (m_ConfigAlphaEdgeFix || m_ConfigAlphaToCoverage) && m_BatchPrimitive == Primitive::TRIANGLES &&
             render[rs::ALPHABLENDENABLE] != 0 && render[rs::ALPHATESTENABLE] != 0 && render[rs::ZENABLE] != 0 &&
             render[rs::ZWRITEENABLE] != 0 && BatchTranslucent();
+        const bool edge_split = edge_candidate && !m_ConfigAlphaToCoverage;
 
-        m_EdgePass = edge_split ? 1 : 0;
+        m_EdgePass = edge_split ? 1 : (edge_candidate ? 3 : 0);
 
         if (m_ConfigMeasure > 0)
         {

@@ -543,7 +543,8 @@ namespace dx11z
         std::uint64_t m_ProfileFlips = 0;
         void ProfileMark( int category );
         void ProfileFrameEnd();
-        void ProfileCollect();
+        void ProfileCollect( double window_ms );
+        std::uint64_t m_ProfileWindowStart = 0;
         bool BatchViewSphere( float * centre, float & radius ) const;
         std::int64_t m_CarLightsTicks = 0;
         std::uint64_t m_CarLightsActive = 0;
@@ -791,6 +792,7 @@ namespace dx11z
         // and hide alpha geometry drawn later. Texels below 'AlphaEdgeRef' are drawn in a
         // second pass without depth writes.
         bool m_ConfigAlphaEdgeFix = false;
+        bool m_ConfigAlphaToCoverage = false; // [Dx11] AlphaEdgeFix = 3
         int m_ConfigAlphaEdgeRef = 128;
         float m_ConfigAlphaMipScale = 0.0f; // '[Dx11] AlphaMipScale' (BUGS.md B21)
         bool m_ConfigTestNoMips = false; // '[Dx11] TestNoMips' (BUGS.md B21): top mip level only

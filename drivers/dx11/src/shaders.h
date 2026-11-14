@@ -294,6 +294,54 @@ float4 MainPS( PixelIn input ) : SV_Target
     float3 nightMul = nightWorld ? g_Night.rgb : float3( 1.0, 1.0, 1.0 );
     float4 diffuseBase = diffuse; // without headlights: the night factor only darkens this part
 
+    float4 tex0 = ( g_Flags.w & 1 ) ? g_Texture0.Sample( g_Sampler0, input.m_Uv.xy ) : float4( 1, 1, 1, 1 );
+    float4 tex1 = ( g_Flags.w & 2 ) ? g_Texture1.Sample( g_Sampler1, input.m_Uv.zw ) : float4( 1, 1, 1, 1 );
+
+    // Shore textures fade out towards the water: the lower alpha range becomes transparent, the rest ramps up.
+    if ( g_AlphaRef.y > 0.0 )
+        tex0.a = saturate( ( tex0.a - g_AlphaRef.y ) / ( 1.0 - g_AlphaRef.y ) );
+
+    // '[Dx11] AlphaMipScale' (BUGS.md B21): alpha-tested textures lose coverage in the smaller mip levels, so thin
+    // cut-out edges open up in the distance and close again up close. Scale alpha with the mip level of texture 0.
+    if ( g_Debug.w > 0 && g_Flags.z != 8 && ( g_Flags.w & 1 ) )
+    {
+        float2 size;
+        g_Texture0.GetDimensions( size.x, size.y );
+        float2 texel_dx = ddx( input.m_Uv.xy * size );
+        float2 texel_dy = ddy( input.m_Uv.xy * size );
+        float lod = max( 0.5 * log2( max( dot( texel_dx, texel_dx ), dot( texel_dy, texel_dy ) ) ), 0.0 );
+        tex0.a *= 1.0 + lod * g_Debug.w;
+    }
+
+    // The world without any light: its alpha (no light changes the alpha) decides every discard, so the lights below run
+    // only for pixels that stay. The edge passes of '[Dx11] AlphaEdgeFix' and the alpha test throw most pixels of a leaf away.
+    float4 baseColour = Pipeline( diffuseBase, specular, tex0, tex1 );
+    float alpha = baseColour.a;
+
+    // Water fades out towards the far end of its surface ('[Water] FarFade'), the sea of the sky shows through.
+    if ( g_AlphaRef.w > g_AlphaRef.z && g_AlphaRef.w > 0.0 )
+        alpha *= saturate( ( g_AlphaRef.w - input.m_Position.w ) / ( g_AlphaRef.w - g_AlphaRef.z ) );
+
+    if ( g_Debug.y == 3 )
+    {
+        // Alpha to coverage (AlphaEdgeFix = 3): the alpha is the coverage of the samples, only what is almost clear goes.
+        if ( alpha < 0.02 )
+            discard;
+    }
+    else
+    {
+        if ( !AlphaPasses( alpha ) )
+            discard;
+
+        // '[Dx11] AlphaEdgeFix', pass 1 keeps the opaque part, pass 2 the faint edge.
+        if ( g_Debug.y == 1 && alpha < g_Debug.z )
+            discard;
+        if ( g_Debug.y == 2 && alpha >= g_Debug.z )
+            discard;
+    }
+
+    float4 current = baseColour;
+
     // The game's headlight model per pixel (doc/LICHT.md 7.2): light map lookup in the ground
     // plane of the headlight, minus height, added to the vertex colour before the texture.
     if ( g_Head.x > 0.0 )
@@ -339,28 +387,9 @@ float4 MainPS( PixelIn input ) : SV_Target
                 diffuse.rgb = diffuse.rgb + ( g_RearLeft[r].rgb * left + g_RearRight[r].rgb * right ) * along * up;
             }
         }
+
+        current = Pipeline( diffuse, specular, tex0, tex1 );
     }
-
-    float4 tex0 = ( g_Flags.w & 1 ) ? g_Texture0.Sample( g_Sampler0, input.m_Uv.xy ) : float4( 1, 1, 1, 1 );
-    float4 tex1 = ( g_Flags.w & 2 ) ? g_Texture1.Sample( g_Sampler1, input.m_Uv.zw ) : float4( 1, 1, 1, 1 );
-
-    // Shore textures fade out towards the water: the lower alpha range becomes transparent, the rest ramps up.
-    if ( g_AlphaRef.y > 0.0 )
-        tex0.a = saturate( ( tex0.a - g_AlphaRef.y ) / ( 1.0 - g_AlphaRef.y ) );
-
-    // '[Dx11] AlphaMipScale' (BUGS.md B21): alpha-tested textures lose coverage in the smaller mip levels, so thin
-    // cut-out edges open up in the distance and close again up close. Scale alpha with the mip level of texture 0.
-    if ( g_Debug.w > 0 && g_Flags.z != 8 && ( g_Flags.w & 1 ) )
-    {
-        float2 size;
-        g_Texture0.GetDimensions( size.x, size.y );
-        float2 texel_dx = ddx( input.m_Uv.xy * size );
-        float2 texel_dy = ddy( input.m_Uv.xy * size );
-        float lod = max( 0.5 * log2( max( dot( texel_dx, texel_dx ), dot( texel_dy, texel_dy ) ) ), 0.0 );
-        tex0.a *= 1.0 + lod * g_Debug.w;
-    }
-
-    float4 current = Pipeline( diffuse, specular, tex0, tex1 );
 
     // Night over a day track (LFSP NightGrade): result = night factor x (world without lights) + the light of the lights.
     // Dividing the lights by the factor before the texture clipped them, so the base pass and the lit pass run apart.
@@ -370,25 +399,12 @@ float4 MainPS( PixelIn input ) : SV_Target
     bool edgeLight = g_Test.y > 0.0 && g_Head.x > 0.0 && g_Flags.z != 8;
     if ( nightWorld || edgeLight )
     {
-        float4 baseColour = g_Head.x > 0.0 ? Pipeline( diffuseBase, specular, tex0, tex1 ) : current;
         float3 lightPart = current.rgb - baseColour.rgb;
         if ( edgeLight )
-            lightPart *= saturate( current.a / max( g_Debug.z, 0.004 ) );
+            lightPart *= saturate( baseColour.a / max( g_Debug.z, 0.004 ) );
         current.rgb = baseColour.rgb * nightMul + lightPart;
     }
-
-    // Water fades out towards the far end of its surface ('[Water] FarFade'), the sea of the sky shows through.
-    if ( g_AlphaRef.w > g_AlphaRef.z && g_AlphaRef.w > 0.0 )
-        current.a *= saturate( ( g_AlphaRef.w - input.m_Position.w ) / ( g_AlphaRef.w - g_AlphaRef.z ) );
-
-    if ( !AlphaPasses( current.a ) )
-        discard;
-
-    // '[Dx11] AlphaEdgeFix', pass 1 keeps the opaque part, pass 2 the faint edge.
-    if ( g_Debug.y == 1 && current.a < g_Debug.z )
-        discard;
-    if ( g_Debug.y == 2 && current.a >= g_Debug.z )
-        discard;
+    current.a = alpha;
 
     if ( g_Flags.x != 0 )
     {
