@@ -686,6 +686,17 @@ namespace dx11z
         m_Device->CreateVertexShader( vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, m_SceneVs.Put() );
         m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_ScenePs.Put() );
 
+        // Variant for draws that cannot discard (no alpha test, no edge pass): forced early depth and stencil test, which the
+        // discard in the shader otherwise holds back on some hardware. Needs shader model 5 (feature level 11).
+        if (m_Device->GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_0 && m_ConfigEarlyZ != 0)
+        {
+            const D3D_SHADER_MACRO early[] = { { "EARLYZ", "1" }, { nullptr, nullptr } };
+            ComPtr<ID3DBlob> ps_early;
+            if (build( shaders::SCENE, sizeof( shaders::SCENE ) - 1, "MainPS", "ps_5_0", ps_early, early ))
+                m_Device->CreatePixelShader( ps_early->GetBufferPointer(), ps_early->GetBufferSize(), nullptr, m_ScenePsEarly.Put() );
+            Log( "Scene pixel shader with early depth test: %s", m_ScenePsEarly ? "built" : "not available" );
+        }
+
         const D3D11_INPUT_ELEMENT_DESC layout[] =
         {
             { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
@@ -1724,7 +1735,9 @@ namespace dx11z
         m_ConfigOpponents = std::clamp( std::atoi( light_value( "HeadlightsOpponents", "1" ).c_str() ), 0, 1 );
         m_ConfigOpponentsStrength = std::clamp( static_cast<float>(std::atof( light_value( "HeadlightsOpponentsStrength", "1.0" ).c_str() )), 0.0f, 4.0f );
         m_ConfigTrafficGlow = std::clamp( static_cast<float>(std::atof( light_value( "TrafficHeadlightGlow", "0.35" ).c_str() )), 0.0f, 4.0f );
+        m_ConfigTrafficRange = std::clamp( static_cast<float>(std::atof( light_value( "TrafficHeadlightRange", "0.5" ).c_str() )), 0.1f, 2.0f );
         m_ConfigMaxCarLights = std::clamp( std::atoi( light_value( "MaxCarLights", "16" ).c_str() ), 1, MAX_CAR_LIGHTS );
+        m_ConfigEarlyZ = std::clamp( std::atoi( light_value( "EarlyZ", "1" ).c_str() ), 0, 1 );
         m_ConfigLightCulling = std::clamp( std::atoi( light_value( "LightCulling", "1" ).c_str() ), 0, 1 );
         m_ConfigNightGradeBlended = std::clamp( std::atoi( light_value( "NightGradeBlended", "1" ).c_str() ), 0, 1 );
         m_ConfigProfile = std::clamp( std::atoi( light_value( "FrameProfile", "0" ).c_str() ), 0, 600 );
@@ -2042,6 +2055,7 @@ namespace dx11z
         m_Rasters.clear();
         m_SceneVs.Reset();
         m_ScenePs.Reset();
+        m_ScenePsEarly.Reset();
         m_SceneLayout.Reset();
         m_PresentVs.Reset();
         m_PresentPs.Reset();
@@ -4802,6 +4816,9 @@ namespace dx11z
                     desc.Query = D3D11_QUERY_TIMESTAMP;
                     for (auto & stamp : slot.m_Stamps)
                         made = made && SUCCEEDED( m_Device->CreateQuery( &desc, stamp.Put() ) );
+                    desc.Query = D3D11_QUERY_PIPELINE_STATISTICS;
+                    for (auto & stats : slot.m_Stats)
+                        made = made && SUCCEEDED( m_Device->CreateQuery( &desc, stats.Put() ) );
                     if (!made)
                     {
                         slot = {};
@@ -4821,7 +4838,10 @@ namespace dx11z
         ProfileSlot & slot = m_ProfileSlots[static_cast<std::size_t>(m_ProfileCurrent)];
         if (category == m_ProfileCategory || slot.m_Count >= PROFILE_STAMPS)
             return;
+        if (slot.m_Count > 0)
+            m_Context->End( slot.m_Stats[static_cast<std::size_t>(slot.m_Count - 1)].Get() );
         m_Context->End( slot.m_Stamps[static_cast<std::size_t>(slot.m_Count)].Get() );
+        m_Context->Begin( slot.m_Stats[static_cast<std::size_t>(slot.m_Count)].Get() );
         slot.m_Category[static_cast<std::size_t>(slot.m_Count)] = static_cast<std::uint8_t>(category);
         ++slot.m_Count;
         m_ProfileCategory = category;
@@ -4836,7 +4856,10 @@ namespace dx11z
         {
             ProfileSlot & slot = m_ProfileSlots[static_cast<std::size_t>(m_ProfileCurrent)];
             if (slot.m_Count > 0)
+            {
+                m_Context->End( slot.m_Stats[static_cast<std::size_t>(slot.m_Count - 1)].Get() );
                 m_Context->End( slot.m_Stamps[static_cast<std::size_t>(slot.m_Count)].Get() );
+            }
             m_Context->End( slot.m_Disjoint.Get() );
             slot.m_Pending = slot.m_Count > 0;
             m_ProfileCurrent = -1;
@@ -4857,11 +4880,21 @@ namespace dx11z
             for (int i = 0; i <= slot.m_Count && ready; ++i)
                 ready = m_Context->GetData( slot.m_Stamps[static_cast<std::size_t>(i)].Get(), &stamps[static_cast<std::size_t>(i)], sizeof( UINT64 ),
                     D3D11_ASYNC_GETDATA_DONOTFLUSH ) == S_OK;
+            std::array<D3D11_QUERY_DATA_PIPELINE_STATISTICS, PROFILE_STAMPS + 1> statistics = {};
+            for (int i = 0; i < slot.m_Count && ready; ++i)
+                ready = m_Context->GetData( slot.m_Stats[static_cast<std::size_t>(i)].Get(), &statistics[static_cast<std::size_t>(i)],
+                    sizeof( D3D11_QUERY_DATA_PIPELINE_STATISTICS ), D3D11_ASYNC_GETDATA_DONOTFLUSH ) == S_OK;
             if (!ready)
                 continue;
             slot.m_Pending = false;
             if (disjoint.Disjoint || disjoint.Frequency == 0)
                 continue;
+            for (int i = 0; i < slot.m_Count; ++i)
+            {
+                const std::size_t category = slot.m_Category[static_cast<std::size_t>(i)];
+                m_ProfilePs[category] += statistics[static_cast<std::size_t>(i)].PSInvocations;
+                m_ProfilePrimitives[category] += statistics[static_cast<std::size_t>(i)].CPrimitives;
+            }
             for (int i = 0; i < slot.m_Count; ++i)
                 m_ProfileMs[slot.m_Category[static_cast<std::size_t>(i)]] +=
                     static_cast<double>(stamps[static_cast<std::size_t>(i + 1)] - stamps[static_cast<std::size_t>(i)]) * 1000.0 / static_cast<double>(disjoint.Frequency);
@@ -4883,7 +4916,7 @@ namespace dx11z
         double window_ms
     )
     {
-        static const char * const names[PROFILE_CATEGORIES] = { "world", "world lit", "sky", "additive", "HUD/2D", "edge pass 2" };
+        static const char * const names[PROFILE_CATEGORIES] = { "opaque", "opaque lit", "sky", "additive", "HUD/2D", "edge pass 2", "alpha lit", "alpha unlit" };
         const double gpu_frames = static_cast<double>(std::max<std::uint64_t>( m_ProfileGpuFrames, 1 ));
         const double frames = static_cast<double>(std::max<std::uint64_t>( m_ProfileFlips, 1 ));
         LARGE_INTEGER frequency = {};
@@ -4898,8 +4931,13 @@ namespace dx11z
             static_cast<unsigned long long>(m_ProfileFlips), static_cast<unsigned long long>(m_ProfileGpuFrames), total / gpu_frames,
             static_cast<double>(m_ProfileApplyTicks) * us );
         for (int i = 0; i < PROFILE_CATEGORIES; ++i)
-            Log( "Profile:   %-11s GPU %.3f ms per frame, %.0f draws per frame", names[i], m_ProfileMs[static_cast<std::size_t>(i)] / gpu_frames,
-                static_cast<double>(m_ProfileDraws[static_cast<std::size_t>(i)]) / frames );
+        {
+            const double ps = static_cast<double>(m_ProfilePs[static_cast<std::size_t>(i)]) / gpu_frames;
+            Log( "Profile:   %-11s GPU %.3f ms per frame, %.0f draws per frame, %.2f M pixel shader runs and %.0f k triangles per frame, %.1f ns per run", names[i],
+                m_ProfileMs[static_cast<std::size_t>(i)] / gpu_frames, static_cast<double>(m_ProfileDraws[static_cast<std::size_t>(i)]) / frames, ps / 1e6,
+                static_cast<double>(m_ProfilePrimitives[static_cast<std::size_t>(i)]) / gpu_frames / 1e3,
+                ps > 0.0 ? m_ProfileMs[static_cast<std::size_t>(i)] / gpu_frames * 1e6 / ps : 0.0 );
+        }
         const double lit = static_cast<double>(std::max<std::uint64_t>( m_ProfileLitDraws, 1 ));
         Log( "Profile:   constants %.0f uploads per frame, %.0f bytes per upload (block %zu); lit draws %.0f per frame, car lights %.1f -> %.1f, "
             "tail glows %.1f -> %.1f per lit draw (LightCulling %d, MaxCarLights %d)",
@@ -4909,6 +4947,8 @@ namespace dx11z
             m_ConfigLightCulling, m_ConfigMaxCarLights );
         m_ProfileMs = {};
         m_ProfileDraws = {};
+        m_ProfilePs = {};
+        m_ProfilePrimitives = {};
         m_ProfileGpuFrames = 0;
         m_ProfileFlips = 0;
         m_ProfileUploads = m_ProfileUploadBytes = m_ProfileLitDraws = 0;
@@ -5003,7 +5043,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9l, alpha to coverage only for the world of a race): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9m, profile with pixel shader runs, early depth variant): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -5202,8 +5242,10 @@ namespace dx11z
         if (m_ConfigProfile > 0)
         {
             const bool sky = render[rs::ZFUNC] == 8 && !m_BatchVertices.empty() && flat_z[0] >= 0.99f && flat_rhw[1] < 0.05f;
-            const int category = sky ? 2 : flat_draw ? 4 : m_EdgePass == 2 ? 5 : constants.m_Head[0] > 0.0f ? 1 :
-                (render[rs::ALPHABLENDENABLE] != 0 && render[rs::DESTBLEND] == 2) ? 3 : 0;
+            const bool lit = constants.m_Head[0] > 0.0f;
+            const bool additive = render[rs::ALPHABLENDENABLE] != 0 && render[rs::DESTBLEND] == 2;
+            const bool alpha = render[rs::ALPHABLENDENABLE] != 0 || render[rs::ALPHATESTENABLE] != 0;
+            const int category = sky ? 2 : flat_draw ? 4 : m_EdgePass == 2 ? 5 : additive ? 3 : alpha ? (lit ? 6 : 7) : (lit ? 1 : 0);
             ProfileMark( category );
         }
 
@@ -5440,7 +5482,9 @@ namespace dx11z
         m_Context->IASetVertexBuffers( 0, 1, &vertex_buffer, &stride, &offset );
         m_Context->IASetIndexBuffer( m_IndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0 );
         m_Context->VSSetShader( m_SceneVs.Get(), nullptr, 0 );
-        m_Context->PSSetShader( m_ScenePs.Get(), nullptr, 0 );
+        // No alpha test and no edge pass: nothing in the shader can discard this draw, so the depth test may run before it.
+        const bool early_depth = m_ScenePsEarly && m_ConfigEarlyZ != 0 && render[rs::ALPHATESTENABLE] == 0 && m_EdgePass == 0 && !m_ShorePass;
+        m_Context->PSSetShader( early_depth ? m_ScenePsEarly.Get() : m_ScenePs.Get(), nullptr, 0 );
         ID3D11Buffer * constant_buffer = m_DrawConstants.Get();
         m_Context->VSSetConstantBuffers( 0, 1, &constant_buffer );
         m_Context->PSSetConstantBuffers( 0, 1, &constant_buffer );
@@ -8692,6 +8736,15 @@ namespace dx11z
                 light.m_Car = car;
                 if (!CarObjectToLight( car, m_CarMatrixLayout, light.m_ObjectToLight.data() ))
                     continue;
+                if (traffic && m_ConfigTrafficRange > 0.0f && m_ConfigTrafficRange != 1.0f)
+                {
+                    // Shorter reach: stretch the forward axis (column 2) of light space, keeping the lamp start (offset 0x0061BD50).
+                    const float k = 1.0f / m_ConfigTrafficRange;
+                    const float offset = *reinterpret_cast<const float *>(0x0061BD50);
+                    for (int row = 0; row < 3; ++row)
+                        light.m_ObjectToLight[static_cast<std::size_t>(row * 4 + 2)] *= k;
+                    light.m_ObjectToLight[14] = (light.m_ObjectToLight[14] - offset) * k + offset;
+                }
                 float tint[3] = { 1.0f, 1.0f, 1.0f };
                 LfspTintForCar( car, tint );
                 const float strength = traffic ? m_ConfigTrafficGlow : m_ConfigOpponentsStrength;

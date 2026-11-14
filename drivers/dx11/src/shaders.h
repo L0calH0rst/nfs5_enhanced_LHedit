@@ -284,6 +284,9 @@ float4 Pipeline( float4 diffuse, float4 specular, float4 tex0, float4 tex1 )
     return current;
 }
 
+#ifdef EARLYZ
+[earlydepthstencil]
+#endif
 float4 MainPS( PixelIn input ) : SV_Target
 {
     float4 diffuse = input.m_Diffuse;

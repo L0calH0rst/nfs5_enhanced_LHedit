@@ -510,21 +510,25 @@ namespace dx11z
         int m_ConfigOpponents = 1;
         float m_ConfigOpponentsStrength = 1.0f;
         float m_ConfigTrafficGlow = 0.35f; // [Lights] TrafficHeadlightGlow: share of the opponents' light for traffic cars, 0 = off
+        float m_ConfigTrafficRange = 0.5f; // [Lights] TrafficHeadlightRange: reach of the traffic cars' light as a share of the opponents' (0.1-2)
         int m_ConfigMaxCarLights = 16; // [Lights] MaxCarLights: active car lights (opponents and traffic), 1 to MAX_CAR_LIGHTS
         int m_ConfigNightGradeBlended = 1; // [Lights] NightGradeBlended: normal blended draws without depth write (foliage fringe) are darkened too
         std::map<std::uint32_t, std::array<std::uint64_t, 3>> m_NightTextures;
+        int m_ConfigEarlyZ = 1; // [Lights] EarlyZ: forced early depth test for draws that cannot discard (feature level 11)
+        ComPtr<ID3D11PixelShader> m_ScenePsEarly;
         int m_ConfigLightCulling = 1; // [Lights] LightCulling: lights out of reach of a batch stay out of its constants (no visible change)
         int m_ConfigProfile = 0; // [Lights] FrameProfile: seconds between GPU phase timings in the log, 0 = off
 
         // Frame profile ('[Lights] FrameProfile'): GPU time per draw category from timestamp queries (a few frames late) and the
-        // CPU side of the light constants. Categories: 0 world without light, 1 world with light, 2 sky, 3 additive sprites,
-        // 4 HUD and 2D, 5 second pass of the alpha edge fix.
-        static constexpr int PROFILE_CATEGORIES = 6;
+        // CPU side of the light constants. Categories: 0 opaque world without light, 1 opaque world with light, 2 sky, 3 additive
+        // sprites, 4 HUD and 2D, 5 second pass of the alpha edge fix, 6 alpha tested or blended world with light, 7 the same without.
+        static constexpr int PROFILE_CATEGORIES = 8;
         static constexpr int PROFILE_STAMPS = 255;
         struct ProfileSlot
         {
             ComPtr<ID3D11Query> m_Disjoint;
             std::array<ComPtr<ID3D11Query>, PROFILE_STAMPS + 1> m_Stamps;
+            std::array<ComPtr<ID3D11Query>, PROFILE_STAMPS + 1> m_Stats; // pipeline statistics of the interval that starts at the stamp
             std::array<std::uint8_t, PROFILE_STAMPS + 1> m_Category = {};
             int m_Count = 0; // stamps written
             bool m_Pending = false;
@@ -534,6 +538,8 @@ namespace dx11z
         int m_ProfileCategory = -1;
         std::array<double, PROFILE_CATEGORIES> m_ProfileMs = {};
         std::array<std::uint64_t, PROFILE_CATEGORIES> m_ProfileDraws = {};
+        std::array<std::uint64_t, PROFILE_CATEGORIES> m_ProfilePs = {}; // pixel shader invocations
+        std::array<std::uint64_t, PROFILE_CATEGORIES> m_ProfilePrimitives = {}; // primitives that reached the rasterizer
         std::uint64_t m_ProfileGpuFrames = 0;
         std::uint64_t m_ProfileUploads = 0;
         std::uint64_t m_ProfileUploadBytes = 0;
