@@ -750,6 +750,12 @@ namespace dx11z
         {
             m_Device->CreateVertexShader( vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, m_MirrorVs.Put() );
         }
+        // '[Water] ReflectionSimpleShader' (9.13d): the scene shader without its light loops for the mirrored draws.
+        const D3D_SHADER_MACRO mirror_pass[] = { { "MIRROR_PASS", "1" }, { nullptr, nullptr } };
+        if (build( shaders::SCENE, sizeof( shaders::SCENE ) - 1, "MainPS", "ps_4_0", ps, mirror_pass ))
+        {
+            m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_MirrorPs.Put() );
+        }
         if (build( shaders::REFLECT, sizeof( shaders::REFLECT ) - 1, "MainVS", "vs_4_0", vs ) &&
             build( shaders::REFLECT, sizeof( shaders::REFLECT ) - 1, "MainPS", "ps_4_0", ps ))
         {
@@ -781,6 +787,10 @@ namespace dx11z
             };
             m_Device->CreateInputLayout( car_layout, static_cast<UINT>(std::size( car_layout )), vs->GetBufferPointer(), vs->GetBufferSize(),
                 m_CarReflLayout.Put() );
+        }
+        if (build( shaders::CAR_DOWN, sizeof( shaders::CAR_DOWN ) - 1, "MainPS", "ps_4_0", ps ))
+        {
+            m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_CarReflDownPs.Put() );
         }
 
         return m_SceneVs && m_ScenePs && m_SceneLayout && m_PresentVs && m_PresentPs && m_ClearVs && m_ClearPs;
@@ -1718,6 +1728,13 @@ namespace dx11z
             m_ConfigWaterEdgeFade = std::clamp( static_cast<float>(std::atof( water_value( "EdgeFade", "40" ).c_str() )), 0.0f, 200.0f );
             m_ConfigReflectionSky = std::clamp( std::atoi( water_value( "ReflectionSky", "1" ).c_str() ), 0, 1 );
             m_ConfigRemoveBaked = std::clamp( std::atoi( water_value( "RemoveBakedReflections", "1" ).c_str() ), 0, 1 );
+            // Cheaper reflections (REFLEXION-WETTER.md 9.13d), each as before by default.
+            m_ConfigReflectionSimpleShader = std::clamp( std::atoi( water_value( "ReflectionSimpleShader", "0" ).c_str() ), 0, 1 );
+            m_ConfigReflectionMinSize = std::clamp( static_cast<float>(std::atof( water_value( "ReflectionMinSize", "0" ).c_str() )), 0.0f, 200.0f );
+            m_ConfigReflectionMirrorView = std::clamp( std::atoi( water_value( "ReflectionMirrorView", "1" ).c_str() ), 0, 1 );
+            m_ConfigReflectionSkyScale = std::atof( water_value( "ReflectionSkyScale", "1" ).c_str() ) < 0.75 ? 0.5f : 1.0f;
+            Log( "Config water: ReflectionSimpleShader %d, ReflectionMinSize %.0f, ReflectionMirrorView %d, ReflectionSkyScale %.1f",
+                m_ConfigReflectionSimpleShader, m_ConfigReflectionMinSize, m_ConfigReflectionMirrorView, m_ConfigReflectionSkyScale );
 
             const auto parse_hashes = [&]( const char * key, const char * fallback, std::vector<std::uint32_t> & out ) {
                 out.clear();
@@ -1786,6 +1803,8 @@ namespace dx11z
             m_ConfigCarReflInterval = std::clamp( std::atoi( car_value( "UpdateInterval", "1" ).c_str() ), 1, 8 );
             m_ConfigCarReflMinSize = std::clamp( static_cast<float>(std::atof( car_value( "MinSize", "0" ).c_str() )), 0.0f, 400.0f );
             m_ConfigCarReflDebug = std::clamp( std::atoi( car_value( "Debug", "0" ).c_str() ), 0, 3 );
+            // '[CarReflections] SourceScale' (9.13d): size of the frame copy, 1 = full, 0.5 = half (the blur level keeps the look).
+            m_ConfigCarReflSourceScale = std::atof( car_value( "SourceScale", "1" ).c_str() ) < 0.75 ? 0.5f : 1.0f;
             // The game's light decal (Y2T1, Y2T2, doc/LICHT.md 12) is blended over the body with the same state as glass.
             const std::string skip = car_value( "SkipTextures", "4A522215,984E4128" );
             m_ConfigCarReflSkip.clear();
@@ -1819,6 +1838,7 @@ namespace dx11z
             Log( "Config car reflections: Reflections %d strength %.2f reflectance %.2f fresnel %.1f blur %.1f ground %.2f glass %d debug %d, skip '%s', "
                 "matte '%s', only part %d", m_ConfigCarRefl, m_ConfigCarReflStrength, m_ConfigCarReflF0, m_ConfigCarReflFresnel, m_ConfigCarReflBlur, m_ConfigCarReflGround,
                 m_ConfigCarReflGlass, m_ConfigCarReflDebug, skip.c_str(), matte.c_str(), m_ConfigCarReflOnlyPart );
+            Log( "Config car reflections: SourceScale %.1f", m_ConfigCarReflSourceScale );
             if (m_ConfigCarRefl > 0)
                 InstallCarReflHook();
         }
@@ -2084,6 +2104,11 @@ namespace dx11z
         m_ClearVs.Reset();
         m_ClearPs.Reset();
         m_MirrorVs.Reset();
+        m_MirrorPs.Reset();
+        m_CarReflDownPs.Reset();
+        m_CarReflResolveView.Reset();
+        m_CarReflResolve.Reset();
+        m_CarReflSourceRtv.Reset();
         m_ReflCompositeVs.Reset();
         m_ReflCompositePs.Reset();
         m_ReflPackPs.Reset();
@@ -2125,6 +2150,9 @@ namespace dx11z
         m_IndexBuffer.Reset();
         m_CarReflVertexBuffer.Reset();
         m_CarReflIndexBuffer.Reset();
+        m_CarReflPending.clear();
+        m_CarReflPendingCount = 0;
+        m_CarReflWeldCache.clear();
         m_PresentSampler.Reset();
         m_PointSampler.Reset();
         m_OpaqueBlend.Reset();
@@ -2301,6 +2329,7 @@ namespace dx11z
         }
 
         ++m_FlipCount;
+        m_CopyOrderDraws = 0;
         m_HeadMesh = false;
         m_HeadFrameValid = false;
         m_DayMesh = false;
@@ -5186,7 +5215,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9q, car reflections in their own buffer ring): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9s, cheaper water and car reflection copies): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -5815,7 +5844,8 @@ namespace dx11z
         // a hundred thousand triangles of them, copied and drawn once more each frame.
         const std::uint32_t capture_source = render[rs::SRCBLEND];
         const std::uint32_t capture_destination = render[rs::DESTBLEND];
-        m_ReflCapture = reflections && !water && !m_SkidDraw && render[rs::ZENABLE] != 0 &&
+        // Not kept in the rear view mirror with '[Water] ReflectionMirrorView' 0, it gets no reflection.
+        m_ReflCapture = reflections && !water && !m_SkidDraw && render[rs::ZENABLE] != 0 && (m_ConfigReflectionMirrorView != 0 || m_ReflViewIsMain) &&
             (render[rs::ALPHABLENDENABLE] == 0 || capture_source == 12 || (capture_source == 5 && capture_destination == 6));
 
         // The sky comes before the first queue run of the frame (list 0); kept as well and put in front of
@@ -5906,6 +5936,7 @@ namespace dx11z
 
         m_Context->IASetPrimitiveTopology( topology );
         m_Context->DrawIndexed( index_count, first_index, static_cast<INT>(base_vertex) );
+        ++m_CopyOrderDraws;
 
         if (edge_split)
         {
@@ -7690,6 +7721,7 @@ namespace dx11z
 
         // The draws so far are not of this pass; batches end at the edges of the call.
         Flush();
+        CarReflDrawPending();
 
         // A menu room is no car: no reflection on its walls, and the frame copy waits for the car so it shows the room.
         if (room)
@@ -7743,6 +7775,8 @@ namespace dx11z
             return;
 
         Flush();
+        // The reflections of the call, collected per state (9.13c): after all its parts, before anything drawn later.
+        CarReflDrawPending();
         m_CarLodMask = previous;
         m_CarPartMatte = false;
         m_CarPartBody = false;
@@ -7796,18 +7830,28 @@ namespace dx11z
 
         D3D11_TEXTURE2D_DESC desc = {};
         m_Frame->GetDesc( &desc );
+        CopyOrderNote( "car reflections" );
+
+        // '[CarReflections] SourceScale' 0.5 (9.13d): resolved at full size without levels, drawn into a half size copy.
+        const bool half = m_ConfigCarReflSourceScale < 1.0f && m_CarReflDownPs && m_ReflCompositeVs;
+        const UINT width = half ? std::max( 1u, (desc.Width + 1) / 2 ) : desc.Width;
+        const UINT height = half ? std::max( 1u, (desc.Height + 1) / 2 ) : desc.Height;
+        m_CarReflLevelOffset = half ? 1.0f : 0.0f;
 
         D3D11_TEXTURE2D_DESC have = {};
         if (m_CarReflSource)
             m_CarReflSource->GetDesc( &have );
 
-        if (!m_CarReflSource || have.Width != desc.Width || have.Height != desc.Height || have.Format != desc.Format)
+        if (!m_CarReflSource || have.Width != width || have.Height != height || have.Format != desc.Format)
         {
             m_CarReflSourceView.Reset();
+            m_CarReflSourceRtv.Reset();
             m_CarReflSource.Reset();
 
             // All mip levels: the paint is no perfect mirror, '[CarReflections] Blur' picks the level.
             D3D11_TEXTURE2D_DESC copy = desc;
+            copy.Width = width;
+            copy.Height = height;
             copy.MipLevels = 0;
             copy.ArraySize = 1;
             copy.SampleDesc.Count = 1;
@@ -7832,12 +7876,98 @@ namespace dx11z
             Log( "Car reflections: frame copy %ux%u with %u levels created", copy.Width, copy.Height, copy.MipLevels );
         }
 
+        if (!half)
+        {
+            if (desc.SampleDesc.Count > 1)
+                m_Context->ResolveSubresource( m_CarReflSource.Get(), 0, m_Frame.Get(), 0, desc.Format );
+            else
+                m_Context->CopySubresourceRegion( m_CarReflSource.Get(), 0, 0, 0, 0, m_Frame.Get(), 0, nullptr );
+            m_Context->GenerateMips( m_CarReflSourceView.Get() );
+            return true;
+        }
+
+        // Half size: the frame resolved (or copied) at full size, one level only.
+        D3D11_TEXTURE2D_DESC resolved = {};
+        if (m_CarReflResolve)
+            m_CarReflResolve->GetDesc( &resolved );
+        if (!m_CarReflResolve || resolved.Width != desc.Width || resolved.Height != desc.Height || resolved.Format != desc.Format)
+        {
+            m_CarReflResolveView.Reset();
+            m_CarReflResolve.Reset();
+            resolved = desc;
+            resolved.MipLevels = 1;
+            resolved.ArraySize = 1;
+            resolved.SampleDesc.Count = 1;
+            resolved.SampleDesc.Quality = 0;
+            resolved.Usage = D3D11_USAGE_DEFAULT;
+            resolved.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            resolved.CPUAccessFlags = 0;
+            resolved.MiscFlags = 0;
+            if (FAILED( m_Device->CreateTexture2D( &resolved, nullptr, m_CarReflResolve.Put() ) ) ||
+                FAILED( m_Device->CreateShaderResourceView( m_CarReflResolve.Get(), nullptr, m_CarReflResolveView.Put() ) ))
+            {
+                m_CarReflResolve.Reset();
+                m_CarReflResolveView.Reset();
+                return false;
+            }
+            Log( "Car reflections: resolve %ux%u for the half size copy created", desc.Width, desc.Height );
+        }
+        if (!m_CarReflSourceRtv && FAILED( m_Device->CreateRenderTargetView( m_CarReflSource.Get(), nullptr, m_CarReflSourceRtv.Put() ) ))
+            return false;
+
         if (desc.SampleDesc.Count > 1)
-            m_Context->ResolveSubresource( m_CarReflSource.Get(), 0, m_Frame.Get(), 0, desc.Format );
+            m_Context->ResolveSubresource( m_CarReflResolve.Get(), 0, m_Frame.Get(), 0, desc.Format );
         else
-            m_Context->CopySubresourceRegion( m_CarReflSource.Get(), 0, 0, 0, 0, m_Frame.Get(), 0, nullptr );
+            m_Context->CopyResource( m_CarReflResolve.Get(), m_Frame.Get() );
+
+        // Into level 0 of the copy: a fullscreen triangle, every 2 x 2 block of the frame one pixel (CAR_DOWN).
+        auto & raster = m_ReflRasters[0x300];
+        if (!raster)
+        {
+            D3D11_RASTERIZER_DESC raster_desc = {};
+            raster_desc.FillMode = D3D11_FILL_SOLID;
+            raster_desc.CullMode = D3D11_CULL_NONE;
+            raster_desc.DepthClipEnable = FALSE;
+            m_Device->CreateRasterizerState( &raster_desc, raster.Put() );
+        }
+        ID3D11RenderTargetView * target = m_CarReflSourceRtv.Get();
+        m_Context->OMSetRenderTargets( 1, &target, nullptr );
+        m_Context->OMSetBlendState( nullptr, nullptr, 0xFFFFFFFF );
+        m_Context->OMSetDepthStencilState( nullptr, 0 );
+        m_Context->RSSetState( raster.Get() );
+        const D3D11_VIEWPORT view = { 0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1 };
+        m_Context->RSSetViewports( 1, &view );
+        m_Context->IASetInputLayout( nullptr );
+        m_Context->IASetPrimitiveTopology( D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST );
+        m_Context->VSSetShader( m_ReflCompositeVs.Get(), nullptr, 0 );
+        m_Context->PSSetShader( m_CarReflDownPs.Get(), nullptr, 0 );
+        ID3D11ShaderResourceView * source = m_CarReflResolveView.Get();
+        m_Context->PSSetShaderResources( 0, 1, &source );
+        ID3D11SamplerState * sampler = m_PresentSampler.Get();
+        m_Context->PSSetSamplers( 0, 1, &sampler );
+        m_Context->Draw( 3, 0 );
+        ID3D11ShaderResourceView * none = nullptr;
+        m_Context->PSSetShaderResources( 0, 1, &none );
+        // The frame target comes back with the next draw (ApplyPipeline binds target, viewport and shaders each time).
+        ID3D11RenderTargetView * no_target = nullptr;
+        m_Context->OMSetRenderTargets( 1, &no_target, nullptr );
         m_Context->GenerateMips( m_CarReflSourceView.Get() );
+        InvalidatePipeline();
         return true;
+    }
+
+
+    void Driver::CopyOrderNote(
+        const char * what
+    )
+    {
+        // '[Dx11] Measure' (9.13d, step 6): which frame copy comes first in a frame and after how many draws, every 600th frame
+        // (40 lines at most), to see whether the car and water copies could be one.
+        if (m_ConfigMeasure <= 0 || m_CopyOrderLines >= 40 || m_FlipCount % 600 != 0)
+            return;
+        ++m_CopyOrderLines;
+        Log( "Copy order: flip %u, %s frame copy after %llu draws of the frame, queue list %d, car pass %02X", m_FlipCount, what,
+            static_cast<unsigned long long>(m_CopyOrderDraws), m_QueueList, m_CarLodMask );
     }
 
 
@@ -8153,34 +8283,106 @@ namespace dx11z
         }
 
         // Corners at the same point are one vertex for the normals (the driver gets the triangles one by one).
-        // The keys once, then sorted with the index: the same groups as comparing the vertices over and over.
-        struct WeldKey
+        // The groups of a part are kept (m_CarReflWeldCache) and checked on a few corners; sorted anew only when they fail.
+        const auto same_point = [&]( std::uint32_t a, std::uint32_t b )
         {
-            std::uint32_t m_Key[3];
-            std::uint32_t m_Index;
+            const TlVertex & p = m_BatchVertices[a];
+            const TlVertex & q = m_BatchVertices[b];
+            return std::memcmp( &p.m_X, &q.m_X, 4 ) == 0 && std::memcmp( &p.m_Y, &q.m_Y, 4 ) == 0 && std::memcmp( &p.m_Rhw, &q.m_Rhw, 4 ) == 0;
         };
-        static thread_local std::vector<WeldKey> weld;
-        weld.resize( count );
-        for (std::size_t i = 0; i < count; ++i)
+        const std::uint64_t weld_key = cells_key ^ (static_cast<std::uint64_t>(count) * 0xC2B2AE3D27D4EB4Full) ^
+            (static_cast<std::uint64_t>(blended ? 1 : 0) << 63);
+        const CarReflWeld * weld_entry = nullptr;
         {
-            const TlVertex & v = m_BatchVertices[i];
-            std::memcpy( &weld[i].m_Key[0], &v.m_X, 4 );
-            std::memcpy( &weld[i].m_Key[1], &v.m_Y, 4 );
-            std::memcpy( &weld[i].m_Key[2], &v.m_Rhw, 4 );
-            weld[i].m_Index = static_cast<std::uint32_t>(i);
+            const auto found = m_CarReflWeldCache.find( weld_key );
+            if (found != m_CarReflWeldCache.end() && found->second.m_Group.size() == count)
+            {
+                const CarReflWeld & entry = found->second;
+                bool still = true;
+                for (int k = 0; still && k < entry.m_SameCount; ++k)
+                    still = same_point( entry.m_Same[2 * k], entry.m_Same[2 * k + 1] );
+                for (int k = 0; still && k < entry.m_ApartCount; ++k)
+                    still = !same_point( entry.m_Apart[2 * k], entry.m_Apart[2 * k + 1] );
+                if (still)
+                    weld_entry = &entry;
+            }
         }
-        std::sort( weld.begin(), weld.end(), []( const WeldKey & a, const WeldKey & b )
+        if (weld_entry != nullptr)
         {
-            return std::lexicographical_compare( a.m_Key, a.m_Key + 3, b.m_Key, b.m_Key + 3 );
-        } );
-        m_CarReflGroup.resize( count );
-        std::uint32_t groups = 0;
-        for (std::size_t k = 0; k < count; ++k)
-        {
-            if (k > 0 && std::memcmp( weld[k].m_Key, weld[k - 1].m_Key, 12 ) != 0)
-                ++groups;
-            m_CarReflGroup[weld[k].m_Index] = groups;
+            ++m_CarReflWeldHits;
         }
+        else
+        {
+            ++m_CarReflWeldMisses;
+            // The keys once, then sorted with the index: the same groups as comparing the vertices over and over.
+            struct WeldKey
+            {
+                std::uint32_t m_Key[3];
+                std::uint32_t m_Index;
+            };
+            static thread_local std::vector<WeldKey> weld;
+            weld.resize( count );
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                const TlVertex & v = m_BatchVertices[i];
+                std::memcpy( &weld[i].m_Key[0], &v.m_X, 4 );
+                std::memcpy( &weld[i].m_Key[1], &v.m_Y, 4 );
+                std::memcpy( &weld[i].m_Key[2], &v.m_Rhw, 4 );
+                weld[i].m_Index = static_cast<std::uint32_t>(i);
+            }
+            std::sort( weld.begin(), weld.end(), []( const WeldKey & a, const WeldKey & b )
+            {
+                return std::lexicographical_compare( a.m_Key, a.m_Key + 3, b.m_Key, b.m_Key + 3 );
+            } );
+            if (m_CarReflWeldCache.size() >= 1024)
+                m_CarReflWeldCache.clear();
+            CarReflWeld & entry = m_CarReflWeldCache[weld_key];
+            entry.m_Group.resize( count );
+            std::uint32_t groups = 0;
+            for (std::size_t k = 0; k < count; ++k)
+            {
+                if (k > 0 && std::memcmp( weld[k].m_Key, weld[k - 1].m_Key, 12 ) != 0)
+                    ++groups;
+                entry.m_Group[weld[k].m_Index] = groups;
+            }
+            entry.m_Groups = groups;
+
+            // Test pairs spread over the part: the first corner of a group with a later one of it, and neighbouring corners
+            // of different groups.
+            static thread_local std::vector<std::uint32_t> first;
+            first.assign( static_cast<std::size_t>(groups) + 1, 0xFFFFFFFFu );
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                auto & f = first[entry.m_Group[i]];
+                if (f == 0xFFFFFFFFu)
+                    f = static_cast<std::uint32_t>(i);
+            }
+            entry.m_SameCount = 0;
+            entry.m_ApartCount = 0;
+            for (std::size_t k = 0; k < 8; ++k)
+            {
+                const std::size_t start = k * count / 8;
+                for (std::size_t i = start; i < count && entry.m_SameCount <= static_cast<int>(k); ++i)
+                {
+                    const std::uint32_t f = first[entry.m_Group[i]];
+                    if (f != i && entry.m_SameCount < 8)
+                    {
+                        entry.m_Same[2 * entry.m_SameCount] = f;
+                        entry.m_Same[2 * entry.m_SameCount + 1] = static_cast<std::uint32_t>(i);
+                        ++entry.m_SameCount;
+                    }
+                }
+                if (start + 1 < count && entry.m_Group[start] != entry.m_Group[start + 1] && entry.m_ApartCount < 8)
+                {
+                    entry.m_Apart[2 * entry.m_ApartCount] = static_cast<std::uint32_t>(start);
+                    entry.m_Apart[2 * entry.m_ApartCount + 1] = static_cast<std::uint32_t>(start + 1);
+                    ++entry.m_ApartCount;
+                }
+            }
+            weld_entry = &entry;
+        }
+        const std::vector<std::uint32_t> & group_of = weld_entry->m_Group;
+        const std::uint32_t groups = weld_entry->m_Groups;
 
         // Area weighted face normals, each turned towards the camera, summed per point.
         m_CarReflNormal.assign( static_cast<std::size_t>(groups) + 1, { 0.0, 0.0, 0.0 } );
@@ -8201,7 +8403,7 @@ namespace dx11z
                     x = -x;
             for (const std::uint16_t corner : { ia, ib, ic })
             {
-                auto & sum = m_CarReflNormal[m_CarReflGroup[corner]];
+                auto & sum = m_CarReflNormal[group_of[corner]];
                 for (int j = 0; j < 3; ++j)
                     sum[static_cast<std::size_t>(j)] += cross[j];
             }
@@ -8217,7 +8419,7 @@ namespace dx11z
             out.m_Position[2] = v.m_Z;
             out.m_Position[3] = v.m_Rhw;
             const auto & view = m_CarReflView[i];
-            const auto & sum = m_CarReflNormal[m_CarReflGroup[i]];
+            const auto & sum = m_CarReflNormal[group_of[i]];
             const double length = std::sqrt( sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2] );
             const double view_length = std::sqrt( view[0] * view[0] + view[1] * view[1] + view[2] * view[2] );
             for (int j = 0; j < 3; ++j)
@@ -8235,9 +8437,103 @@ namespace dx11z
         // Paint of a matte part: its triangles instead of those of the batch.
         const std::vector<std::uint16_t> & indices = matte_paint ? m_CarReflIndices : m_BatchIndices;
 
+        // Collected with the draws of the same state and drawn at the end of R3DCarLOD::Draw (CarReflDrawPending).
+        ID3D11ShaderResourceView * const view = texture != nullptr ? texture->m_View.Get() : nullptr;
+        ID3D11SamplerState * const sampler = GetSampler( 0 );
+        const std::uint32_t cull = render[rs::CULLMODE] & 3;
+        const std::uint32_t fog = render[rs::FOGCOLOR] | 0xFF000000u;
+        const float alpha_ref = render[rs::ALPHATESTENABLE] != 0 && texture != nullptr && texture->m_Translucent
+            ? static_cast<float>(render[rs::ALPHAREF] & 0xFF) / 255.0f : -1.0f;
+        // Blended draws: below this alpha the pixel is glass, reflected only with '[CarReflections] Glass'.
+        const float glass_ref = blended && texture != nullptr ? 0.95f : -1.0f;
+        const float up_f[3] = { static_cast<float>(up[0]), static_cast<float>(up[1]), static_cast<float>(up[2]) };
+        CarReflPending * pending = nullptr;
+        for (std::size_t k = 0; k < m_CarReflPendingCount && pending == nullptr; ++k)
+        {
+            CarReflPending & p = m_CarReflPending[k];
+            if (p.m_View == view && p.m_Sampler == sampler && p.m_Cull == cull && p.m_Fog == fog && p.m_AlphaRef == alpha_ref &&
+                p.m_GlassRef == glass_ref && std::memcmp( p.m_Up, up_f, sizeof( up_f ) ) == 0)
+                pending = &p;
+        }
+        if (pending == nullptr)
+        {
+            if (m_CarReflPendingCount == m_CarReflPending.size())
+                m_CarReflPending.emplace_back();
+            pending = &m_CarReflPending[m_CarReflPendingCount++];
+            pending->m_View = view;
+            pending->m_Sampler = sampler;
+            pending->m_Cull = cull;
+            pending->m_Fog = fog;
+            pending->m_AlphaRef = alpha_ref;
+            pending->m_GlassRef = glass_ref;
+            std::memcpy( pending->m_Up, up_f, sizeof( up_f ) );
+            pending->m_Vertices.clear();
+            pending->m_Indices.clear();
+        }
+        // 16 bit indices: at most 65536 corners per draw, which the ring holds too.
+        if (pending->m_Vertices.size() + count > CAR_REFL_VERTICES || pending->m_Indices.size() + indices.size() > CAR_REFL_INDICES)
+        {
+            CarReflDraw( *pending );
+            pending->m_Vertices.clear();
+            pending->m_Indices.clear();
+        }
+        const std::size_t base = pending->m_Vertices.size();
+        pending->m_Vertices.insert( pending->m_Vertices.end(), m_CarReflVertices.begin(), m_CarReflVertices.begin() + static_cast<std::ptrdiff_t>(count) );
+        pending->m_Indices.reserve( pending->m_Indices.size() + indices.size() );
+        for (const std::uint16_t index : indices)
+            pending->m_Indices.push_back( static_cast<std::uint16_t>(index + base) );
+        ++m_CarReflPendingParts;
+        if (m_ConfigProfile > 0)
+        {
+            ++m_ProfileCarBatches;
+            m_ProfileCarVertices += count;
+        }
+
+        ++stats.m_Drawn;
+        stats.m_Triangles += indices.size() / 3;
+    }
+
+
+    void Driver::CarReflDrawPending()
+    {
+        if (m_CarReflPendingCount == 0)
+            return;
+        const PerfScope car_batch_scope( m_ConfigProfile > 0, m_ProfileCarBatchTicks, m_ProfileDepth2 );
+        for (std::size_t k = 0; k < m_CarReflPendingCount; ++k)
+        {
+            CarReflPending & pending = m_CarReflPending[k];
+            CarReflDraw( pending );
+            pending.m_Vertices.clear();
+            pending.m_Indices.clear();
+            pending.m_View = nullptr;
+        }
+        m_CarReflPendingCount = 0;
+
+        // The game's ring back in place (ApplyPipeline binds it for every draw as well).
+        ID3D11ShaderResourceView * none[2] = {};
+        m_Context->PSSetShaderResources( 0, 2, none );
+        m_Context->IASetInputLayout( m_SceneLayout.Get() );
+        UINT stride = sizeof( TlVertex );
+        UINT offset = 0;
+        ID3D11Buffer * vertex_buffer = m_VertexBuffer.Get();
+        m_Context->IASetVertexBuffers( 0, 1, &vertex_buffer, &stride, &offset );
+        m_Context->IASetIndexBuffer( m_IndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0 );
+        InvalidatePipeline();
+    }
+
+
+    void Driver::CarReflDraw(
+        CarReflPending & pending
+    )
+    {
+        const std::size_t count = pending.m_Vertices.size();
+        const std::size_t index_count = pending.m_Indices.size();
+        if (count == 0 || index_count == 0)
+            return;
+
         // Vertices and indices into the own ring, as UploadRing: appended without overwrite, both anew together when full.
         D3D11_MAPPED_SUBRESOURCE mapped = {};
-        const bool wrap = m_CarReflVertexCursor + count > CAR_REFL_VERTICES || m_CarReflIndexCursor + indices.size() > CAR_REFL_INDICES;
+        const bool wrap = m_CarReflVertexCursor + count > CAR_REFL_VERTICES || m_CarReflIndexCursor + index_count > CAR_REFL_INDICES;
         if (wrap)
         {
             m_CarReflVertexCursor = 0;
@@ -8250,7 +8546,7 @@ namespace dx11z
             m_CarReflIndexCursor = CAR_REFL_INDICES;
             return;
         }
-        std::memcpy( static_cast<CarReflVertex *>(mapped.pData) + m_CarReflVertexCursor, m_CarReflVertices.data(), count * sizeof( CarReflVertex ) );
+        std::memcpy( static_cast<CarReflVertex *>(mapped.pData) + m_CarReflVertexCursor, pending.m_Vertices.data(), count * sizeof( CarReflVertex ) );
         m_Context->Unmap( m_CarReflVertexBuffer.Get(), 0 );
         if (FAILED( m_Context->Map( m_CarReflIndexBuffer.Get(), 0, ring_map, 0, &mapped ) ))
         {
@@ -8258,12 +8554,15 @@ namespace dx11z
             m_CarReflIndexCursor = CAR_REFL_INDICES;
             return;
         }
-        std::memcpy( static_cast<std::uint16_t *>(mapped.pData) + m_CarReflIndexCursor, indices.data(), indices.size() * sizeof( std::uint16_t ) );
+        std::memcpy( static_cast<std::uint16_t *>(mapped.pData) + m_CarReflIndexCursor, pending.m_Indices.data(), index_count * sizeof( std::uint16_t ) );
         m_Context->Unmap( m_CarReflIndexBuffer.Get(), 0 );
         const UINT base_vertex = static_cast<UINT>(m_CarReflVertexCursor);
         const UINT first_index = static_cast<UINT>(m_CarReflIndexCursor);
         m_CarReflVertexCursor += count;
-        m_CarReflIndexCursor += indices.size();
+        m_CarReflIndexCursor += index_count;
+
+        const float * viewport = m_CarReflViewport.data();
+        const float * view_of_clip = m_CarReflViewOfClip.data();
 
         // Layout of 'CarReflectConstants' in shaders::CAR_REFLECT.
         if (SUCCEEDED( m_Context->Map( m_CarReflConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
@@ -8284,22 +8583,21 @@ namespace dx11z
             const double forward_length = std::sqrt( forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2] );
             for (int j = 0; j < 3; ++j)
                 constants[44 + j] = forward_length > 0.0 ? static_cast<float>(forward[j] / forward_length) : (j == 2 ? 1.0f : 0.0f);
-            constants[47] = render[rs::ALPHATESTENABLE] != 0 && texture != nullptr && texture->m_Translucent
-                ? static_cast<float>(render[rs::ALPHAREF] & 0xFF) / 255.0f : -1.0f;
-            // Blended draws: below this alpha the pixel is glass, reflected only with '[CarReflections] Glass'.
-            constants[48] = blended && texture != nullptr ? 0.95f : -1.0f;
+            constants[47] = pending.m_AlphaRef;
+            constants[48] = pending.m_GlassRef;
             constants[49] = m_ConfigCarReflGlass > 0 ? 1.0f : 0.0f;
             for (int j = 0; j < 3; ++j)
-                constants[52 + j] = static_cast<float>(up[j]);
+                constants[52 + j] = pending.m_Up[j];
             constants[55] = m_ConfigCarReflGround;
             // The fog colour of the world stands in for the sky.
             float fog[4] = {};
-            ColorToFloat4( render[rs::FOGCOLOR] | 0xFF000000u, fog );
+            ColorToFloat4( pending.m_Fog, fog );
             constants[56] = fog[0];
             constants[57] = fog[1];
             constants[58] = fog[2];
             constants[59] = 1.0f;
             constants[60] = m_ConfigCarReflFresnel;
+            constants[61] = m_CarReflLevelOffset;
             std::memcpy( mapped.pData, constants, sizeof( constants ) );
             m_Context->Unmap( m_CarReflConstants.Get(), 0 );
         }
@@ -8330,7 +8628,7 @@ namespace dx11z
         }
 
         // Culled as the game culls the part (keys 0x300 + mode, apart from those of ApplyPipeline).
-        const std::uint32_t cull = render[rs::CULLMODE] & 3;
+        const std::uint32_t cull = pending.m_Cull;
         auto & raster = m_Rasters[0x300u + cull];
         if (!raster)
         {
@@ -8355,8 +8653,8 @@ namespace dx11z
         ID3D11Buffer * constant_buffer = m_CarReflConstants.Get();
         m_Context->VSSetConstantBuffers( 0, 1, &constant_buffer );
         m_Context->PSSetConstantBuffers( 0, 1, &constant_buffer );
-        ID3D11ShaderResourceView * views[2] = { m_CarReflSourceView.Get(), texture != nullptr ? texture->m_View.Get() : nullptr };
-        ID3D11SamplerState * samplers[2] = { m_PresentSampler.Get(), GetSampler( 0 ) };
+        ID3D11ShaderResourceView * views[2] = { m_CarReflSourceView.Get(), pending.m_View };
+        ID3D11SamplerState * samplers[2] = { m_PresentSampler.Get(), pending.m_Sampler };
         m_Context->PSSetShaderResources( 0, 2, views );
         m_Context->PSSetSamplers( 0, 2, samplers );
         const float factor[4] = {};
@@ -8364,26 +8662,9 @@ namespace dx11z
         m_Context->OMSetDepthStencilState( m_CarReflDepth.Get(), 0 );
         m_Context->RSSetState( raster.Get() );
         if (m_ConfigProfile > 0)
-        {
             ProfileMark( 10 );
-            ++m_ProfileCarBatches;
-            m_ProfileCarVertices += count;
-        }
-        m_Context->DrawIndexed( static_cast<UINT>(indices.size()), first_index, static_cast<INT>(base_vertex) );
-
-        ID3D11ShaderResourceView * none[2] = {};
-        m_Context->PSSetShaderResources( 0, 2, none );
-
-        // The game's ring back in place (ApplyPipeline binds it for every draw as well).
-        m_Context->IASetInputLayout( m_SceneLayout.Get() );
-        stride = sizeof( TlVertex );
-        vertex_buffer = m_VertexBuffer.Get();
-        m_Context->IASetVertexBuffers( 0, 1, &vertex_buffer, &stride, &offset );
-        m_Context->IASetIndexBuffer( m_IndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0 );
-        InvalidatePipeline();
-
-        ++stats.m_Drawn;
-        stats.m_Triangles += indices.size() / 3;
+        m_Context->DrawIndexed( static_cast<UINT>(index_count), first_index, static_cast<INT>(base_vertex) );
+        ++m_CarReflPendingDraws;
     }
 
 
@@ -8509,6 +8790,13 @@ namespace dx11z
         Log( "Car reflections report: %llu frames with car parts, %llu part draws, %llu batches without camera, frame copy %s",
             static_cast<unsigned long long>(m_CarReflFrames), static_cast<unsigned long long>(m_CarReflLodCalls),
             static_cast<unsigned long long>(m_CarReflNoCamera), m_CarReflSourceValid ? "ok" : "missing" );
+        Log( "  collected: %llu reflected batches in %llu draws; corner groups kept %llu, built anew %llu (%zu parts kept)",
+            static_cast<unsigned long long>(m_CarReflPendingParts), static_cast<unsigned long long>(m_CarReflPendingDraws),
+            static_cast<unsigned long long>(m_CarReflWeldHits), static_cast<unsigned long long>(m_CarReflWeldMisses), m_CarReflWeldCache.size() );
+        m_CarReflPendingParts = 0;
+        m_CarReflPendingDraws = 0;
+        m_CarReflWeldHits = 0;
+        m_CarReflWeldMisses = 0;
         for (auto & [mask, stats] : m_CarReflStats)
         {
             Log( "  pass %02X: %llu reflected (%llu triangles), %llu blended left out, %llu skipped by texture, %llu matte parts, "
@@ -10052,6 +10340,8 @@ namespace dx11z
         if (previous == 0 && list > 0)
         {
             m_ReflSkyRun = false;
+            // The run after the sky phase is the main view; later runs of the frame are the rear view mirror.
+            m_ReflViewIsMain = m_ReflSkyPhase;
             if (m_ReflSkyPhase)
             {
                 m_ReflSkyPhase = false;
@@ -10129,18 +10419,22 @@ namespace dx11z
         if (m_RenderWidth <= 0 || m_RenderHeight <= 0)
             return false;
 
+        // '[Water] ReflectionSkyScale': the sky is smooth, half the render size is enough (9.13d).
+        const UINT width = static_cast<UINT>(std::max( 1L, std::lround( m_RenderWidth * m_ConfigReflectionSkyScale ) ));
+        const UINT height = static_cast<UINT>(std::max( 1L, std::lround( m_RenderHeight * m_ConfigReflectionSkyScale ) ));
+
         D3D11_TEXTURE2D_DESC have = {};
         if (m_ReflSky)
             m_ReflSky->GetDesc( &have );
 
-        if (!m_ReflSky || have.Width != static_cast<UINT>(m_RenderWidth) || have.Height != static_cast<UINT>(m_RenderHeight))
+        if (!m_ReflSky || have.Width != width || have.Height != height)
         {
             m_ReflSkyRtv.Reset();
             m_ReflSkyView.Reset();
             m_ReflSky.Reset();
             D3D11_TEXTURE2D_DESC desc = {};
-            desc.Width = static_cast<UINT>(m_RenderWidth);
-            desc.Height = static_cast<UINT>(m_RenderHeight);
+            desc.Width = width;
+            desc.Height = height;
             desc.MipLevels = 1;
             desc.ArraySize = 1;
             desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -10371,6 +10665,11 @@ namespace dx11z
                         Log( "Water: GPU time per reflection (mean of %u) %.3f ms: mirrored scene and sky %.3f, stencil pack and frame copy %.3f, composite %.3f",
                             m_ReflTimingCount, (m_ReflTimingSum[0] + m_ReflTimingSum[1] + m_ReflTimingSum[2]) / n, m_ReflTimingSum[0] / n,
                             m_ReflTimingSum[1] / n, m_ReflTimingSum[2] / n );
+                        Log( "Water: mirrored draws kept %llu, under the water left out %llu, smaller than ReflectionMinSize left out %llu; "
+                            "rear view mirror runs left out %llu", static_cast<unsigned long long>(m_ReflKept),
+                            static_cast<unsigned long long>(m_ReflCulledBelow), static_cast<unsigned long long>(m_ReflCulledSmall),
+                            static_cast<unsigned long long>(m_ReflMirrorViewSkipped) );
+                        m_ReflKept = m_ReflCulledBelow = m_ReflCulledSmall = m_ReflMirrorViewSkipped = 0;
                         m_ReflTimingSum = {};
                         m_ReflTimingCount = 0;
                     }
@@ -10509,6 +10808,13 @@ namespace dx11z
             std::vector<std::uint32_t> & m_Hash;
             ~ClearWater() { m_Water.clear(); m_Hash.clear(); }
         } clear_water{ m_ReflWater, m_ReflWaterHash };
+
+        // '[Water] ReflectionMirrorView' 0: no reflection in the rear view mirror (9.13d).
+        if (m_ConfigReflectionMirrorView == 0 && !m_ReflViewIsMain)
+        {
+            ++m_ReflMirrorViewSkipped;
+            return;
+        }
 
         if (batches == 0 || water == 0 || !m_FrameView || !m_DepthView)
         {
@@ -10819,7 +11125,9 @@ namespace dx11z
         m_Context->IASetIndexBuffer( m_IndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0 );
         m_Context->IASetPrimitiveTopology( D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST );
         m_Context->VSSetShader( m_MirrorVs.Get(), nullptr, 0 );
-        m_Context->PSSetShader( m_ScenePs.Get(), nullptr, 0 );
+        // The kept draws have no headlights (CaptureMirrorBatch): '[Water] ReflectionSimpleShader' leaves the light loops out.
+        ID3D11PixelShader * const mirror_ps = m_ConfigReflectionSimpleShader != 0 && m_MirrorPs ? m_MirrorPs.Get() : m_ScenePs.Get();
+        m_Context->PSSetShader( mirror_ps, nullptr, 0 );
         ID3D11Buffer * buffers[2] = { m_DrawConstants.Get(), m_MirrorConstants.Get() };
         m_Context->VSSetConstantBuffers( 0, 2, buffers );
         m_Context->PSSetConstantBuffers( 0, 1, buffers );
@@ -10856,6 +11164,51 @@ namespace dx11z
                 continue;
 
             const MirrorBatch & batch = m_ReflBatches[i];
+
+            // Sorted out on the CPU (9.13d), not the sky: wholly under the water plane (the mirror pass clips it away anyway),
+            // or smaller on screen than '[Water] ReflectionMinSize'. Corners without a valid w count as above (drawn).
+            if (i >= sky_batches)
+            {
+                const bool size_test = m_ConfigReflectionMinSize > 0.0f;
+                bool above = false;
+                float low_x = 1e30f, high_x = -1e30f, low_y = 1e30f, high_y = -1e30f;
+                for (const TlVertex & v : batch.m_Vertices)
+                {
+                    if (size_test)
+                    {
+                        low_x = std::min( low_x, v.m_X );
+                        high_x = std::max( high_x, v.m_X );
+                        low_y = std::min( low_y, v.m_Y );
+                        high_y = std::max( high_y, v.m_Y );
+                    }
+                    if (above)
+                    {
+                        if (!size_test)
+                            break;
+                        continue;
+                    }
+                    if (!(v.m_Rhw > 0.0f && v.m_Rhw < 1e30f))
+                    {
+                        above = true;
+                        continue;
+                    }
+                    double view_point[3];
+                    to_view( { v.m_X, v.m_Y, 1.0f / v.m_Rhw }, view_point );
+                    above = plane[0] * view_point[0] + plane[1] * view_point[1] + plane[2] * view_point[2] + plane[3] >= 0.0;
+                }
+                if (!above)
+                {
+                    ++m_ReflCulledBelow;
+                    continue;
+                }
+                if (m_ConfigReflectionMinSize > 0.0f && !batch.m_Vertices.empty() &&
+                    std::max( high_x - low_x, high_y - low_y ) * 1440.0f / static_cast<float>(std::max( m_Height, 1 )) < m_ConfigReflectionMinSize)
+                {
+                    ++m_ReflCulledSmall;
+                    continue;
+                }
+                ++m_ReflKept;
+            }
 
             if (!upload( batch ))
                 continue;
@@ -10932,6 +11285,16 @@ namespace dx11z
         m_Context->RSSetScissorRects( 1, &full_scissor );
         if (m_ReflSkyRun)
         {
+            // '[Water] ReflectionSkyScale' 0.5: the sky image half size, the composite looks it up by texture coordinates.
+            D3D11_TEXTURE2D_DESC sky_desc = {};
+            m_ReflSky->GetDesc( &sky_desc );
+            const float kx = static_cast<float>(sky_desc.Width) / static_cast<float>(std::max( m_RenderWidth, 1 ));
+            const float ky = static_cast<float>(sky_desc.Height) / static_cast<float>(std::max( m_RenderHeight, 1 ));
+            const D3D11_VIEWPORT sky_view = { 0, 0, static_cast<float>(sky_desc.Width), static_cast<float>(sky_desc.Height), 0, 1 };
+            m_Context->RSSetViewports( 1, &sky_view );
+            const D3D11_RECT sky_scissor = { static_cast<LONG>(m_ReflClip.left * kx), static_cast<LONG>(m_ReflClip.top * ky),
+                static_cast<LONG>(std::ceil( m_ReflClip.right * kx )), static_cast<LONG>(std::ceil( m_ReflClip.bottom * ky )) };
+            m_Context->RSSetScissorRects( 1, &sky_scissor );
             ID3D11RenderTargetView * sky_target = m_ReflSkyRtv.Get();
             m_Context->OMSetRenderTargets( 1, &sky_target, nullptr );
             // The sky dome is blended, over the background colour of the game like in the frame.
@@ -10987,12 +11350,16 @@ namespace dx11z
                 m_Context->OMSetBlendState( blend.Get(), one, 0xFFFFFFFF );
                 m_Context->DrawIndexed( static_cast<UINT>(batch.m_Indices.size()), first_index, static_cast<INT>(base_vertex) );
             }
+            m_Context->RSSetViewports( 1, &full );
+            m_Context->RSSetScissorRects( 1, &full_scissor );
         }
         // Before the composite clears the water bit: open sky (stencil 0) next to the water for '[Water] EdgeFade',
         // solid draws in front of the sky for the sky lookup.
         // The frame and its depth: holes of the mirrored scene (geometry the game never drew) take the frame in the
         // mirrored direction where what is seen there is far away (then it lies like the sky, mirrored at the horizon).
         timing_mark( 1 );
+        if (m_ReflSkyRun)
+            CopyOrderNote( "water" );
         const bool stencil = m_ReflSkyRun && PackStencil() && CopyFrame();
         const bool edge_fade = stencil && m_ConfigWaterEdgeFade > 0.0f;
         timing_mark( 2 );

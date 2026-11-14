@@ -699,6 +699,17 @@ namespace dx11z
         std::array<float, 4> m_CarReflViewport = {};
         std::uint32_t m_CarReflCopyFlip = 0xFFFFFFFFu;
         bool m_CarReflSourceValid = false;
+        // '[CarReflections] SourceScale' 0.5 (9.13d): the frame resolved into m_CarReflResolve, then drawn half size into the copy.
+        float m_ConfigCarReflSourceScale = 1.0f;
+        float m_CarReflLevelOffset = 0.0f; // mip levels the copy is smaller than the frame (1 at half size)
+        ComPtr<ID3D11Texture2D> m_CarReflResolve;
+        ComPtr<ID3D11ShaderResourceView> m_CarReflResolveView;
+        ComPtr<ID3D11RenderTargetView> m_CarReflSourceRtv;
+        ComPtr<ID3D11PixelShader> m_CarReflDownPs;
+        // Order of the two frame copies within a frame (9.13d, '[Dx11] Measure'): draws counted at each copy.
+        std::uint64_t m_CopyOrderDraws = 0;
+        int m_CopyOrderLines = 0;
+        void CopyOrderNote( const char * what );
         ComPtr<ID3D11Texture2D> m_CarReflSource;
         ComPtr<ID3D11ShaderResourceView> m_CarReflSourceView;
         ComPtr<ID3D11VertexShader> m_CarReflVs;
@@ -713,8 +724,37 @@ namespace dx11z
         ComPtr<ID3D11Buffer> m_CarReflIndexBuffer;
         std::size_t m_CarReflVertexCursor = 0;
         std::size_t m_CarReflIndexCursor = 0;
+        // Groups of corners at the same point per part (9.13c), kept over frames: the triangles of a part do not change.
+        // Checked each frame on a few pairs of corners in the same group (still equal) and in different groups (still apart).
+        struct CarReflWeld
+        {
+            std::vector<std::uint32_t> m_Group;
+            std::uint32_t m_Groups = 0;
+            std::array<std::uint32_t, 16> m_Same = {}; // pairs a, b of corners of one group
+            std::array<std::uint32_t, 16> m_Apart = {}; // pairs a, b of corners of different groups
+            int m_SameCount = 0, m_ApartCount = 0;
+        };
+        std::unordered_map<std::uint64_t, CarReflWeld> m_CarReflWeldCache;
+        std::uint64_t m_CarReflWeldHits = 0, m_CarReflWeldMisses = 0;
+        // Reflection draws of one R3DCarLOD::Draw collected per state and drawn at its end (9.13c).
+        struct CarReflPending
+        {
+            ID3D11ShaderResourceView * m_View = nullptr;
+            ID3D11SamplerState * m_Sampler = nullptr;
+            std::uint32_t m_Cull = 0;
+            std::uint32_t m_Fog = 0;
+            float m_AlphaRef = -1.0f;
+            float m_GlassRef = -1.0f;
+            float m_Up[3] = {};
+            std::vector<CarReflVertex> m_Vertices;
+            std::vector<std::uint16_t> m_Indices;
+        };
+        std::vector<CarReflPending> m_CarReflPending;
+        std::size_t m_CarReflPendingCount = 0;
+        std::uint64_t m_CarReflPendingDraws = 0, m_CarReflPendingParts = 0;
+        void CarReflDraw( CarReflPending & pending );
+        void CarReflDrawPending();
         std::vector<std::uint32_t> m_CarReflOrder;
-        std::vector<std::uint32_t> m_CarReflGroup;
         std::vector<std::array<double, 3>> m_CarReflView;
         std::vector<std::array<double, 3>> m_CarReflNormal;
         // Per pass mask: draws reflected, skipped as blended, skipped by texture; textures seen (logged once each).
@@ -1207,6 +1247,14 @@ namespace dx11z
         ComPtr<ID3D11BlendState> m_ReflWeightBlend;
         bool m_ReflSkyRun = false; // the current queue run is the one right after the sky
         int m_ConfigReflectionSky = 1;
+        // Cheaper reflections (REFLEXION-WETTER.md 9.13d).
+        int m_ConfigReflectionSimpleShader = 0; // '[Water] ReflectionSimpleShader': mirrored draws without the light loops
+        float m_ConfigReflectionMinSize = 0.0f; // '[Water] ReflectionMinSize': draws smaller than this (pixels of 1440 lines) are not mirrored
+        int m_ConfigReflectionMirrorView = 1; // '[Water] ReflectionMirrorView': 0 = no reflection in the rear view mirror
+        float m_ConfigReflectionSkyScale = 1.0f; // '[Water] ReflectionSkyScale': size of the sky image, 1 or 0.5
+        bool m_ReflViewIsMain = false; // the current queue run follows the sky phase (main view, not the rear view mirror)
+        std::uint64_t m_ReflCulledBelow = 0, m_ReflCulledSmall = 0, m_ReflKept = 0, m_ReflMirrorViewSkipped = 0;
+        ComPtr<ID3D11PixelShader> m_MirrorPs;
         int m_ConfigReflectionTwoSided = 1;
         float m_ConfigReflectionWaves = 3.0f;
         float m_ConfigReflectionBlur = 2.0f;

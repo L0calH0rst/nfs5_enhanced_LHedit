@@ -345,6 +345,8 @@ float4 MainPS( PixelIn input ) : SV_Target
 
     float4 current = baseColour;
 
+    // MIRROR_PASS ('[Water] ReflectionSimpleShader'): the mirrored scene of the water has no light loops.
+#ifndef MIRROR_PASS
     // The game's headlight model per pixel (doc/LICHT.md 7.2): light map lookup in the ground
     // plane of the headlight, minus height, added to the vertex colour before the texture.
     if ( g_Head.x > 0.0 )
@@ -393,13 +395,18 @@ float4 MainPS( PixelIn input ) : SV_Target
 
         current = Pipeline( diffuse, specular, tex0, tex1 );
     }
+#endif
 
     // Night over a day track (LFSP NightGrade): result = night factor x (world without lights) + the light of the lights.
     // Dividing the lights by the factor before the texture clipped them, so the base pass and the lit pass run apart.
     // '[Weather] NightEdgeLight' (g_Test.y): on alpha tested textures the faint edge (alpha below the edge reference) keeps
     // the colour of its padding, bright texels; lit by the headlights they showed a yellow rim around leaves. The light
     // part fades out with the alpha there.
+#ifdef MIRROR_PASS
+    bool edgeLight = false;
+#else
     bool edgeLight = g_Test.y > 0.0 && g_Head.x > 0.0 && g_Flags.z != 8;
+#endif
     if ( nightWorld || edgeLight )
     {
         float3 lightPart = current.rgb - baseColour.rgb;
@@ -779,7 +786,8 @@ float4 MainPS( float4 position : SV_Position ) : SV_Target
             return float4( edge, 0.0, 1.0 - edge, 1.0 );
         if ( edge > 0.0 )
         {
-            float3 beyond = g_SkyFrame.Load( int3( p, 0 ) ).rgb;
+            // The sky image may be smaller than the render size ('[Water] ReflectionSkyScale').
+            float3 beyond = g_SkyFrame.SampleLevel( g_SkySampler, p / size, 0 ).rgb;
             // frame * (1 - a) + mirrored * a, then towards the sky by edge: one blend with alpha a + edge - a * edge.
             float total = alpha + edge - alpha * edge;
             mirrored = ( mirrored * alpha * ( 1.0 - edge ) + beyond * edge ) / max( total, 1e-4 );
@@ -836,7 +844,7 @@ cbuffer CarReflectConstants : register( b0 )
     float4 g_Glass; // x: alpha below which a blended pixel is glass (< 0: not blended), y: 1 = reflect glass too
     float4 g_Up; // xyz: up of the car in view space (0: unknown), w: strength of reflections below the horizon
     float4 g_SkyColour; // rgb: sky where the frame has nothing (the fog colour), w: 1 = use it
-    float4 g_Shape; // x: exponent of the Fresnel term (5 = Schlick, smaller = softer change)
+    float4 g_Shape; // x: exponent of the Fresnel term (5 = Schlick, smaller = softer change), y: mip levels the frame copy is smaller by
 };
 
 Texture2D g_Scene : register( t0 );
@@ -909,7 +917,8 @@ float4 MainPS( PixelIn input ) : SV_Target
     float outside = saturate( ( edge - 1.0 ) / 0.3 );
     p /= max( 1.0, edge / 0.99 );
     // Towards and beyond the edge blurrier and then the mean of the frame, the last row of pixels would become streaks.
-    float blur = lerp( g_Params.z, max( g_Params.z, 6.0 ), saturate( ( edge - 0.8 ) / 0.4 ) );
+    // Levels of the full size frame; a smaller copy ('[CarReflections] SourceScale') starts g_Shape.y levels further down.
+    float blur = max( lerp( g_Params.z, max( g_Params.z, 6.0 ), saturate( ( edge - 0.8 ) / 0.4 ) ) - g_Shape.y, 0.0 );
     float3 colour = g_Scene.SampleLevel( g_SceneSampler, p * 0.5 + 0.5, blur ).rgb;
     colour = lerp( colour, g_Scene.SampleLevel( g_SceneSampler, float2( 0.5, 0.5 ), 12.0 ).rgb, saturate( ( edge - 1.0 ) / 0.6 ) );
 
@@ -960,6 +969,21 @@ PixelIn MainVS( uint id : SV_VertexID )
 float4 MainPS( PixelIn input ) : SV_Target
 {
     return g_Color;
+}
+)hlsl";
+
+    // Car reflections, '[CarReflections] SourceScale' 0.5 (REFLEXION-WETTER.md 9.13d): the resolved frame drawn into the half
+    // size copy. One bilinear lookup in the middle of each 2 x 2 block is its mean. Fullscreen triangle of REFLECT's MainVS.
+    inline constexpr char CAR_DOWN[] = R"hlsl(
+Texture2D g_Source : register( t0 );
+SamplerState g_Sampler : register( s0 );
+
+float4 MainPS( float4 position : SV_Position ) : SV_Target
+{
+    float2 size;
+    g_Source.GetDimensions( size.x, size.y );
+    // Pixel centre x + 0.5 of the half target lies on the corner 2x + 1 of the full source.
+    return g_Source.SampleLevel( g_Sampler, position.xy * 2.0 / size, 0 );
 }
 )hlsl";
 }
