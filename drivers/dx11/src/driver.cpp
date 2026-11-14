@@ -5003,7 +5003,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9k, blended foliage graded, texture log): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9l, alpha to coverage only for the world of a race): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -5642,7 +5642,28 @@ namespace dx11z
         const bool edge_candidate = (m_ConfigAlphaEdgeFix || m_ConfigAlphaToCoverage) && m_BatchPrimitive == Primitive::TRIANGLES &&
             render[rs::ALPHABLENDENABLE] != 0 && render[rs::ALPHATESTENABLE] != 0 && render[rs::ZENABLE] != 0 &&
             render[rs::ZWRITEENABLE] != 0 && BatchTranslucent();
-        const bool edge_split = edge_candidate && !m_ConfigAlphaToCoverage;
+        // Alpha to coverage (AlphaEdgeFix = 3) is for the alpha tested world of a race only. Menus and the HUD (front end, depth
+        // func ALWAYS, screen space vertices) are half transparent gradients and glyph edges: eight coverage steps make bands and
+        // stairs there. Those draws keep the two pass fix, as they have with AlphaEdgeFix = 1.
+        bool coverage_world = false;
+        if (edge_candidate && m_ConfigAlphaToCoverage)
+        {
+            float rhw_min = 1e30f;
+            for (const TlVertex & vertex : m_BatchVertices)
+                rhw_min = std::min( rhw_min, vertex.m_Rhw );
+            coverage_world = *reinterpret_cast<const std::int32_t *>(0x0065B928) == 0 && render[rs::ZFUNC] != 8 && rhw_min < 0.999f;
+            static int coverage_logged = 0;
+            static int kept_logged = 0;
+            int & logged = coverage_world ? coverage_logged : kept_logged;
+            if (logged < 6)
+            {
+                ++logged;
+                Log( "AlphaEdgeFix 3: %s, front end %d, zfunc %u, rhw min %g, %u vertices, texture %08X", coverage_world ? "alpha to coverage" : "two pass kept (menu/HUD)",
+                    *reinterpret_cast<const std::int32_t *>(0x0065B928) != 0 ? 1 : 0, static_cast<unsigned>(render[rs::ZFUNC]), rhw_min,
+                    static_cast<unsigned>(m_BatchVertices.size()), m_Bound[0] != nullptr ? static_cast<unsigned>(m_Bound[0]->m_Hash) : 0u );
+            }
+        }
+        const bool edge_split = edge_candidate && (!m_ConfigAlphaToCoverage || !coverage_world);
 
         m_EdgePass = edge_split ? 1 : (edge_candidate ? 3 : 0);
 
