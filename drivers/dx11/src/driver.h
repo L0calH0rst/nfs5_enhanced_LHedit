@@ -529,7 +529,7 @@ namespace dx11z
         // Frame profile ('[Lights] FrameProfile'): GPU time per draw category from timestamp queries (a few frames late) and the
         // CPU side of the light constants. Categories: 0 opaque world without light, 1 opaque world with light, 2 sky, 3 additive
         // sprites, 4 HUD and 2D, 5 second pass of the alpha edge fix, 6 alpha tested or blended world with light, 7 the same without.
-        static constexpr int PROFILE_CATEGORIES = 11;
+        static constexpr int PROFILE_CATEGORIES = 12;
         static constexpr int PROFILE_STAMPS = 255;
         struct ProfileSlot
         {
@@ -702,6 +702,21 @@ namespace dx11z
         // '[CarReflections] SourceScale' 0.5 (9.13d): the frame resolved into m_CarReflResolve, then drawn half size into the copy.
         float m_ConfigCarReflSourceScale = 1.0f;
         float m_CarReflLevelOffset = 0.0f; // mip levels the copy is smaller than the frame (1 at half size)
+        // Shared blur chain (REFLEXION-WETTER.md 9.16a, '[CarReflections] BlurChain'): m_BlurDown holds the scene filtered down from
+        // half size on (BLUR DownPS), m_BlurChain level k is level k + 1 of it drawn back up to the size of level k (UpPS).
+        static constexpr int BLUR_DOWN_LEVELS = 6;
+        int m_ConfigCarReflBlurChain = 0;
+        ComPtr<ID3D11Texture2D> m_BlurDown;
+        ComPtr<ID3D11Texture2D> m_BlurChain;
+        std::array<ComPtr<ID3D11RenderTargetView>, BLUR_DOWN_LEVELS> m_BlurDownRtv;
+        std::array<ComPtr<ID3D11ShaderResourceView>, BLUR_DOWN_LEVELS> m_BlurDownSrv;
+        std::array<ComPtr<ID3D11RenderTargetView>, BLUR_DOWN_LEVELS> m_BlurChainRtv;
+        ComPtr<ID3D11ShaderResourceView> m_BlurChainView;
+        ComPtr<ID3D11PixelShader> m_BlurDownPs;
+        ComPtr<ID3D11PixelShader> m_BlurUpPs;
+        UINT m_BlurDownLevels = 0; // levels of m_BlurDown; m_BlurChain has one less
+        bool m_BlurChainValid = false;
+        bool BuildBlurChain( ID3D11ShaderResourceView * source );
         ComPtr<ID3D11Texture2D> m_CarReflResolve;
         ComPtr<ID3D11ShaderResourceView> m_CarReflResolveView;
         ComPtr<ID3D11RenderTargetView> m_CarReflSourceRtv;

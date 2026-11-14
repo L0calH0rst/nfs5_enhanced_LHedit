@@ -844,11 +844,13 @@ cbuffer CarReflectConstants : register( b0 )
     float4 g_Glass; // x: alpha below which a blended pixel is glass (< 0: not blended), y: 1 = reflect glass too
     float4 g_Up; // xyz: up of the car in view space (0: unknown), w: strength of reflections below the horizon
     float4 g_SkyColour; // rgb: sky where the frame has nothing (the fog colour), w: 1 = use it
-    float4 g_Shape; // x: exponent of the Fresnel term (5 = Schlick, smaller = softer change), y: mip levels the frame copy is smaller by
+    float4 g_Shape; // x: exponent of the Fresnel term (5 = Schlick, smaller = softer change), y: mip levels the frame copy is smaller by,
+                    // z: 1 = blur from the shared chain (9.16a, '[CarReflections] BlurChain'), w: its top level
 };
 
 Texture2D g_Scene : register( t0 );
 Texture2D g_Texture : register( t1 );
+Texture2D g_Chain : register( t2 ); // shared blur chain: level 0 half the frame, each further level half as large and softer
 SamplerState g_SceneSampler : register( s0 );
 SamplerState g_TextureSampler : register( s1 );
 
@@ -918,8 +920,14 @@ float4 MainPS( PixelIn input ) : SV_Target
     p /= max( 1.0, edge / 0.99 );
     // Towards and beyond the edge blurrier and then the mean of the frame, the last row of pixels would become streaks.
     // Levels of the full size frame; a smaller copy ('[CarReflections] SourceScale') starts g_Shape.y levels further down.
-    float blur = max( lerp( g_Params.z, max( g_Params.z, 6.0 ), saturate( ( edge - 0.8 ) / 0.4 ) ) - g_Shape.y, 0.0 );
-    float3 colour = g_Scene.SampleLevel( g_SceneSampler, p * 0.5 + 0.5, blur ).rgb;
+    float level = lerp( g_Params.z, max( g_Params.z, 6.0 ), saturate( ( edge - 0.8 ) / 0.4 ) );
+    float blur = max( level - g_Shape.y, 0.0 );
+    float3 colour;
+    // The chain starts at half size: level n of the frame is level n - 1 there, filtered between its levels.
+    if ( g_Shape.z > 0.5 )
+        colour = g_Chain.SampleLevel( g_SceneSampler, p * 0.5 + 0.5, clamp( level - 1.0, 0.0, g_Shape.w ) ).rgb;
+    else
+        colour = g_Scene.SampleLevel( g_SceneSampler, p * 0.5 + 0.5, blur ).rgb;
     colour = lerp( colour, g_Scene.SampleLevel( g_SceneSampler, float2( 0.5, 0.5 ), 12.0 ).rgb, saturate( ( edge - 1.0 ) / 0.6 ) );
 
     // Up out of the frame there is sky, not the stretched edge of the frame. Behind the camera the mirrored frame
@@ -984,6 +992,48 @@ float4 MainPS( float4 position : SV_Position ) : SV_Target
     g_Source.GetDimensions( size.x, size.y );
     // Pixel centre x + 0.5 of the half target lies on the corner 2x + 1 of the full source.
     return g_Source.SampleLevel( g_Sampler, position.xy * 2.0 / size, 0 );
+}
+)hlsl";
+
+    // Shared blur chain (REFLEXION-WETTER.md 9.16a): the scene copy filtered down into 5 levels from half size on (dual Kawase).
+    // BLUR_DOWN: target half the source; centre (the mean of the middle 2 x 2) and four diagonal lookups one source texel out,
+    // each the mean of a 2 x 2 block. BLUR_UP: a level drawn into the next larger size with a tent of 8 lookups, so the small
+    // levels are soft instead of blocky. The source view holds one level; its size comes from GetDimensions.
+    // Fullscreen triangle of REFLECT's MainVS.
+    inline constexpr char BLUR[] = R"hlsl(
+Texture2D g_Source : register( t0 );
+SamplerState g_Sampler : register( s0 );
+
+float4 DownPS( float4 position : SV_Position ) : SV_Target
+{
+    float2 size;
+    g_Source.GetDimensions( size.x, size.y );
+    float2 texel = 1.0 / size;
+    float2 uv = position.xy * 2.0 * texel;
+    float4 sum = g_Source.SampleLevel( g_Sampler, uv, 0 ) * 4.0;
+    sum += g_Source.SampleLevel( g_Sampler, uv + float2( -texel.x, -texel.y ), 0 );
+    sum += g_Source.SampleLevel( g_Sampler, uv + float2( texel.x, -texel.y ), 0 );
+    sum += g_Source.SampleLevel( g_Sampler, uv + float2( -texel.x, texel.y ), 0 );
+    sum += g_Source.SampleLevel( g_Sampler, uv + float2( texel.x, texel.y ), 0 );
+    return sum / 8.0;
+}
+
+float4 UpPS( float4 position : SV_Position ) : SV_Target
+{
+    float2 size;
+    g_Source.GetDimensions( size.x, size.y );
+    float2 texel = 1.0 / size;
+    // Pixel centre of the target, twice the source size, in source texture coordinates.
+    float2 uv = position.xy * 0.5 * texel;
+    float4 sum = g_Source.SampleLevel( g_Sampler, uv + float2( -texel.x, 0.0 ), 0 );
+    sum += g_Source.SampleLevel( g_Sampler, uv + float2( texel.x, 0.0 ), 0 );
+    sum += g_Source.SampleLevel( g_Sampler, uv + float2( 0.0, -texel.y ), 0 );
+    sum += g_Source.SampleLevel( g_Sampler, uv + float2( 0.0, texel.y ), 0 );
+    sum += g_Source.SampleLevel( g_Sampler, uv + float2( -0.5 * texel.x, -0.5 * texel.y ), 0 ) * 2.0;
+    sum += g_Source.SampleLevel( g_Sampler, uv + float2( 0.5 * texel.x, -0.5 * texel.y ), 0 ) * 2.0;
+    sum += g_Source.SampleLevel( g_Sampler, uv + float2( -0.5 * texel.x, 0.5 * texel.y ), 0 ) * 2.0;
+    sum += g_Source.SampleLevel( g_Sampler, uv + float2( 0.5 * texel.x, 0.5 * texel.y ), 0 ) * 2.0;
+    return sum / 12.0;
 }
 )hlsl";
 }

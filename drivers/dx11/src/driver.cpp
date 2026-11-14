@@ -792,6 +792,11 @@ namespace dx11z
         {
             m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_CarReflDownPs.Put() );
         }
+        // Shared blur chain (9.16a).
+        if (build( shaders::BLUR, sizeof( shaders::BLUR ) - 1, "DownPS", "ps_4_0", ps ))
+            m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_BlurDownPs.Put() );
+        if (build( shaders::BLUR, sizeof( shaders::BLUR ) - 1, "UpPS", "ps_4_0", ps ))
+            m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_BlurUpPs.Put() );
 
         return m_SceneVs && m_ScenePs && m_SceneLayout && m_PresentVs && m_PresentPs && m_ClearVs && m_ClearPs;
     }
@@ -1805,6 +1810,8 @@ namespace dx11z
             m_ConfigCarReflDebug = std::clamp( std::atoi( car_value( "Debug", "0" ).c_str() ), 0, 3 );
             // '[CarReflections] SourceScale' (9.13d): size of the frame copy, 1 = full, 0.5 = half (the blur level keeps the look).
             m_ConfigCarReflSourceScale = std::atof( car_value( "SourceScale", "1" ).c_str() ) < 0.75 ? 0.5f : 1.0f;
+            // '[CarReflections] BlurChain' (9.16a): the blur from the shared soft chain instead of the mip levels of the copy.
+            m_ConfigCarReflBlurChain = std::clamp( std::atoi( car_value( "BlurChain", "0" ).c_str() ), 0, 1 );
             // The game's light decal (Y2T1, Y2T2, doc/LICHT.md 12) is blended over the body with the same state as glass.
             const std::string skip = car_value( "SkipTextures", "4A522215,984E4128" );
             m_ConfigCarReflSkip.clear();
@@ -1838,7 +1845,7 @@ namespace dx11z
             Log( "Config car reflections: Reflections %d strength %.2f reflectance %.2f fresnel %.1f blur %.1f ground %.2f glass %d debug %d, skip '%s', "
                 "matte '%s', only part %d", m_ConfigCarRefl, m_ConfigCarReflStrength, m_ConfigCarReflF0, m_ConfigCarReflFresnel, m_ConfigCarReflBlur, m_ConfigCarReflGround,
                 m_ConfigCarReflGlass, m_ConfigCarReflDebug, skip.c_str(), matte.c_str(), m_ConfigCarReflOnlyPart );
-            Log( "Config car reflections: SourceScale %.1f", m_ConfigCarReflSourceScale );
+            Log( "Config car reflections: SourceScale %.1f, BlurChain %d", m_ConfigCarReflSourceScale, m_ConfigCarReflBlurChain );
             if (m_ConfigCarRefl > 0)
                 InstallCarReflHook();
         }
@@ -2109,6 +2116,18 @@ namespace dx11z
         m_CarReflResolveView.Reset();
         m_CarReflResolve.Reset();
         m_CarReflSourceRtv.Reset();
+        m_BlurDownPs.Reset();
+        m_BlurUpPs.Reset();
+        m_BlurChainView.Reset();
+        for (auto & view : m_BlurDownRtv)
+            view.Reset();
+        for (auto & view : m_BlurDownSrv)
+            view.Reset();
+        for (auto & view : m_BlurChainRtv)
+            view.Reset();
+        m_BlurDown.Reset();
+        m_BlurChain.Reset();
+        m_BlurChainValid = false;
         m_ReflCompositeVs.Reset();
         m_ReflCompositePs.Reset();
         m_ReflPackPs.Reset();
@@ -5061,7 +5080,7 @@ namespace dx11z
         double window_ms
     )
     {
-        static const char * const names[PROFILE_CATEGORIES] = { "opaque", "opaque lit", "sky", "additive", "HUD/2D", "edge pass 2", "alpha lit", "alpha unlit", "back pass", "car copy", "car reflect" };
+        static const char * const names[PROFILE_CATEGORIES] = { "opaque", "opaque lit", "sky", "additive", "HUD/2D", "edge pass 2", "alpha lit", "alpha unlit", "back pass", "car copy", "car reflect", "blur chain" };
         const double gpu_frames = static_cast<double>(std::max<std::uint64_t>( m_ProfileGpuFrames, 1 ));
         const double frames = static_cast<double>(std::max<std::uint64_t>( m_ProfileFlips, 1 ));
         LARGE_INTEGER frequency = {};
@@ -5111,9 +5130,10 @@ namespace dx11z
         }
         if (m_ProfileCarCopies > 0 || m_ProfileCarBatches > 0)
         {
-            Log( "Profile:   car reflections per frame: %.1f frame copies, CPU copy %.0f us, CPU batches %.0f us (%.1f batches, %.0f vertices), GPU copy %.3f ms (resolve and mips), GPU reflect draws %.3f ms",
+            Log( "Profile:   car reflections per frame: %.1f frame copies, CPU copy %.0f us, CPU batches %.0f us (%.1f batches, %.0f vertices), GPU copy %.3f ms (resolve and mips), GPU blur chain %.3f ms, GPU reflect draws %.3f ms",
                 static_cast<double>(m_ProfileCarCopies) / frames, static_cast<double>(m_ProfileCarCopyTicks) * us, static_cast<double>(m_ProfileCarBatchTicks) * us,
-                static_cast<double>(m_ProfileCarBatches) / frames, static_cast<double>(m_ProfileCarVertices) / frames, m_ProfileMs[9] / gpu_frames, m_ProfileMs[10] / gpu_frames );
+                static_cast<double>(m_ProfileCarBatches) / frames, static_cast<double>(m_ProfileCarVertices) / frames, m_ProfileMs[9] / gpu_frames,
+                m_ProfileMs[11] / gpu_frames, m_ProfileMs[10] / gpu_frames );
             m_ProfileCarCopyTicks = m_ProfileCarBatchTicks = 0;
             m_ProfileCarBatches = m_ProfileCarVertices = m_ProfileCarCopies = 0;
         }
@@ -5215,7 +5235,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9s, cheaper water and car reflection copies): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9t, shared blur chain for the car reflections): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -7759,7 +7779,13 @@ namespace dx11z
             m_CarReflCopyFlip = m_FlipCount;
             // Every N frames only: the paint is no perfect mirror (Blur), the copy of the frame before looks nearly the same.
             if (m_ConfigCarReflInterval <= 1 || !m_CarReflSourceValid || m_FlipCount % static_cast<std::uint64_t>(m_ConfigCarReflInterval) == 0)
+            {
                 m_CarReflSourceValid = CopyCarReflSource();
+                // The shared blur chain from the full size frame (the resolve of a half size copy, else level 0 of the copy).
+                if (m_ConfigCarReflBlurChain > 0)
+                    m_BlurChainValid = m_CarReflSourceValid &&
+                        BuildBlurChain( m_CarReflLevelOffset > 0.0f ? m_CarReflResolveView.Get() : m_CarReflSourceView.Get() );
+            }
             ++m_CarReflFrames;
         }
 
@@ -7952,6 +7978,130 @@ namespace dx11z
         ID3D11RenderTargetView * no_target = nullptr;
         m_Context->OMSetRenderTargets( 1, &no_target, nullptr );
         m_Context->GenerateMips( m_CarReflSourceView.Get() );
+        InvalidatePipeline();
+        return true;
+    }
+
+
+    bool Driver::BuildBlurChain(
+        ID3D11ShaderResourceView * source
+    )
+    {
+        if (source == nullptr || !m_Frame || !m_BlurDownPs || !m_BlurUpPs || !m_ReflCompositeVs)
+            return false;
+        if (m_ConfigProfile > 0)
+            ProfileMark( 11 );
+
+        D3D11_TEXTURE2D_DESC frame = {};
+        m_Frame->GetDesc( &frame );
+        const UINT width = std::max( 1u, frame.Width / 2 );
+        const UINT height = std::max( 1u, frame.Height / 2 );
+
+        D3D11_TEXTURE2D_DESC have = {};
+        if (m_BlurDown)
+            m_BlurDown->GetDesc( &have );
+        if (!m_BlurDown || !m_BlurChain || have.Width != width || have.Height != height || have.Format != frame.Format)
+        {
+            m_BlurChainView.Reset();
+            for (int k = 0; k < BLUR_DOWN_LEVELS; ++k)
+            {
+                m_BlurDownRtv[k].Reset();
+                m_BlurDownSrv[k].Reset();
+                m_BlurChainRtv[k].Reset();
+            }
+            m_BlurDown.Reset();
+            m_BlurChain.Reset();
+
+            // As many levels as stay at least 2 pixels on the short side, at most BLUR_DOWN_LEVELS.
+            UINT levels = 1;
+            while (levels < BLUR_DOWN_LEVELS && std::min( width, height ) >> levels >= 2)
+                ++levels;
+            if (levels < 2)
+                return false;
+
+            D3D11_TEXTURE2D_DESC desc = {};
+            desc.Width = width;
+            desc.Height = height;
+            desc.MipLevels = levels;
+            desc.ArraySize = 1;
+            desc.Format = frame.Format;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            bool made = SUCCEEDED( m_Device->CreateTexture2D( &desc, nullptr, m_BlurDown.Put() ) );
+            desc.MipLevels = levels - 1;
+            made = made && SUCCEEDED( m_Device->CreateTexture2D( &desc, nullptr, m_BlurChain.Put() ) );
+            for (UINT k = 0; made && k < levels; ++k)
+            {
+                D3D11_RENDER_TARGET_VIEW_DESC target = {};
+                target.Format = frame.Format;
+                target.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+                target.Texture2D.MipSlice = k;
+                D3D11_SHADER_RESOURCE_VIEW_DESC view = {};
+                view.Format = frame.Format;
+                view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                view.Texture2D.MostDetailedMip = k;
+                view.Texture2D.MipLevels = 1;
+                made = SUCCEEDED( m_Device->CreateRenderTargetView( m_BlurDown.Get(), &target, m_BlurDownRtv[k].Put() ) ) &&
+                    SUCCEEDED( m_Device->CreateShaderResourceView( m_BlurDown.Get(), &view, m_BlurDownSrv[k].Put() ) );
+                if (made && k + 1 < levels)
+                    made = SUCCEEDED( m_Device->CreateRenderTargetView( m_BlurChain.Get(), &target, m_BlurChainRtv[k].Put() ) );
+            }
+            made = made && SUCCEEDED( m_Device->CreateShaderResourceView( m_BlurChain.Get(), nullptr, m_BlurChainView.Put() ) );
+            Log( "Blur chain: %ux%u, %u levels down, %u levels in the chain %s", width, height, levels, levels - 1, made ? "created" : "FAILED" );
+            if (!made)
+            {
+                m_BlurChainView.Reset();
+                m_BlurDown.Reset();
+                m_BlurChain.Reset();
+                m_BlurDownLevels = 0;
+                return false;
+            }
+            m_BlurDownLevels = levels;
+        }
+
+        auto & raster = m_ReflRasters[0x300];
+        if (!raster)
+        {
+            D3D11_RASTERIZER_DESC raster_desc = {};
+            raster_desc.FillMode = D3D11_FILL_SOLID;
+            raster_desc.CullMode = D3D11_CULL_NONE;
+            raster_desc.DepthClipEnable = FALSE;
+            m_Device->CreateRasterizerState( &raster_desc, raster.Put() );
+        }
+        m_Context->OMSetBlendState( nullptr, nullptr, 0xFFFFFFFF );
+        m_Context->OMSetDepthStencilState( nullptr, 0 );
+        m_Context->RSSetState( raster.Get() );
+        m_Context->IASetInputLayout( nullptr );
+        m_Context->IASetPrimitiveTopology( D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST );
+        m_Context->VSSetShader( m_ReflCompositeVs.Get(), nullptr, 0 );
+        ID3D11SamplerState * sampler = m_PresentSampler.Get();
+        m_Context->PSSetSamplers( 0, 1, &sampler );
+
+        ID3D11ShaderResourceView * none = nullptr;
+        const auto pass = [&]( ID3D11RenderTargetView * target, ID3D11ShaderResourceView * input, UINT level )
+        {
+            // The input of the last pass may be a level of this texture: unbound first, then the target, then the input.
+            m_Context->PSSetShaderResources( 0, 1, &none );
+            m_Context->OMSetRenderTargets( 1, &target, nullptr );
+            const D3D11_VIEWPORT view = { 0, 0, static_cast<float>(std::max( 1u, width >> level )), static_cast<float>(std::max( 1u, height >> level )), 0, 1 };
+            m_Context->RSSetViewports( 1, &view );
+            m_Context->PSSetShaderResources( 0, 1, &input );
+            m_Context->Draw( 3, 0 );
+        };
+
+        // Down: level 0 from the full size frame, each further level from the one before.
+        m_Context->PSSetShader( m_BlurDownPs.Get(), nullptr, 0 );
+        for (UINT k = 0; k < m_BlurDownLevels; ++k)
+            pass( m_BlurDownRtv[k].Get(), k == 0 ? source : m_BlurDownSrv[k - 1].Get(), k );
+        // Up: chain level k is down level k + 1 drawn with the tent at the size of level k.
+        m_Context->PSSetShader( m_BlurUpPs.Get(), nullptr, 0 );
+        for (UINT k = 0; k + 1 < m_BlurDownLevels; ++k)
+            pass( m_BlurChainRtv[k].Get(), m_BlurDownSrv[k + 1].Get(), k );
+
+        m_Context->PSSetShaderResources( 0, 1, &none );
+        ID3D11RenderTargetView * no_target = nullptr;
+        m_Context->OMSetRenderTargets( 1, &no_target, nullptr );
         InvalidatePipeline();
         return true;
     }
@@ -8510,8 +8660,8 @@ namespace dx11z
         m_CarReflPendingCount = 0;
 
         // The game's ring back in place (ApplyPipeline binds it for every draw as well).
-        ID3D11ShaderResourceView * none[2] = {};
-        m_Context->PSSetShaderResources( 0, 2, none );
+        ID3D11ShaderResourceView * none[3] = {};
+        m_Context->PSSetShaderResources( 0, 3, none );
         m_Context->IASetInputLayout( m_SceneLayout.Get() );
         UINT stride = sizeof( TlVertex );
         UINT offset = 0;
@@ -8598,6 +8748,9 @@ namespace dx11z
             constants[59] = 1.0f;
             constants[60] = m_ConfigCarReflFresnel;
             constants[61] = m_CarReflLevelOffset;
+            const bool chain = m_ConfigCarReflBlurChain > 0 && m_BlurChainValid && m_BlurChainView;
+            constants[62] = chain ? 1.0f : 0.0f;
+            constants[63] = chain ? static_cast<float>(m_BlurDownLevels - 2) : 0.0f;
             std::memcpy( mapped.pData, constants, sizeof( constants ) );
             m_Context->Unmap( m_CarReflConstants.Get(), 0 );
         }
@@ -8653,9 +8806,10 @@ namespace dx11z
         ID3D11Buffer * constant_buffer = m_CarReflConstants.Get();
         m_Context->VSSetConstantBuffers( 0, 1, &constant_buffer );
         m_Context->PSSetConstantBuffers( 0, 1, &constant_buffer );
-        ID3D11ShaderResourceView * views[2] = { m_CarReflSourceView.Get(), pending.m_View };
+        ID3D11ShaderResourceView * views[3] = { m_CarReflSourceView.Get(), pending.m_View,
+            m_ConfigCarReflBlurChain > 0 && m_BlurChainValid ? m_BlurChainView.Get() : nullptr };
         ID3D11SamplerState * samplers[2] = { m_PresentSampler.Get(), pending.m_Sampler };
-        m_Context->PSSetShaderResources( 0, 2, views );
+        m_Context->PSSetShaderResources( 0, 3, views );
         m_Context->PSSetSamplers( 0, 2, samplers );
         const float factor[4] = {};
         m_Context->OMSetBlendState( m_CarReflBlend.Get(), factor, 0xFFFFFFFF );
