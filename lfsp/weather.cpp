@@ -1385,7 +1385,7 @@ bool lfsp_weather::WeatherFx(float * out)
 }
 
 // dx11z (Wetter w2): einmal je Bild, für den Reflexionsdurchgang der Autos. out[0] Schnee auf dem Auto 0…1, [1] Tropfen
-// (Dichte × Nässe) 0…1, [2] Zeit in Sekunden (Tropfen erscheinen und vergehen), [3…7] frei. 1 = etwas davon aktiv.
+// (Dichte × Nässe) 0…1, [2] Zeit in Sekunden (Tropfen erscheinen und vergehen), [3] SnowDebug, [4…7] frei. 1 = etwas davon aktiv.
 extern "C" __declspec(dllexport) int LfspWeatherCar(float * out)
 {
     return lfsp_weather::WeatherCar(out) ? 1 : 0;
@@ -1426,5 +1426,6 @@ bool lfsp_weather::WeatherCar(float * out)
     out[0] = g_carSnow;
     out[1] = g_carDrops * g_carWet;
     out[2] = static_cast<float>(now % 3600000u) / 1000.0f;
-    return out[0] > 0.0f || out[1] > 0.0f;
+    out[3] = static_cast<float>(g_snowDebug); // 3 = Testbild „oben“ am Auto (dx11z)
+    return out[0] > 0.0f || out[1] > 0.0f || g_snowDebug == 3;
 }
