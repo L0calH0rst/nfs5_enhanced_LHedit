@@ -11,6 +11,7 @@
 //    Haftgrenze aller vier Räder; KI-Soll-Tempo (AI_PlanRaceSpeed) × √Faktor, Verkehr über die stillgelegten
 //    Wetter-Schalter des Spiels (WEATHER ×0,9 in AI_GetMaxCornerSpeed, „aiwther“ in AI_SetCruiseSpeed).
 // 7. Schnee und Nässe auf dem Auto (CarSnow…, CarDrops…): Anteil über die Zeit, an dx11z über LfspWeatherCar.
+// 8. Nässe und Schneedecke der Strecke ([Wet], PLAN.md 16.1): im Spieltakt (64 Hz), an dx11z über LfspWeatherState.
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -32,6 +33,7 @@ namespace lfsp_weather
     bool NightSynthetic();
     bool WeatherFx(float * out16);
     bool WeatherCar(float * out8);
+    bool WeatherState(float * out8);
 }
 
 namespace
@@ -151,6 +153,22 @@ namespace
     float g_carSnow = 0.0f;
     float g_carWet = 0.0f;
     DWORD g_carTick = 0;
+    // Nässe und Schneedecke der Strecke ([Wet], PLAN.md 16.1): gilt für die ganze Strecke, nicht nur unter der Kamera
+    bool g_wetOn = false;
+    float g_wetSpeed = 0.1f;       // je Sekunde
+    float g_drySpeed = 0.02f;      // je Sekunde ohne Regen
+    float g_startWet = 0.8f;       // beim Rennstart, wenn es regnet
+    float g_snowSpeed = 0.01f;     // je Sekunde
+    float g_meltSpeed = 0.005f;    // je Sekunde ohne Schnee (bei Regen doppelt)
+    float g_startSnow = 0.6f;      // beim Rennstart, wenn es schneit
+    bool g_wetLog = false;         // [Debug] WeatherLog oder [Weather] Log: je Sekunde eine Zeile
+    float g_wetness = 0.0f;
+    float g_snowCover = 0.0f;
+    float g_preRain = 0.0f;        // Regen nach Menü/Sturm, vor der Abdeckung
+    float g_preSnow = 0.0f;
+    int g_wetStep = -1;            // Sim_gStepCount des letzten Schritts, -1 = Rennstart steht aus
+    int g_wetStartStep = 0;
+    DWORD g_wetLogTick = 0;
     int g_nightForce = -1;         // -1 nichts, 0 Tag, 1 Nacht (Wahl dieses Rennens)
     float g_skyDarken = 0.6f;      // 0…1: Anteil des Welt-Faktors, der auf den Himmel wirkt
     float g_lightBoost = 1.6f;     // Faktor auf Leuchtsprites (additive Draws) bei erzwungener Nacht
@@ -448,6 +466,7 @@ namespace
     }
 
     void UpdateGrip(); // Haftung, unten
+    void UpdateWet();  // Nässe, unten
 
     float __fastcall SkyRainHook(void * sky)
     {
@@ -474,7 +493,9 @@ namespace
         {
             v = 0.0f;
         }
+        g_preRain = v;
         g_lastRain = v * (1.0f - g_cover);
+        UpdateWet();
         return g_lastRain;
     }
 
@@ -491,8 +512,64 @@ namespace
         {
             v = g_snowAmount;
         }
+        g_preSnow = v;
         g_lastSnow = v * (1.0f - g_cover);
         return g_lastSnow;
+    }
+
+    // ---- Nässe und Schneedecke ([Wet], PLAN.md 16.1) ----
+    // Je Bild aus SkyRainHook (das Spiel fragt erst Schnee, dann Regen ab). Gerechnet in Schritten von Sim_gStepCount
+    // (64 Hz): steht im Pausenmenü still wie der Niederschlag. Ziel ist die Stärke vor der Abdeckung, im Tunnel trocknet
+    // die Strecke also nicht.
+    constexpr std::uintptr_t kStepCount = 0x606AC4; // Sim_gStepCount
+
+    void UpdateWet()
+    {
+        if (!g_wetOn)
+        {
+            return;
+        }
+        const int step = *reinterpret_cast<const int *>(kStepCount);
+        if (g_wetStep < 0)
+        {
+            g_wetness = g_preRain >= 0.2f ? std::fmin(g_startWet, 1.0f) : 0.0f;
+            g_snowCover = g_preSnow >= 0.2f ? std::fmin(g_startSnow, 1.0f) : 0.0f;
+            g_wetStep = step;
+            g_wetStartStep = step;
+            Log("Naesse: Rennstart, Regen %.2f, Schnee %.2f -> Naesse %.2f, Schneedecke %.2f", g_preRain, g_preSnow, g_wetness,
+                g_snowCover);
+        }
+        const int ticks = step - g_wetStep;
+        g_wetStep = step;
+        if (ticks > 0 && ticks <= 640) // rückwärts oder Sprung über 10 s (Wiederholung, Neustart): nur mitzählen
+        {
+            const float dt = ticks / 64.0f;
+            const float rain = std::fmax(0.0f, std::fmin(g_preRain, 1.0f));
+            const float snow = std::fmax(0.0f, std::fmin(g_preSnow, 1.0f));
+            if (g_wetness < rain)
+            {
+                g_wetness = std::fmin(g_wetness + g_wetSpeed * dt, rain);
+            }
+            else
+            {
+                g_wetness = std::fmax(g_wetness - g_drySpeed * dt, rain);
+            }
+            if (g_snowCover < snow)
+            {
+                g_snowCover = std::fmin(g_snowCover + g_snowSpeed * dt, snow);
+            }
+            else
+            {
+                g_snowCover = std::fmax(g_snowCover - g_meltSpeed * dt * (rain > 0.1f ? 2.0f : 1.0f), snow);
+            }
+        }
+        const DWORD now = timeGetTime();
+        if (g_wetLog && now - g_wetLogTick >= 1000)
+        {
+            g_wetLogTick = now;
+            Log("Naesse: Regen %.2f, Schnee %.2f, Naesse %.3f, Schneedecke %.3f, Abdeckung %.2f, Zeit %.1f s", g_preRain, g_preSnow,
+                g_wetness, g_snowCover, g_cover, (step - g_wetStartStep) / 64.0f);
+        }
     }
 
     // ---- Scheibentropfen (Tropfenobjekt, doc/re/13-VIDEO.md §8) ----
@@ -815,6 +892,9 @@ namespace
         g_carSnow = 0.0f; // jedes Rennen mit sauberem, trockenem Auto
         g_carWet = 0.0f;
         g_carTick = 0;
+        g_wetStep = -1; // Nässe beim ersten Bild des Rennens neu (StartWetness)
+        g_wetness = 0.0f;
+        g_snowCover = 0.0f;
         g_gripNow = 1.0f;
         if (g_gripOn)
         {
@@ -1161,6 +1241,24 @@ void lfsp_weather::Install(const char * ini, LogFn log)
     g_windStart = ReadFloat(ini, "DropWindStart", "30", 0.0f, 400.0f);
     g_windFull = ReadFloat(ini, "DropWindFull", "150", 0.0f, 400.0f);
     g_logOn = GetPrivateProfileIntA("Weather", "Log", 0, ini);
+    {
+        auto wet = [ini](const char * key, const char * fallback, float lo, float hi)
+        {
+            char text[32] = {};
+            GetPrivateProfileStringA("Wet", key, fallback, text, sizeof(text), ini);
+            return std::fmax(lo, std::fmin(static_cast<float>(std::atof(text)), hi));
+        };
+        g_wetOn = GetPrivateProfileIntA("Wet", "Enabled", 0, ini) != 0;
+        g_wetSpeed = wet("WetSpeed", "0.1", 0.001f, 10.0f);
+        g_drySpeed = wet("DrySpeed", "0.02", 0.0001f, 10.0f);
+        g_startWet = wet("StartWetness", "0.8", 0.0f, 1.0f);
+        g_snowSpeed = wet("SnowSpeed", "0.01", 0.0001f, 10.0f);
+        g_meltSpeed = wet("MeltSpeed", "0.005", 0.0001f, 10.0f);
+        g_startSnow = wet("StartSnowCover", "0.6", 0.0f, 1.0f);
+        g_wetLog = GetPrivateProfileIntA("Debug", "WeatherLog", 0, ini) != 0 || g_logOn != 0;
+        Log("Wetter: Naesse %d (nass %.3f/s, trocken %.3f/s, Start %.2f), Schneedecke (%.4f/s, Abbau %.4f/s, Start %.2f), Log %d",
+            g_wetOn ? 1 : 0, g_wetSpeed, g_drySpeed, g_startWet, g_snowSpeed, g_meltSpeed, g_startSnow, g_wetLog ? 1 : 0);
+    }
     Log("Wetter: Modus %d, Tageszeit %d, Menue %d, Regen %.2f, Schnee %.2f, Abdeckung %d (%.1f s), Tropfen %d (Wind %.2f, %.0f-%.0f km/h, "
         "Rutschen %.2f)",
         g_mode, g_timeMode, g_menu, g_rainAmount, g_snowAmount, g_coverOn, g_coverFade, g_dropsOn, g_dropWind, g_windStart,
@@ -1428,4 +1526,32 @@ bool lfsp_weather::WeatherCar(float * out)
     out[2] = static_cast<float>(now % 3600000u) / 1000.0f;
     out[3] = static_cast<float>(g_snowDebug); // 3 = Testbild „oben“ am Auto (dx11z)
     return out[0] > 0.0f || out[1] > 0.0f || g_snowDebug == 3;
+}
+
+// dx11z (16.1): einmal je Bild. out[0] Regen, [1] Schnee (nach Menü/Sturm, vor der Abdeckung), [2] Nässe der Strecke 0…1,
+// [3] Schneedecke 0…1, [4] Abdeckung über der Kamera (0 offen, 1 Dach), [5] Windstärke (0, Sturm: StormDropWind),
+// [6] frei, [7] Zeit seit Rennstart in s (Spieltakt). 1 = [Wet] Enabled und im Rennen.
+extern "C" __declspec(dllexport) int LfspWeatherState(float * out)
+{
+    return lfsp_weather::WeatherState(out) ? 1 : 0;
+}
+
+bool lfsp_weather::WeatherState(float * out)
+{
+    for (int i = 0; i < 8; ++i)
+    {
+        out[i] = 0.0f;
+    }
+    if (Log == nullptr || !g_wetOn || g_wetStep < 0 || *reinterpret_cast<const int *>(kFrontEnd) != 0)
+    {
+        return false;
+    }
+    out[0] = g_preRain;
+    out[1] = g_preSnow;
+    out[2] = g_wetness;
+    out[3] = g_snowCover;
+    out[4] = g_cover;
+    out[5] = StormMode(g_effMode) ? g_stormDropWind : 0.0f;
+    out[7] = (g_wetStep - g_wetStartStep) / 64.0f;
+    return true;
 }

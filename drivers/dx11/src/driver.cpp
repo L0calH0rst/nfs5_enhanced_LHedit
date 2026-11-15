@@ -9800,6 +9800,28 @@ namespace dx11z
             m_CarWeatherLight = m_CarWeatherLightNext * (NightNative() ? 0.35f : 1.0f);
             m_CarWeatherLightNext = 1.0f;
         }
+        // Wetness of the track (LfspWeatherState, LFSP v9t, PLAN.md 16.1): read once per frame, logged every 10 s, no effect yet.
+        {
+            using StateFn = int( __cdecl * )(float *);
+            static StateFn state_fn = nullptr;
+            static bool state_resolved = false;
+            if (!state_resolved)
+            {
+                state_resolved = true;
+                if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
+                    state_fn = reinterpret_cast<StateFn>(::GetProcAddress( lfsp, "LfspWeatherState" ));
+                Log( "Wet (dx11z wet w1): LFSP export LfspWeatherState %s", state_fn != nullptr ? "found" : "not available" );
+            }
+            m_WeatherStateOn = state_fn != nullptr && state_fn( m_WeatherState ) != 0;
+            const ULONGLONG now = ::GetTickCount64();
+            if (m_WeatherStateOn && now >= m_WeatherStateNextReport)
+            {
+                m_WeatherStateNextReport = now + 10000;
+                Log( "Wet: rain %.2f, snow %.2f, wetness %.3f, snow cover %.3f, roof %.2f, wind %.2f, time %.1f s",
+                    m_WeatherState[0], m_WeatherState[1], m_WeatherState[2], m_WeatherState[3], m_WeatherState[4], m_WeatherState[5],
+                    m_WeatherState[7] );
+            }
+        }
         m_WeatherGrade = false;
         if (m_WeatherFxOn)
         {

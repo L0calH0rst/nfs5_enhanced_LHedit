@@ -1294,6 +1294,11 @@ namespace dx11z
         bool m_CarWeatherOn = false;
         float m_CarWeatherLight = 1.0f;
         float m_CarWeatherLightNext = 1.0f;
+        // Wetness of the track (LFSP LfspWeatherState, PLAN.md 16.1): rain, snow, wetness, snow cover, roof, wind, -, time s.
+        // Only read and logged so far (16.2 uses it).
+        float m_WeatherState[8] = {};
+        bool m_WeatherStateOn = false;
+        ULONGLONG m_WeatherStateNextReport = 0;
         float m_CarUpVote = 0.0f; // > 0: "up" of the car (row 1 of object x view) points to the camera side, as expected
         std::uint64_t m_CarUpVotes[2] = {}; // draws with the camera on the "up" side, on the other side
         float m_ConfigCarDropCells = 48.0f; // '[Weather] CarDropCells' of lfsp.ini: drop cells per texture unit (larger = smaller drops)
