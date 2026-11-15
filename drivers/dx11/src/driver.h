@@ -1363,8 +1363,8 @@ namespace dx11z
         std::uint64_t m_CarFlowStats[2] = {}; // parts with a track, without (no camera, no matrix)
         float m_CarFlowMaxSpeed = 0.0f;
         int CarFlowTrackFor( const float model_view[16], bool mirrored );
-        float m_ConfigCarDropCells = 80.0f; // '[Weather] CarDropCells' of lfsp.ini: drop cells per metre on the car (larger = smaller drops)
-        float m_ConfigCarDropShine = 0.6f; // '[Weather] CarDropShine' of lfsp.ini: brightness of glint and bead (w7)
+        float m_ConfigCarDropCells = 110.0f; // '[Weather] CarDropCells' of lfsp.ini: drop cells per metre on the car (larger = smaller drops)
+        float m_ConfigCarDropShine = 1.0f; // '[Weather] CarDropShine' of lfsp.ini: brightness of glint and bead (w7)
         float m_ConfigCarSnowSoft = 1.0f; // '[Weather] CarSnowSoft' of lfsp.ini: evenness of the car snow (w9; w8: width of its edge)
         float m_ConfigCarSnowBright = 0.5f; // '[Weather] CarSnowBright' of lfsp.ini: brightness of the car snow (w8)
         float m_ConfigCarDropFlow = 0.005f; // '[Weather] CarDropFlow' of lfsp.ini: creep of the drops, m/s per m/s above 8 m/s (w6)
