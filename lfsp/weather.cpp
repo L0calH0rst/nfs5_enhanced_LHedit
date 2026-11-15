@@ -4,6 +4,9 @@
 // 2. Regen- und Schneestärke: Sky_InterpLerp18/20 (Wetterspur der Sky/<Strecke>.bin) ersetzt; Wahl aus dem Menü
 //    und Abdeckung (Brücke, Tunnel: Fläche des Kollisionsbaums über der Kamera) gehen ein.
 // 3. Scheibentropfen: nach R_WindshieldDropsTick wandern die Tropfen mit dem Fahrtwind über die Scheibe.
+// 4. Sturm und Gewitter (Menü): Regen voll, Himmel und Welt dunkler und kühler, mehr Nebel, stärkerer Fahrtwind; beim
+//    Gewitter Blitze (Helligkeit in dx11z über LfspWeatherFx) und Donner aus dem Spiel (Snd_QueueThunder).
+// 5. Schnee-Weiß: bei Schnee mischt dx11z die Streckenflächen Richtung Weiß (Werte ebenfalls über LfspWeatherFx).
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -23,6 +26,7 @@ namespace lfsp_weather
     bool NightGradeActive(float * rgb);
     bool NightGradeEx(float * out9);
     bool NightSynthetic();
+    bool WeatherFx(float * out16);
 }
 
 namespace
@@ -55,6 +59,8 @@ namespace
     constexpr std::uintptr_t kGameLoad      = 0x59D8E0; // File_GameLoadTagged, cdecl(pfad, pool) → Block
     constexpr std::uintptr_t kMemAllocTag   = 0x531CA0; // Mem_AllocTagged, cdecl(name, größe, pool)
     constexpr std::uintptr_t kMemFree       = 0x531F90; // Mem_Free, cdecl(block)
+    constexpr std::uintptr_t kQueueThunder  = 0x4A8340; // Snd_QueueThunder, cdecl(abzug, panorama): Probe 0x3DF + Zufall 0…8
+                                                        // (thunder_991…999, track.viv), Wartezeit 0x87 − abzug Takte (64 je s)
 
     // Eigene Text-IDs (die .loc-Tabellen kennen nur 16 Bit, das Spiel nutzt bis etwa 23000)
     constexpr unsigned kStrLabel    = 64000;
@@ -67,6 +73,8 @@ namespace
     constexpr unsigned kStrDay      = 64007;
     constexpr unsigned kStrNight    = 64008;
     constexpr unsigned kStrTimeHelp = 64009;
+    constexpr unsigned kStrStorm    = 64010;
+    constexpr unsigned kStrThunder  = 64011;
     constexpr std::uintptr_t kSelectSpec = 0x475D70; // Trk_SelectTrackSpec, cdecl(weather, time), aus R_InitRace
     constexpr std::uintptr_t kTimeVar    = 0x657A30; // TIME (Nachtflag), wird in Trk_DefaultTrackSpec ins Spec kopiert
     struct Text
@@ -79,19 +87,43 @@ namespace
         { "original", "Original" },
         { "rain", "Regen" },
         { "snow", "Schnee" },
-        { "Choose the weather: as on the track, rain, snow or random.",
-          "Wetter w\xE4hlen: wie auf der Strecke, Regen, Schnee oder Zufall." }, // Texte der FE in Windows-1252
+        { "Choose the weather: as on the track, rain, snow, storm, thunderstorm or random.",
+          "Wetter w\xE4hlen: wie auf der Strecke, Regen, Schnee, Sturm, Gewitter oder Zufall." }, // Texte der FE in Windows-1252
         { "random", "Zufall" },
         { "time of day", "Tageszeit" },
         { "day", "Tag" },
         { "dusk/dawn", "D\xE4mmerung" },
         { "Choose the time of day: as on the track, day, dusk/dawn or random.",
           "Tageszeit w\xE4hlen: wie auf der Strecke, Tag, D\xE4mmerung oder Zufall." },
+        { "storm", "Sturm" },
+        { "thunderstorm", "Gewitter" },
     };
 
     // ---- Einstellungen ----
-    int g_mode = 0;              // Menüwahl: 0 Original, 1 Regen, 2 Schnee, 3 Zufall
-    int g_effMode = 0;           // gilt im Rennen: 0…2 (bei Zufall je Rennstart gewürfelt)
+    int g_mode = 0;              // Menüwahl: 0 Original, 1 Regen, 2 Schnee, 3 Zufall, 4 Sturm, 5 Gewitter
+    int g_effMode = 0;           // gilt im Rennen: 0, 1, 2, 4, 5 (bei Zufall je Rennstart gewürfelt)
+    // Sturm und Gewitter ([Weather] Storm…, Lightning…, Thunder…)
+    bool g_stormOn = true;         // Sturm und Gewitter im Menü
+    bool g_randomStorm = true;     // Zufall würfelt auch Sturm und Gewitter
+    float g_stormRain = 1.0f;
+    float g_stormWorld[3] = { 0.74f, 0.77f, 0.82f };
+    float g_stormSky[3] = { 0.62f, 0.66f, 0.74f };
+    float g_stormFog = 2.0f;       // Exponent auf die Sicht durch den Nebel (1 = wie das Spiel)
+    float g_stormDropWind = 1.8f;  // Faktor auf DropWind
+    float g_lightMin = 6.0f;       // Sekunden zwischen Blitzen
+    float g_lightMax = 20.0f;
+    float g_lightWorld = 1.6f;     // Welt hell × (1 + Wert · Blitz)
+    float g_lightSky = 2.5f;
+    bool g_thunderOn = true;
+    float g_thunderMin = 0.4f;     // Sekunden vom Blitz bis zum Donner
+    float g_thunderMax = 2.8f;
+    // Schnee-Weiß ([Weather] SnowWhite…)
+    float g_snowWhite = 0.25f;     // 0 = aus
+    float g_snowDesat = 0.3f;
+    float g_snowSlope = 0.0f;      // 0 = gleichmäßig, 1 = nur nach oben zeigende Flächen
+    float g_snowColour[3] = { 0.94f, 0.96f, 1.0f };
+    int g_snowDebug = 0;
+    float g_rawSnow = 0.0f;        // Schnee der Strecke (Wetterspur), ohne Menü und Abdeckung
     int g_nightForce = -1;         // -1 nichts, 0 Tag, 1 Nacht (Wahl dieses Rennens)
     float g_skyDarken = 0.6f;      // 0…1: Anteil des Welt-Faktors, der auf den Himmel wirkt
     float g_lightBoost = 1.6f;     // Faktor auf Leuchtsprites (additive Draws) bei erzwungener Nacht
@@ -383,6 +415,11 @@ namespace
         return reinterpret_cast<LerpFn>(lerp)(track, w);
     }
 
+    bool StormMode(int mode)
+    {
+        return mode == 4 || mode == 5;
+    }
+
     float __fastcall SkyRainHook(void * sky)
     {
         float v = SkyValue(sky, kSkyLerpRain);
@@ -398,6 +435,10 @@ namespace
         {
             v = g_rainAmount;
         }
+        else if (StormMode(g_effMode))
+        {
+            v = g_stormRain;
+        }
         else if (g_effMode == 2)
         {
             v = 0.0f;
@@ -409,8 +450,9 @@ namespace
     float __fastcall SkySnowHook(void * sky)
     {
         float v = SkyValue(sky, kSkyLerpSnow);
+        g_rawSnow = v;
         UpdateCover();
-        if (g_effMode == 1)
+        if (g_effMode == 1 || StormMode(g_effMode))
         {
             v = 0.0f;
         }
@@ -498,7 +540,7 @@ namespace
             const float k = 0.6f + 0.8f * ((static_cast<unsigned>(i) * 2654435761u >> 16) & 0xFFFF) / 65535.0f;
             // Rutschen (nur große Regentropfen, nur ohne Fahrtwind) und Fahrtwind getrennt, jeweils mit eigenem Tempo
             const float slide = (!snow && k > 1.1f) ? g_dropSlide * (1.0f - air) : 0.0f;
-            const float blow = g_dropWind * air;
+            const float blow = g_dropWind * air * (StormMode(g_effMode) ? g_stormDropWind : 1.0f);
             float move[3] = {};
             for (int a = 0; a < 3; ++a)
             {
@@ -534,13 +576,54 @@ namespace
     // ---- Menü: Accessoren Track1.Weather und Track1.TimeOfDay ----
     // Wie Track1.Traffic in FEdaTrack__Initialize: FELocalizedTextAccessor mit nullterminierter Liste von Text-IDs,
     // aktueller Eintrag +0x18, Rückruf +0x10 (cdecl(accessor)) bei jeder Wahl (FEPositionableAccessor__SetCurrent).
-    int g_weatherStrings[] = { static_cast<int>(kStrOriginal), static_cast<int>(kStrRain),
-                               static_cast<int>(kStrSnow), static_cast<int>(kStrRandom), 0 };
+    // Liste des Menüs (Text-IDs) und je Eintrag der Wert für [Weather] Mode; „Zufall“ bleibt der letzte Eintrag,
+    // der Wert 3 bleibt Zufall wie vor Sturm und Gewitter. Ohne [Weather] Storm fehlen die beiden Einträge.
+    int g_weatherStrings[8] = { static_cast<int>(kStrOriginal), static_cast<int>(kStrRain), static_cast<int>(kStrSnow),
+                                static_cast<int>(kStrStorm), static_cast<int>(kStrThunder), static_cast<int>(kStrRandom), 0 };
+    int g_weatherModes[8] = { 0, 1, 2, 4, 5, 3 };
+    int g_weatherCount = 6;
+
+    void BuildWeatherList()
+    {
+        if (g_stormOn)
+        {
+            return;
+        }
+        const int strings[] = { static_cast<int>(kStrOriginal), static_cast<int>(kStrRain), static_cast<int>(kStrSnow),
+                                static_cast<int>(kStrRandom), 0 };
+        const int modes[] = { 0, 1, 2, 3 };
+        std::memcpy(g_weatherStrings, strings, sizeof(strings));
+        std::memcpy(g_weatherModes, modes, sizeof(modes));
+        g_weatherCount = 4;
+    }
+
+    int WeatherIndex(int mode)
+    {
+        for (int i = 0; i < g_weatherCount; ++i)
+        {
+            if (g_weatherModes[i] == mode)
+            {
+                return i;
+            }
+        }
+        return 0;
+    }
     int g_timeStrings[] = { static_cast<int>(kStrOriginal), static_cast<int>(kStrDay),
                             static_cast<int>(kStrNight), static_cast<int>(kStrRandom), 0 };
     void * g_acc = nullptr;
     void * g_accTime = nullptr;
     bool g_menuReady = false;
+
+    // Blitze beim Gewitter (LfspWeatherFx, einmal je Bild aus dx11z): bis zu 3 Lichtstöße je Blitz, abklingend.
+    DWORD g_flashNext = 0;   // timeGetTime des nächsten Blitzes, 0 = noch nicht geplant
+    DWORD g_flashStart = 0;
+    struct Pulse
+    {
+        float at;   // Sekunden nach dem Beginn
+        float amp;
+    };
+    Pulse g_pulses[3] = {};
+    int g_pulseCount = 0;
 
     // Wahl 3 = Zufall: je Rennstart neu würfeln (SelectSpecHook). Sonst gilt die Wahl selbst.
     unsigned g_rng = 0;
@@ -556,11 +639,12 @@ namespace
 
     void __cdecl OnWeatherChanged(void * acc)
     {
-        const int mode = At<int>(acc, 0x18);
-        if (mode == g_mode || mode < 0 || mode > 3)
+        const int index = At<int>(acc, 0x18);
+        if (index < 0 || index >= g_weatherCount || g_weatherModes[index] == g_mode)
         {
             return;
         }
+        const int mode = g_weatherModes[index];
         g_mode = mode;
         g_effMode = mode == 3 ? 0 : mode;
         char text[8] = {};
@@ -622,9 +706,11 @@ namespace
         g_nightSynthetic = false;
         if (g_mode == 3)
         {
-            g_effMode = static_cast<int>(Roll(3));
+            static const int kAll[] = { 0, 1, 2, 4, 5 };
+            g_effMode = kAll[Roll(g_stormOn && g_randomStorm ? 5u : 3u)];
             Log("Wetter: Zufall -> Modus %d", g_effMode);
         }
+        g_flashNext = 0; // erster Blitz erst einige Sekunden nach dem Start
         if (g_timeMode != 0)
         {
             const int night = g_timeMode == 3 ? static_cast<int>(Roll(2)) : g_timeMode - 1;
@@ -666,7 +752,7 @@ namespace
         {
             return;
         }
-        g_acc = MakeAccessor("Track1.Weather", g_weatherStrings, &OnWeatherChanged, g_mode);
+        g_acc = MakeAccessor("Track1.Weather", g_weatherStrings, &OnWeatherChanged, WeatherIndex(g_mode));
         g_accTime = MakeAccessor("Track1.TimeOfDay", g_timeStrings, &OnTimeChanged, g_timeMode);
     }
 
@@ -874,6 +960,16 @@ namespace
         return std::fmax(lo, std::fmin(static_cast<float>(std::atof(text)), hi));
     }
 
+    void ReadColour(const char * ini, const char * key, const char * fallback, float * rgb)
+    {
+        char text[32] = {};
+        GetPrivateProfileStringA("Weather", key, fallback, text, sizeof(text), ini);
+        const unsigned long colour = std::strtoul(text, nullptr, 16);
+        rgb[0] = ((colour >> 16) & 0xFF) / 255.0f;
+        rgb[1] = ((colour >> 8) & 0xFF) / 255.0f;
+        rgb[2] = (colour & 0xFF) / 255.0f;
+    }
+
     std::string ReadString(const char * ini, const char * key, const char * fallback)
     {
         char text[64] = {};
@@ -891,8 +987,28 @@ void lfsp_weather::Install(const char * ini, LogFn log)
         Log("Wetter: aus");
         return;
     }
+    g_stormOn = GetPrivateProfileIntA("Weather", "Storm", 1, ini) != 0;
     g_mode = GetPrivateProfileIntA("Weather", "Mode", 0, ini);
-    g_mode = g_mode < 0 || g_mode > 3 ? 0 : g_mode;
+    g_mode = g_mode < 0 || g_mode > (g_stormOn ? 5 : 3) ? 0 : g_mode;
+    BuildWeatherList();
+    g_randomStorm = GetPrivateProfileIntA("Weather", "RandomStorm", 1, ini) != 0;
+    g_stormRain = ReadFloat(ini, "StormRain", "1.0", 0.0f, 1.0f);
+    ReadColour(ini, "StormLight", "BDC4D1", g_stormWorld);
+    ReadColour(ini, "StormSky", "9EA8BD", g_stormSky);
+    g_stormFog = ReadFloat(ini, "StormFog", "2.0", 1.0f, 8.0f);
+    g_stormDropWind = ReadFloat(ini, "StormDropWind", "1.8", 0.0f, 5.0f);
+    g_lightMin = ReadFloat(ini, "LightningMin", "6", 1.0f, 300.0f);
+    g_lightMax = std::fmax(g_lightMin, ReadFloat(ini, "LightningMax", "20", 1.0f, 600.0f));
+    g_lightWorld = ReadFloat(ini, "LightningWorld", "1.6", 0.0f, 10.0f);
+    g_lightSky = ReadFloat(ini, "LightningSky", "2.5", 0.0f, 10.0f);
+    g_thunderOn = GetPrivateProfileIntA("Weather", "Thunder", 1, ini) != 0;
+    g_thunderMin = ReadFloat(ini, "ThunderDelayMin", "0.4", 0.0f, 10.0f);
+    g_thunderMax = std::fmax(g_thunderMin, ReadFloat(ini, "ThunderDelayMax", "2.8", 0.0f, 10.0f));
+    g_snowWhite = ReadFloat(ini, "SnowWhite", "0.25", 0.0f, 1.0f);
+    g_snowDesat = ReadFloat(ini, "SnowDesaturate", "0.3", 0.0f, 1.0f);
+    g_snowSlope = ReadFloat(ini, "SnowSlope", "0", 0.0f, 1.0f);
+    ReadColour(ini, "SnowColour", "F0F5FF", g_snowColour);
+    g_snowDebug = GetPrivateProfileIntA("Weather", "SnowDebug", 0, ini);
     g_effMode = g_mode == 3 ? 0 : g_mode;
     g_nightGrade = GetPrivateProfileIntA("Weather", "NightGrade", 1, ini) != 0;
     {
@@ -929,6 +1045,11 @@ void lfsp_weather::Install(const char * ini, LogFn log)
         "Rutschen %.2f)",
         g_mode, g_timeMode, g_menu, g_rainAmount, g_snowAmount, g_coverOn, g_coverFade, g_dropsOn, g_dropWind, g_windStart,
         g_windFull, g_dropSlide);
+    Log("Wetter: Sturm %d (Regen %.2f, Licht %.2f %.2f %.2f, Himmel %.2f %.2f %.2f, Nebel %.2f, Fahrtwind x%.2f), Blitze %.0f-%.0f s "
+        "(Welt %.2f, Himmel %.2f), Donner %d (%.1f-%.1f s), Schnee-Weiss %.2f (Entsaettigen %.2f, Neigung %.2f, Test %d)",
+        g_stormOn ? 1 : 0, g_stormRain, g_stormWorld[0], g_stormWorld[1], g_stormWorld[2], g_stormSky[0], g_stormSky[1], g_stormSky[2],
+        g_stormFog, g_stormDropWind, g_lightMin, g_lightMax, g_lightWorld, g_lightSky, g_thunderOn ? 1 : 0, g_thunderMin, g_thunderMax,
+        g_snowWhite, g_snowDesat, g_snowSlope, g_snowDebug);
 
     static const unsigned char kSkyBytes[] = { 0x51, 0x56, 0x8B, 0xF1, 0x8B, 0x46, 0x50 };
     PatchJump("Regen (Sky_InterpLerp18)", kSkyRain, kSkyBytes, sizeof(kSkyBytes), reinterpret_cast<void *>(&SkyRainHook));
@@ -1023,4 +1144,106 @@ bool lfsp_weather::NightGradeEx(float * out)
         out[6 + i] = g_lightBoost;
     }
     return true;
+}
+
+// dx11z (Wetter w1): einmal je Bild. out[0…2] Faktor Welt, [3…5] Faktor Himmel (Sturm, Blitz), [6] Nebel-Exponent,
+// [7] Schnee-Weiß (0 = aus), [8] Entsättigen, [9] Neigung (0 gleichmäßig … 1 nur Flächen nach oben), [10] Testbild,
+// [11…13] Schneefarbe, [14] Blitz 0…1, [15] Modus. 1 = etwas davon aktiv.
+extern "C" __declspec(dllexport) int LfspWeatherFx(float * out)
+{
+    return lfsp_weather::WeatherFx(out) ? 1 : 0;
+}
+
+bool lfsp_weather::WeatherFx(float * out)
+{
+    for (int i = 0; i < 16; ++i)
+    {
+        out[i] = i < 6 ? 1.0f : 0.0f;
+    }
+    out[6] = 1.0f;
+    out[15] = static_cast<float>(g_effMode);
+    if (Log == nullptr || *reinterpret_cast<const int *>(kFrontEnd) != 0)
+    {
+        g_flashNext = 0;
+        return false;
+    }
+    bool active = false;
+    if (StormMode(g_effMode))
+    {
+        active = true;
+        for (int i = 0; i < 3; ++i)
+        {
+            out[i] = g_stormWorld[i];
+            out[3 + i] = g_stormSky[i];
+        }
+        out[6] = g_stormFog;
+    }
+    if (g_effMode == 5 && (g_lightWorld > 0.0f || g_lightSky > 0.0f))
+    {
+        const DWORD now = timeGetTime();
+        if (g_flashNext == 0)
+        {
+            g_flashNext = now + static_cast<DWORD>(1000.0f * (g_lightMin + (g_lightMax - g_lightMin) * Roll(1000) / 999.0f));
+        }
+        else if (static_cast<int>(now - g_flashNext) >= 0)
+        {
+            // Neuer Blitz: 1 bis 3 Stöße, der erste am hellsten
+            g_flashStart = now;
+            g_pulseCount = 1 + static_cast<int>(Roll(3));
+            float at = 0.0f;
+            for (int i = 0; i < g_pulseCount; ++i)
+            {
+                g_pulses[i].at = at;
+                g_pulses[i].amp = i == 0 ? 1.0f : 0.45f + 0.45f * Roll(100) / 99.0f;
+                at += 0.07f + 0.12f * Roll(100) / 99.0f;
+            }
+            g_flashNext = now + static_cast<DWORD>(1000.0f * (g_lightMin + (g_lightMax - g_lightMin) * Roll(1000) / 999.0f));
+            if (g_thunderOn)
+            {
+                // Takte bis zum Donner (64 je Sekunde): Snd_QueueThunder wartet 0x87 − abzug Takte, Snd_PlayQueued
+                // (Snd_RaceTick) lädt die Probe in der Wartezeit vor und spielt sie dann.
+                const float delay = g_thunderMin + (g_thunderMax - g_thunderMin) * Roll(1000) / 999.0f;
+                const int ticks = static_cast<int>(delay * 64.0f) + 2;
+                using ThunderFn = void (__cdecl *)(int reduction, int pan);
+                reinterpret_cast<ThunderFn>(kQueueThunder)(0x87 - ticks, static_cast<int>(Roll(65536)));
+            }
+            if (g_logOn)
+            {
+                Log("Wetter: Blitz (%d Stoesse), naechster in %.1f s", g_pulseCount, (g_flashNext - now) / 1000.0f);
+            }
+        }
+        const float t = (now - g_flashStart) / 1000.0f;
+        float flash = 0.0f;
+        for (int i = 0; i < g_pulseCount; ++i)
+        {
+            const float d = t - g_pulses[i].at;
+            if (d >= 0.0f && d < 0.6f)
+            {
+                flash = std::fmax(flash, g_pulses[i].amp * std::exp(-d / 0.07f));
+            }
+        }
+        if (flash > 0.002f)
+        {
+            out[14] = flash;
+            for (int i = 0; i < 3; ++i)
+            {
+                out[i] *= 1.0f + g_lightWorld * flash;
+                out[3 + i] *= 1.0f + g_lightSky * flash;
+            }
+        }
+    }
+    // Schnee-Weiß bei Schnee aus dem Menü oder auf einer Schneestrecke (Wetterspur), nicht bei Regen oder Sturm
+    const float snow = g_effMode == 2 ? 1.0f : g_effMode == 0 ? std::fmin(g_rawSnow * 2.0f, 1.0f) : 0.0f;
+    if (g_snowWhite > 0.0f && snow > 0.0f)
+    {
+        active = true;
+        out[7] = g_snowWhite * snow;
+        out[8] = g_snowDesat * snow;
+        out[9] = g_snowSlope;
+        out[10] = static_cast<float>(g_snowDebug);
+        out[11] = g_snowColour[0];
+        out[12] = g_snowColour[1];
+        out[13] = g_snowColour[2];
+    }
+    return active;
 }
