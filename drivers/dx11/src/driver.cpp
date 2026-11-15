@@ -789,6 +789,13 @@ namespace dx11z
             m_Device->CreateInputLayout( car_layout, static_cast<UINT>(std::size( car_layout )), vs->GetBufferPointer(), vs->GetBufferSize(),
                 m_CarReflLayout.Put() );
         }
+        // Own rain and snow (16.4 / 16.5).
+        if (build( shaders::PRECIP, sizeof( shaders::PRECIP ) - 1, "PrecipVS", "vs_4_0", vs ) &&
+            build( shaders::PRECIP, sizeof( shaders::PRECIP ) - 1, "PrecipPS", "ps_4_0", ps ))
+        {
+            m_Device->CreateVertexShader( vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, m_PrecipVs.Put() );
+            m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_PrecipPs.Put() );
+        }
         if (build( shaders::CAR_DOWN, sizeof( shaders::CAR_DOWN ) - 1, "MainPS", "ps_4_0", ps ))
         {
             m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_CarReflDownPs.Put() );
@@ -1668,14 +1675,26 @@ namespace dx11z
             ::GetPrivateProfileStringA( "Weather", "SnowWhite", "0.25", snow, sizeof( snow ), lights_ini.c_str() );
             m_ConfigSnowWhite = ::GetPrivateProfileIntA( "Weather", "Enabled", 1, lights_ini.c_str() ) != 0 && std::atof( snow ) > 0.0;
             char cells[32] = {};
-            ::GetPrivateProfileStringA( "Weather", "CarDropCells", "40", cells, sizeof( cells ), lights_ini.c_str() );
+            ::GetPrivateProfileStringA( "Weather", "CarDropCells", "80", cells, sizeof( cells ), lights_ini.c_str() );
             m_ConfigCarDropCells = std::clamp( static_cast<float>(std::atof( cells )), 4.0f, 400.0f );
             char flow[32] = {};
             ::GetPrivateProfileStringA( "Weather", "CarDropFlow", "0.005", flow, sizeof( flow ), lights_ini.c_str() );
             m_ConfigCarDropFlow = std::clamp( static_cast<float>(std::atof( flow )), 0.0f, 0.1f );
             char shine[32] = {};
-            ::GetPrivateProfileStringA( "Weather", "CarDropShine", "1.0", shine, sizeof( shine ), lights_ini.c_str() );
+            ::GetPrivateProfileStringA( "Weather", "CarDropShine", "0.6", shine, sizeof( shine ), lights_ini.c_str() );
             m_ConfigCarDropShine = std::clamp( static_cast<float>(std::atof( shine )), 0.0f, 5.0f );
+            {
+                char value[32] = {};
+                m_ConfigPrecip = ::GetPrivateProfileIntA( "Weather", "Precip", 1, lights_ini.c_str() );
+                ::GetPrivateProfileStringA( "Weather", "PrecipRain", "7000", value, sizeof( value ), lights_ini.c_str() );
+                m_ConfigPrecipRain = std::clamp( static_cast<float>(std::atof( value )), 0.0f, 60000.0f );
+                ::GetPrivateProfileStringA( "Weather", "PrecipSnow", "5000", value, sizeof( value ), lights_ini.c_str() );
+                m_ConfigPrecipSnow = std::clamp( static_cast<float>(std::atof( value )), 0.0f, 60000.0f );
+                ::GetPrivateProfileStringA( "Weather", "PrecipBright", "1.0", value, sizeof( value ), lights_ini.c_str() );
+                m_ConfigPrecipBright = std::clamp( static_cast<float>(std::atof( value )), 0.0f, 4.0f );
+                Log( "Precipitation (dx11z p2): %s, rain %.0f streaks, snow %.0f flakes, bright %.2f", m_ConfigPrecip > 0 ? "own" : "the game's",
+                    m_ConfigPrecipRain, m_ConfigPrecipSnow, m_ConfigPrecipBright );
+            }
             char snow_soft[32] = {};
             ::GetPrivateProfileStringA( "Weather", "CarSnowSoft", "1.0", snow_soft, sizeof( snow_soft ), lights_ini.c_str() );
             m_ConfigCarSnowSoft = std::clamp( static_cast<float>(std::atof( snow_soft )), 0.0f, 5.0f );
@@ -6817,8 +6836,8 @@ namespace dx11z
         )
         {
             Driver & driver = Driver::GetInstance();
-            driver.OnPrecipDraw( 1, precipitation, true );
-            reinterpret_cast<PrecipDrawFn>(PRECIP_DRAW)(precipitation);
+            if (!driver.OnPrecipDraw( 1, precipitation, true ))
+                reinterpret_cast<PrecipDrawFn>(PRECIP_DRAW)(precipitation);
             driver.OnPrecipDraw( 1, precipitation, false );
         }
 
@@ -6827,8 +6846,8 @@ namespace dx11z
         )
         {
             Driver & driver = Driver::GetInstance();
-            driver.OnPrecipDraw( 2, precipitation, true );
-            reinterpret_cast<PrecipDrawFn>(PRECIP_DRAW)(precipitation);
+            if (!driver.OnPrecipDraw( 2, precipitation, true ))
+                reinterpret_cast<PrecipDrawFn>(PRECIP_DRAW)(precipitation);
             driver.OnPrecipDraw( 2, precipitation, false );
         }
 
@@ -7163,11 +7182,11 @@ namespace dx11z
             return;
         const bool rain = PatchCall( PRECIP_RAIN_CALL, PRECIP_DRAW, reinterpret_cast<const void *>(&PrecipRainHook) );
         const bool snow = PatchCall( PRECIP_SNOW_CALL, PRECIP_DRAW, reinterpret_cast<const void *>(&PrecipSnowHook) );
-        Log( "Precipitation (dx11z p1, measure): rain draw %s at %08X, snow draw %s at %08X", rain ? "marked" : "not marked (call does not match)",
+        Log( "Precipitation (dx11z p2): rain draw %s at %08X, snow draw %s at %08X", rain ? "marked" : "not marked (call does not match)",
             static_cast<unsigned>(PRECIP_RAIN_CALL), snow ? "marked" : "not marked (call does not match)", static_cast<unsigned>(PRECIP_SNOW_CALL) );
     }
 
-    void Driver::OnPrecipDraw(
+    bool Driver::OnPrecipDraw(
         int kind,
         const void * precipitation,
         bool begin
@@ -7192,10 +7211,13 @@ namespace dx11z
                     for (int h = 0; h < s.m_HashCount; ++h)
                         std::snprintf( hashes + std::strlen( hashes ), sizeof( hashes ) - std::strlen( hashes ), "%s%08X", h ? "," : "",
                             static_cast<unsigned>(s.m_Hashes[h]) );
-                    Log( "Precipitation %s: marks %llu (with particles %llu, most %d), draws inside %llu, vertices %llu, indices %llu, "
+                    Log( "Precipitation %s: own draws %llu (%llu particles each on average); "
+                        "marks %llu (with particles %llu, most %d), game draws inside %llu, vertices %llu, indices %llu, "
                         "textures %s, blend %u (%u/%u), z enable %u write %u func %u, cull %u, fog %u, queue list %d, primitive %d, "
                         "diffuse %08X, box x %.0f..%.0f y %.0f..%.0f, rhw %.4f..%.4f, z %.4f..%.4f",
-                        names[k], static_cast<unsigned long long>(s.m_Marks), static_cast<unsigned long long>(s.m_MarksWithParticles),
+                        names[k], static_cast<unsigned long long>(m_PrecipOwn[k]),
+                        static_cast<unsigned long long>(m_PrecipOwn[k] ? m_PrecipOwnInstances[k] / m_PrecipOwn[k] : 0),
+                        static_cast<unsigned long long>(s.m_Marks), static_cast<unsigned long long>(s.m_MarksWithParticles),
                         s.m_ParticlesMax, static_cast<unsigned long long>(s.m_Draws), static_cast<unsigned long long>(s.m_Vertices),
                         static_cast<unsigned long long>(s.m_Indices), s.m_HashCount ? hashes : "-", s.m_Blend, s.m_Src, s.m_Dst,
                         s.m_ZEnable, s.m_ZWrite, s.m_ZFunc, s.m_Cull, s.m_Fog, s.m_QueueList, s.m_Primitive,
@@ -7204,8 +7226,10 @@ namespace dx11z
                 }
                 m_PrecipStats[0] = PrecipStats();
                 m_PrecipStats[1] = PrecipStats();
+                m_PrecipOwn[0] = m_PrecipOwn[1] = 0;
+                m_PrecipOwnInstances[0] = m_PrecipOwnInstances[1] = 0;
             }
-            return;
+            return false;
         }
         m_PrecipMark = kind;
         PrecipStats & s = m_PrecipStats[kind - 1];
@@ -7216,6 +7240,180 @@ namespace dx11z
             ++s.m_MarksWithParticles;
             s.m_ParticlesMax = std::max( s.m_ParticlesMax, particles );
         }
+        if (m_ConfigPrecip > 0 && PrecipDrawOwn( kind, precipitation ))
+        {
+            m_PrecipMark = 0;
+            return true;
+        }
+        return false;
+    }
+
+    // Own rain and snow (16.4 / 16.5). The view of the game is at the origin here (R_WeatherUpdateDraw); the precipitation
+    // object keeps the camera of this frame: rows right, up, forward at + 0x85CC, position at + 0x85F0 (R_UpdatePrecipitation).
+    // Strength at + 0 (rain or snow 0..1 of the sky track, after LFSP's menu and cover). false: the game draws its own.
+    bool Driver::PrecipDrawOwn(
+        int kind,
+        const void * precipitation
+    )
+    {
+        if (!m_PrecipVs || !m_PrecipPs || !m_FrameView)
+            return false;
+        const auto * object = static_cast<const std::uint8_t *>(precipitation);
+        float strength = 0.0f;
+        float camera[12] = {};
+        if (!SafeCopy( object, &strength, 4 ) || !SafeCopy( object + 0x85CC, camera, sizeof( camera ) ))
+            return false;
+        for (int r = 0; r < 3; ++r)
+        {
+            const float length = camera[r * 3] * camera[r * 3] + camera[r * 3 + 1] * camera[r * 3 + 1] + camera[r * 3 + 2] * camera[r * 3 + 2];
+            if (!(length > 0.9f && length < 1.1f))
+                return false;
+        }
+        float clip_of_view[16] = {}, view_of_clip[16] = {}, viewport[4] = {};
+        if (!ReadCamera( clip_of_view, view_of_clip, viewport ))
+            return false;
+        strength = std::clamp( strength, 0.0f, 1.0f );
+        const float count_max = kind == 1 ? m_ConfigPrecipRain : m_ConfigPrecipSnow;
+        const UINT instances = static_cast<UINT>(strength * count_max);
+        if (instances == 0)
+            return true; // nothing falls: the game's few particles stay away too
+
+        // Camera velocity once per frame from its place between game steps (64 Hz).
+        if (m_PrecipCamFlip != m_FlipCount)
+        {
+            m_PrecipCamFlip = m_FlipCount;
+            int step = 0;
+            SafeCopy( reinterpret_cast<const void *>(0x00606AC4), &step, 4 );
+            const float * position = camera + 9;
+            if (m_PrecipCamHave && step != m_PrecipCamStep)
+            {
+                const int steps = step - m_PrecipCamStep;
+                const float dt = static_cast<float>(steps) / 64.0f;
+                float velocity[3] = {};
+                float speed2 = 0.0f;
+                for (int j = 0; j < 3; ++j)
+                {
+                    velocity[j] = (position[j] - m_PrecipCamPos[j]) / std::max( dt, 1e-3f );
+                    speed2 += velocity[j] * velocity[j];
+                }
+                const bool jump = steps < 0 || steps > 64 || speed2 > 120.0f * 120.0f;
+                for (int j = 0; j < 3; ++j)
+                    m_PrecipCamVel[j] = jump ? 0.0f : m_PrecipCamVel[j] + (velocity[j] - m_PrecipCamVel[j]) * std::min( 1.0f, dt * 6.0f );
+            }
+            std::memcpy( m_PrecipCamPos, position, sizeof( m_PrecipCamPos ) );
+            m_PrecipCamStep = step;
+            m_PrecipCamHave = true;
+        }
+
+        if (!m_PrecipConstants)
+        {
+            D3D11_BUFFER_DESC desc = {};
+            desc.ByteWidth = 256;
+            desc.Usage = D3D11_USAGE_DYNAMIC;
+            desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            m_Device->CreateBuffer( &desc, nullptr, m_PrecipConstants.Put() );
+        }
+        if (!m_PrecipBlend)
+        {
+            D3D11_BLEND_DESC desc = {};
+            auto & target = desc.RenderTarget[0];
+            target.BlendEnable = TRUE;
+            target.SrcBlend = D3D11_BLEND_SRC_ALPHA;
+            target.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+            target.BlendOp = D3D11_BLEND_OP_ADD;
+            target.SrcBlendAlpha = D3D11_BLEND_ZERO;
+            target.DestBlendAlpha = D3D11_BLEND_ONE;
+            target.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            target.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+            m_Device->CreateBlendState( &desc, m_PrecipBlend.Put() );
+        }
+        if (!m_PrecipDepth)
+        {
+            D3D11_DEPTH_STENCIL_DESC desc = {};
+            desc.DepthEnable = TRUE;
+            desc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+            desc.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+            m_Device->CreateDepthStencilState( &desc, m_PrecipDepth.Put() );
+        }
+        if (!m_PrecipRaster)
+        {
+            D3D11_RASTERIZER_DESC desc = {};
+            desc.FillMode = D3D11_FILL_SOLID;
+            desc.CullMode = D3D11_CULL_NONE;
+            desc.DepthClipEnable = TRUE;
+            desc.ScissorEnable = TRUE;
+            desc.MultisampleEnable = TRUE;
+            m_Device->CreateRasterizerState( &desc, m_PrecipRaster.Put() );
+        }
+        if (!m_PrecipConstants || !m_PrecipBlend || !m_PrecipDepth || !m_PrecipRaster)
+            return false;
+
+        // Wind: a light breeze, in the storm '[Weather] StormDropWind' (LfspWeatherState, else its default 1.8) x 3 m/s.
+        const bool storm = m_WeatherFxOn && (m_WeatherFx[15] > 3.5f);
+        const float storm_wind = m_WeatherStateOn && m_WeatherState[5] > 0.0f ? m_WeatherState[5] : 1.8f;
+        const float wind = 0.8f + (storm ? storm_wind * 3.0f : 0.0f);
+        const bool rain = kind == 1;
+        const float fall = rain ? 9.0f : 1.1f;
+        const float light = m_CarWeatherLight * m_ConfigPrecipBright;
+        const float flash = m_WeatherFxOn ? m_WeatherFx[14] : 0.0f;
+
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if (FAILED( m_Context->Map( m_PrecipConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
+            return false;
+        float c[64] = {};
+        c[2] = 1.0f / static_cast<float>(std::max( m_Width, 1 ));
+        c[3] = 1.0f / static_cast<float>(std::max( m_Height, 1 ));
+        std::memcpy( c + 4, viewport, sizeof( viewport ) );
+        std::memcpy( c + 8, clip_of_view, sizeof( clip_of_view ) );
+        std::memcpy( c + 24, camera + 9, sizeof( float ) * 3 );
+        c[27] = rain ? 22.0f : 26.0f; // box
+        std::memcpy( c + 28, camera, sizeof( float ) * 3 );
+        c[31] = static_cast<float>(kind);
+        std::memcpy( c + 32, camera + 3, sizeof( float ) * 3 );
+        c[35] = strength;
+        std::memcpy( c + 36, camera + 6, sizeof( float ) * 3 );
+        c[39] = static_cast<float>(static_cast<double>(::GetTickCount64() % 3600000ull) / 1000.0);
+        c[40] = wind * 0.94f * (rain ? 1.0f : 0.8f);
+        c[41] = -fall;
+        c[42] = wind * 0.34f * (rain ? 1.0f : 0.8f);
+        c[43] = rain ? 0.035f : 0.02f; // exposure
+        std::memcpy( c + 44, m_PrecipCamVel, sizeof( m_PrecipCamVel ) );
+        c[47] = rain ? 0.0035f : 0.018f; // width
+        c[48] = (rain ? 0.72f : 0.92f) * light;
+        c[49] = (rain ? 0.75f : 0.94f) * light;
+        c[50] = (rain ? 0.8f : 1.0f) * light;
+        c[51] = std::min( (rain ? 0.28f : 0.75f) * m_ConfigPrecipBright, 1.0f );
+        c[52] = flash;
+        c[53] = rain ? 1.0f : 1.5f; // least width in pixels
+        c[54] = rain ? 2.5f : 0.6f; // longest streak
+        std::memcpy( mapped.pData, c, sizeof( c ) );
+        m_Context->Unmap( m_PrecipConstants.Get(), 0 );
+
+        m_Context->IASetInputLayout( nullptr );
+        m_Context->IASetPrimitiveTopology( D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST );
+        m_Context->VSSetShader( m_PrecipVs.Get(), nullptr, 0 );
+        m_Context->PSSetShader( m_PrecipPs.Get(), nullptr, 0 );
+        ID3D11Buffer * constant_buffer = m_PrecipConstants.Get();
+        m_Context->VSSetConstantBuffers( 0, 1, &constant_buffer );
+        m_Context->PSSetConstantBuffers( 0, 1, &constant_buffer );
+        const float factor[4] = {};
+        m_Context->OMSetBlendState( m_PrecipBlend.Get(), factor, 0xFFFFFFFF );
+        m_Context->OMSetDepthStencilState( m_PrecipDepth.Get(), 0 );
+        m_Context->RSSetState( m_PrecipRaster.Get() );
+        m_Context->DrawInstanced( 6, instances, 0, 0 );
+        ++m_PrecipOwn[kind - 1];
+        m_PrecipOwnInstances[kind - 1] += instances;
+
+        // The game's pipeline back (as CarReflDrawPending).
+        m_Context->IASetInputLayout( m_SceneLayout.Get() );
+        UINT stride = sizeof( TlVertex );
+        UINT offset = 0;
+        ID3D11Buffer * vertex_buffer = m_VertexBuffer.Get();
+        m_Context->IASetVertexBuffers( 0, 1, &vertex_buffer, &stride, &offset );
+        m_Context->IASetIndexBuffer( m_IndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0 );
+        InvalidatePipeline();
+        return true;
     }
 
     void Driver::PrecipMeasureBatch()
@@ -9984,7 +10182,7 @@ namespace dx11z
             weather_resolved = true;
             if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                 weather_fn = reinterpret_cast<WeatherFn>(::GetProcAddress( lfsp, "LfspWeatherFx" ));
-            Log( "Weather fx (dx11z weather w9: storm, lightning, snow white, snow and clear drops on cars, fixed on the car, fine snow, drops flow with speed, renew, visible beads, even snow, varied streaks): LFSP export LfspWeatherFx %s",
+            Log( "Weather fx (dx11z weather w10: storm, lightning, snow white, snow and clear drops on cars, fixed on the car, fine snow, drops flow with speed, renew, visible beads, even snow, varied streaks, subtle drops): LFSP export LfspWeatherFx %s",
                 weather_fn != nullptr ? "found" : "not available" );
         }
         if (weather_fn == nullptr)
@@ -10005,7 +10203,7 @@ namespace dx11z
                 car_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     car_fn = reinterpret_cast<CarFn>(::GetProcAddress( lfsp, "LfspWeatherCar" ));
-                Log( "Weather fx (dx11z weather w9): LFSP export LfspWeatherCar %s", car_fn != nullptr ? "found" : "not available" );
+                Log( "Weather fx (dx11z weather w10): LFSP export LfspWeatherCar %s", car_fn != nullptr ? "found" : "not available" );
             }
             m_CarWeatherOn = car_fn != nullptr && car_fn( m_CarWeather ) != 0;
             m_CarWeatherLight = m_CarWeatherLightNext * (NightNative() ? 0.35f : 1.0f);

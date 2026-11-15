@@ -966,9 +966,9 @@ float DropLayer( float2 q, float aaCell, float density, float slide, float down,
     float present = step( h, density * ( 1.0 - 0.4 * saturate( own / 3.0 ) ) ) * smoothstep( 0.0, 0.04, life ) *
                     ( 1.0 - smoothstep( 0.85, 1.0, life ) );
     float radius = ( 0.08 + 0.08 * h2 ) * ( 1.0 - 0.3 * slide ) / ( 1.0 + 0.3 * own );
-    // At least about a pixel for a radius, so a bead does not drop out of the pixel grid; cells smaller than about three
-    // pixels fade out (the wet gloss of the paint stays).
-    radius = min( max( radius, 1.0 * aaCell ), 0.3 );
+    // w10: at least about 0.6 pixels for a radius; cells smaller than about two to four pixels fade out, there only the wet
+    // gloss of the paint stays (as w6, which looked best: drops seen up close, further away a wet smooth paint).
+    radius = min( max( radius, 0.6 * aaCell ), 0.3 );
     // Full jitter of the place in the cell (w9), so no grid shows.
     float2 centre = float2( CarHash( drop + 3.17 ), CarHash( drop + 7.73 ) ) * 0.6 + 0.2;
     centre.y += down * slide * ( life - 0.5 ) * 0.3;
@@ -980,7 +980,7 @@ float DropLayer( float2 q, float aaCell, float density, float slide, float down,
     rel += along * ( ra / ( 1.0 + own ) - ra );
     rel += side * sin( ra * 0.8 + h2 * 6.28 ) * 0.25 * saturate( own );
     float aa = max( aaCell / radius, 0.02 );
-    return ( 1.0 - smoothstep( 1.0 - aa, 1.0 + aa, length( rel ) ) ) * present * ( 1.0 - smoothstep( 0.2, 0.35, aaCell ) );
+    return ( 1.0 - smoothstep( 1.0 - aa, 1.0 + aa, length( rel ) ) ) * present * ( 1.0 - smoothstep( 0.25, 0.5, aaCell ) );
 }
 
 Texture2D g_Scene : register( t0 );
@@ -1113,8 +1113,8 @@ float4 MainPS( PixelIn input ) : SV_Target
         // Wet paint (w7): only a little glossier and darker. w5/w6 raised the whole reflection by up to 1.3 x, the blurred
         // ground and surroundings then showed as large blotches on the lower parts.
         float shine = g_CarWeather3.z;
-        float wetAll = 1.0 - 0.06 * g_CarWeather.z;
-        float glossA = min( a * ( 1.0 + 0.15 * g_CarWeather.z ), max( a, 0.85 ) );
+        float wetAll = 1.0 - 0.08 * g_CarWeather.z;
+        float glossA = min( a * ( 1.0 + 0.4 * g_CarWeather.z ), max( a, 0.9 ) ); // w10: wet smooth gloss as w6
         float wetA = 1.0 - ( 1.0 - glossA ) * wetAll;
         colour = colour * glossA / max( wetA, 1e-4 );
         a = wetA;
@@ -1177,11 +1177,11 @@ float4 MainPS( PixelIn input ) : SV_Target
             float2 hq = float2( dot( halfV, tq ), dot( halfV, bq ) ) / 0.9;
             float2 spot = hq * min( 1.0, 0.75 / max( length( hq ), 1e-4 ) );
             float width = max( 0.05, dropAa * dropAa * 4.0 );
-            float glint = exp( -dot( rel - spot, rel - spot ) / width ) * saturate( 1.6 - length( hq ) ) * 1.6 * shine * g_CarWeather.y;
+            float glint = exp( -dot( rel - spot, rel - spot ) / width ) * saturate( 1.6 - length( hq ) ) * 1.2 * shine * g_CarWeather.y;
             float rim = smoothstep( 0.7, 1.0, sqrt( s2 ) );
-            float dark = lerp( 1.0, 0.97 - 0.03 * rim, m ); // w9: hardly any dark rim
+            float dark = lerp( 1.0, 0.99, m ); // w10: no dark rim
             float outA = 1.0 - ( 1.0 - a ) * dark;
-            colour = ( colour * a * dark + ( reflB * ( 0.1 + fb ) * shine + glint ) * m ) / max( outA, 1e-4 );
+            colour = ( colour * a * dark + ( reflB * ( 0.05 + fb ) * shine + glint ) * m ) / max( outA, 1e-4 );
             a = outA;
         }
     }
@@ -1227,6 +1227,130 @@ float4 MainPS( PixelIn input ) : SV_Target
         }
     }
     return float4( colour, a );
+}
+)hlsl";
+
+    // Rain and snow in the air (PLAN.md 16.4 / 16.5, dx11z p2): replaces the game's precipitation (one triangle per particle,
+    // at most 300). Thousands of thin streaks or soft flakes, drawn instanced without a vertex buffer: each instance hashes
+    // its place in a box of the world around the camera that falls with the precipitation and wraps, so the particles stay
+    // in the world. Streak = the path relative to the camera during a short exposure (fall + wind - camera motion), so they
+    // stretch with speed. Depth tested against the scene (z = 1 - 0.5 / w like the game), not written.
+    inline constexpr char PRECIP[] = R"hlsl(
+cbuffer PrecipConstants : register( b0 )
+{
+    float4 g_Target; // 0, 0, 1 / width, 1 / height of the game
+    float4 g_Viewport; // fx, fy, cx, cy of the game projection
+    row_major float4x4 g_ClipOfView;
+    float4 g_CamPos; // xyz camera in the world, w size of the box (m)
+    float4 g_Right; // xyz right of the camera in the world, w kind (1 rain, 2 snow)
+    float4 g_Up; // xyz up, w intensity 0..1
+    float4 g_Fwd; // xyz forward, w time s
+    float4 g_Fall; // xyz fall and wind (m/s, world), w exposure s
+    float4 g_CamVel; // xyz velocity of the camera (m/s, world), w width of a particle (m)
+    float4 g_Colour; // rgb light of the particles, a opacity
+    float4 g_Extra; // x lightning flash, y least width in pixels, z longest streak (m), w unused
+};
+
+struct PrecipOut
+{
+    float4 m_Position : SV_Position;
+    float2 m_Uv : TEXCOORD0; // along from the start of the capsule, across (pixels)
+    nointerpolation float3 m_Seg : TEXCOORD1; // length, radius (pixels), opacity
+};
+
+uint PHash( uint x )
+{
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+float3 PRand3( uint i )
+{
+    return float3( PHash( i * 3u + 1u ), PHash( i * 3u + 2u ), PHash( i * 3u + 3u ) ) * ( 1.0 / 4294967296.0 );
+}
+
+float3 ToView( float3 world )
+{
+    float3 d = world - g_CamPos.xyz;
+    return float3( dot( d, g_Right.xyz ), dot( d, g_Up.xyz ), -dot( d, g_Fwd.xyz ) );
+}
+
+PrecipOut PrecipVS( uint vid : SV_VertexID, uint iid : SV_InstanceID )
+{
+    PrecipOut o;
+    o.m_Position = float4( 0.0, 0.0, -1.0, 1.0 );
+    o.m_Uv = float2( 0.0, 0.0 );
+    o.m_Seg = float3( 1.0, 1.0, 0.0 );
+
+    bool snow = g_Right.w > 1.5;
+    float box = g_CamPos.w;
+    float t = g_Fwd.w;
+    float3 r = PRand3( iid );
+    float3 r2 = PRand3( iid + 7919u );
+    float3 fall = g_Fall.xyz * ( snow ? lerp( 0.6, 1.3, r2.x ) : lerp( 0.85, 1.15, r2.x ) );
+    float3 centre = g_CamPos.xyz + g_Fwd.xyz * box * 0.3;
+    float3 offset = ( frac( ( r * box + fall * t - centre ) / box ) - 0.5 ) * box;
+    float3 p = centre + offset;
+    if ( snow )
+    {
+        // Flakes tumble and swirl about their path.
+        float phase = r2.y * 6.2832;
+        p += float3( sin( t * ( 0.7 + r2.z ) + phase ), 0.3 * sin( t * 1.3 + phase * 2.0 ), cos( t * ( 0.5 + r2.y ) + phase * 1.3 ) ) * 0.3;
+    }
+    float edge = max( max( abs( offset.x ), abs( offset.y ) ), abs( offset.z ) ) / box;
+    float fade = saturate( ( 0.5 - edge ) * 8.0 );
+
+    float3 head = ToView( p );
+    float3 tail = ToView( p - ( fall - g_CamVel.xyz ) * g_Fall.w );
+    float3 along = tail - head;
+    float alongLength = length( along );
+    if ( alongLength > g_Extra.z )
+        tail = head + along * ( g_Extra.z / alongLength );
+    float3 ch = mul( float4( head, 1.0 ), g_ClipOfView ).xyz;
+    float3 ct = mul( float4( tail, 1.0 ), g_ClipOfView ).xyz;
+    if ( ch.z < 0.6 || ct.z < 0.6 )
+        return o;
+    float2 sh = ch.xy / ch.z * g_Viewport.xy + g_Viewport.zw;
+    float2 st = ct.xy / ct.z * g_Viewport.xy + g_Viewport.zw;
+    float2 axis = st - sh;
+    float axisLength = length( axis );
+    float widthTrue = g_CamVel.w * g_Viewport.x / ch.z;
+    float width = max( widthTrue, g_Extra.y );
+    float cover = saturate( widthTrue / g_Extra.y ); // thinner than the least width: fainter instead
+    float2 dir = axisLength > 1e-3 ? axis / axisLength : float2( 0.0, 1.0 );
+    float2 perp = float2( -dir.y, dir.x );
+
+    // Two triangles: along 0 (head) .. 1 (tail), across -1 .. 1.
+    const float2 corners[6] = { float2( 0, -1 ), float2( 1, -1 ), float2( 0, 1 ), float2( 0, 1 ), float2( 1, -1 ), float2( 1, 1 ) };
+    float2 q = corners[vid];
+    float2 a0 = sh - dir * width * 0.5;
+    float2 a1 = st + dir * width * 0.5;
+    float2 s = lerp( a0, a1, q.x ) + perp * q.y * width * 0.5;
+    float w = lerp( ch.z, ct.z, q.x );
+    o.m_Position = float4( ( s.x * g_Target.z * 2.0 - 1.0 ) * w, ( 1.0 - s.y * g_Target.w * 2.0 ) * w, w - 0.5, w );
+    float total = axisLength + width;
+    o.m_Uv = float2( q.x * total, q.y * width * 0.5 );
+    // A long streak spreads the same water over more pixels: fainter.
+    float energy = snow ? 1.0 : saturate( 3.0 * width / max( axisLength, width ) + 0.25 );
+    o.m_Seg = float3( total, width * 0.5, g_Colour.a * fade * cover * energy * lerp( 0.6, 1.0, r2.z ) );
+    return o;
+}
+
+float4 PrecipPS( PrecipOut input ) : SV_Target
+{
+    float total = input.m_Seg.x;
+    float radius = input.m_Seg.y;
+    float dx = max( max( radius - input.m_Uv.x, input.m_Uv.x - ( total - radius ) ), 0.0 );
+    float d = length( float2( dx, input.m_Uv.y ) ) / radius;
+    float a = ( 1.0 - smoothstep( 0.25, 1.0, d ) ) * input.m_Seg.z;
+    if ( g_Right.w < 1.5 )
+        a *= lerp( 1.0, 0.35, saturate( input.m_Uv.x / total ) ); // rain: the head is brightest
+    clip( a - 0.002 );
+    return float4( g_Colour.rgb * ( 1.0 + g_Extra.x ), a );
 }
 )hlsl";
 

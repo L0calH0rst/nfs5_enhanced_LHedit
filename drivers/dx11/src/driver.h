@@ -795,8 +795,26 @@ namespace dx11z
         // R_WeatherUpdateDraw (rain, snow); draws arriving inside are logged every 10 s.
         void InstallPrecipHooks();
     public:
-        void OnPrecipDraw( int kind, const void * precipitation, bool begin );
+        // true: drawn by dx11z (16.4 / 16.5), the game's draw is left out.
+        bool OnPrecipDraw( int kind, const void * precipitation, bool begin );
     private:
+        bool PrecipDrawOwn( int kind, const void * precipitation );
+        int m_ConfigPrecip = 1; // '[Weather] Precip' of lfsp.ini: 1 = own rain and snow (16.4 / 16.5), 0 = the game's
+        float m_ConfigPrecipRain = 7000.0f; // '[Weather] PrecipRain': rain streaks at full rain
+        float m_ConfigPrecipSnow = 5000.0f; // '[Weather] PrecipSnow': flakes at full snow
+        float m_ConfigPrecipBright = 1.0f; // '[Weather] PrecipBright': brightness and opacity
+        ComPtr<ID3D11VertexShader> m_PrecipVs;
+        ComPtr<ID3D11PixelShader> m_PrecipPs;
+        ComPtr<ID3D11Buffer> m_PrecipConstants;
+        ComPtr<ID3D11BlendState> m_PrecipBlend;
+        ComPtr<ID3D11DepthStencilState> m_PrecipDepth;
+        ComPtr<ID3D11RasterizerState> m_PrecipRaster;
+        float m_PrecipCamPos[3] = {};
+        float m_PrecipCamVel[3] = {};
+        int m_PrecipCamStep = 0;
+        bool m_PrecipCamHave = false;
+        std::uint32_t m_PrecipCamFlip = 0xFFFFFFFFu;
+        std::uint64_t m_PrecipOwn[2] = {}, m_PrecipOwnInstances[2] = {};
         struct PrecipStats
         {
             std::uint64_t m_Marks = 0, m_MarksWithParticles = 0, m_Draws = 0, m_Vertices = 0, m_Indices = 0;
@@ -1345,8 +1363,8 @@ namespace dx11z
         std::uint64_t m_CarFlowStats[2] = {}; // parts with a track, without (no camera, no matrix)
         float m_CarFlowMaxSpeed = 0.0f;
         int CarFlowTrackFor( const float model_view[16], bool mirrored );
-        float m_ConfigCarDropCells = 40.0f; // '[Weather] CarDropCells' of lfsp.ini: drop cells per metre on the car (larger = smaller drops)
-        float m_ConfigCarDropShine = 1.0f; // '[Weather] CarDropShine' of lfsp.ini: brightness of glint and bead (w7)
+        float m_ConfigCarDropCells = 80.0f; // '[Weather] CarDropCells' of lfsp.ini: drop cells per metre on the car (larger = smaller drops)
+        float m_ConfigCarDropShine = 0.6f; // '[Weather] CarDropShine' of lfsp.ini: brightness of glint and bead (w7)
         float m_ConfigCarSnowSoft = 1.0f; // '[Weather] CarSnowSoft' of lfsp.ini: evenness of the car snow (w9; w8: width of its edge)
         float m_ConfigCarSnowBright = 0.5f; // '[Weather] CarSnowBright' of lfsp.ini: brightness of the car snow (w8)
         float m_ConfigCarDropFlow = 0.005f; // '[Weather] CarDropFlow' of lfsp.ini: creep of the drops, m/s per m/s above 8 m/s (w6)
