@@ -598,7 +598,7 @@ namespace dx11z
         m_Device->CreateBuffer( &desc, nullptr, m_ClearConstants.Put() );
         desc.ByteWidth = 368; // MirrorConstants of the scene shader, also the constants of the reflection composite (9.14b: 368)
         m_Device->CreateBuffer( &desc, nullptr, m_MirrorConstants.Put() );
-        desc.ByteWidth = 304; // CarReflectConstants (15.3: + weather on the car)
+        desc.ByteWidth = 352; // CarReflectConstants (15.3: + weather on the car, w5: + flow of the drops)
         m_Device->CreateBuffer( &desc, nullptr, m_CarReflConstants.Put() );
 
         D3D11_SAMPLER_DESC sampler = {};
@@ -1668,7 +1668,7 @@ namespace dx11z
             ::GetPrivateProfileStringA( "Weather", "SnowWhite", "0.25", snow, sizeof( snow ), lights_ini.c_str() );
             m_ConfigSnowWhite = ::GetPrivateProfileIntA( "Weather", "Enabled", 1, lights_ini.c_str() ) != 0 && std::atof( snow ) > 0.0;
             char cells[32] = {};
-            ::GetPrivateProfileStringA( "Weather", "CarDropCells", "48", cells, sizeof( cells ), lights_ini.c_str() );
+            ::GetPrivateProfileStringA( "Weather", "CarDropCells", "110", cells, sizeof( cells ), lights_ini.c_str() );
             m_ConfigCarDropCells = std::clamp( static_cast<float>(std::atof( cells )), 4.0f, 400.0f );
             Log( "Weather fx (dx11z weather w1: storm, lightning, snow white): SnowWhite %s, track draw hook %s", snow,
                 m_ConfigSnowWhite ? "wanted" : "not needed" );
@@ -8519,6 +8519,16 @@ namespace dx11z
                     ++m_CarMirrorParts[0];
             }
         }
+        // Drops flowing with the speed of the car (w5): only when there are drops.
+        int car_flow = -1;
+        if (object_valid && m_CarWeatherOn && m_CarWeather[1] > 0.0f)
+        {
+            const double r[9] = { model_view[0], model_view[1], model_view[2], model_view[4], model_view[5], model_view[6],
+                                  model_view[8], model_view[9], model_view[10] };
+            const double det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) + r[2] * (r[3] * r[7] - r[4] * r[6]);
+            car_flow = CarFlowTrackFor( model_view, det < 0.0 );
+            ++m_CarFlowStats[car_flow >= 0 ? 0 : 1];
+        }
 
         // Camera space of every corner: screen -> clip (xc, yc, wc) -> view, as the water reflections.
         const float * viewport = m_CarReflViewport.data();
@@ -8717,7 +8727,7 @@ namespace dx11z
         {
             CarReflPending & p = m_CarReflPending[k];
             if (p.m_View == view && p.m_Sampler == sampler && p.m_Cull == cull && p.m_Fog == fog && p.m_AlphaRef == alpha_ref &&
-                p.m_GlassRef == glass_ref && std::memcmp( p.m_Up, up_f, sizeof( up_f ) ) == 0)
+                p.m_GlassRef == glass_ref && std::memcmp( p.m_Up, up_f, sizeof( up_f ) ) == 0 && p.m_CarFlow == car_flow)
                 pending = &p;
         }
         if (pending == nullptr)
@@ -8732,6 +8742,7 @@ namespace dx11z
             pending->m_AlphaRef = alpha_ref;
             pending->m_GlassRef = glass_ref;
             std::memcpy( pending->m_Up, up_f, sizeof( up_f ) );
+            pending->m_CarFlow = car_flow;
             pending->m_Vertices.clear();
             pending->m_Indices.clear();
         }
@@ -8832,7 +8843,7 @@ namespace dx11z
         // Layout of 'CarReflectConstants' in shaders::CAR_REFLECT.
         if (SUCCEEDED( m_Context->Map( m_CarReflConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
         {
-            float constants[64] = {};
+            float constants[88] = {};
             constants[2] = 1.0f / static_cast<float>(std::max( m_Width, 1 ));
             constants[3] = 1.0f / static_cast<float>(std::max( m_Height, 1 ));
             std::memcpy( constants + 4, viewport, sizeof( float ) * 4 );
@@ -8880,6 +8891,19 @@ namespace dx11z
                 constants[71] = m_WeatherFx[13] > 0.0f ? m_WeatherFx[13] : 1.0f;
                 constants[72] = m_CarUpVote >= 0.0f ? 1.0f : -1.0f; // sign of "up" for the snow
                 constants[73] = m_CarWeather[3] > 2.5f ? 1.0f : 0.0f; // '[Weather] SnowDebug = 3': up-ness of the car
+                // w5: flow of the drops of this car: crept distance (space of the part), speed, direction of travel in the
+                // space of the part and in view space.
+                if (pending.m_CarFlow >= 0 && pending.m_CarFlow < static_cast<int>(std::size( m_CarFlowTracks )))
+                {
+                    const CarFlowTrack & track = m_CarFlowTracks[pending.m_CarFlow];
+                    for (int j = 0; j < 3; ++j)
+                    {
+                        constants[76 + j] = track.m_Flow[j];
+                        constants[80 + j] = track.m_DirObject[j];
+                        constants[84 + j] = track.m_DirView[j];
+                    }
+                    constants[79] = track.m_Speed;
+                }
                 ++m_WeatherStats[m_CarWeather[0] > 0.0f ? 4 : 5];
             }
             std::memcpy( mapped.pData, constants, sizeof( constants ) );
@@ -9813,7 +9837,7 @@ namespace dx11z
             weather_resolved = true;
             if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                 weather_fn = reinterpret_cast<WeatherFn>(::GetProcAddress( lfsp, "LfspWeatherFx" ));
-            Log( "Weather fx (dx11z weather w4: storm, lightning, snow white, snow and clear drops on cars, fixed on the car, fine snow): LFSP export LfspWeatherFx %s",
+            Log( "Weather fx (dx11z weather w5: storm, lightning, snow white, snow and clear drops on cars, fixed on the car, fine snow, drops flow with speed): LFSP export LfspWeatherFx %s",
                 weather_fn != nullptr ? "found" : "not available" );
         }
         if (weather_fn == nullptr)
@@ -9834,7 +9858,7 @@ namespace dx11z
                 car_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     car_fn = reinterpret_cast<CarFn>(::GetProcAddress( lfsp, "LfspWeatherCar" ));
-                Log( "Weather fx (dx11z weather w4): LFSP export LfspWeatherCar %s", car_fn != nullptr ? "found" : "not available" );
+                Log( "Weather fx (dx11z weather w5): LFSP export LfspWeatherCar %s", car_fn != nullptr ? "found" : "not available" );
             }
             m_CarWeatherOn = car_fn != nullptr && car_fn( m_CarWeather ) != 0;
             m_CarWeatherLight = m_CarWeatherLightNext * (NightNative() ? 0.35f : 1.0f);
@@ -9878,7 +9902,8 @@ namespace dx11z
                 Log( "Weather fx: mode %.0f, world %.2f %.2f %.2f, sky %.2f %.2f %.2f, fog x%.2f, lightning %.2f, snow %.2f "
                     "(desaturate %.2f, slope %.2f); snow draws %llu (with slope matrix %llu), left out: outside track draw %llu, car/water %llu; "
                     "cars: snow %.2f (light %.2f), drops %.2f, reflection draws with snow %llu, with drops only %llu; "
-                    "car up: camera on its side %llu, on the other %llu, sign %+.0f; car parts mirrored %llu of %llu",
+                    "car up: camera on its side %llu, on the other %llu, sign %+.0f; car parts mirrored %llu of %llu; "
+                    "drops flow: parts with a car track %llu, without %llu, fastest car %.0f km/h",
                     m_WeatherFx[15], m_WeatherFx[0], m_WeatherFx[1], m_WeatherFx[2], m_WeatherFx[3], m_WeatherFx[4], m_WeatherFx[5],
                     m_WeatherFx[6], m_WeatherFx[14], m_WeatherFx[7], m_WeatherFx[8], m_WeatherFx[9],
                     static_cast<unsigned long long>(m_WeatherStats[0]), static_cast<unsigned long long>(m_WeatherStats[3]),
@@ -9887,13 +9912,141 @@ namespace dx11z
                     static_cast<unsigned long long>(m_WeatherStats[5]), static_cast<unsigned long long>(m_CarUpVotes[0]),
                     static_cast<unsigned long long>(m_CarUpVotes[1]), m_CarUpVote >= 0.0f ? 1.0 : -1.0,
                     static_cast<unsigned long long>(m_CarMirrorParts[1]),
-                    static_cast<unsigned long long>(m_CarMirrorParts[0] + m_CarMirrorParts[1]) );
+                    static_cast<unsigned long long>(m_CarMirrorParts[0] + m_CarMirrorParts[1]),
+                    static_cast<unsigned long long>(m_CarFlowStats[0]), static_cast<unsigned long long>(m_CarFlowStats[1]),
+                    m_CarFlowMaxSpeed * 3.6 );
+                m_CarFlowStats[0] = m_CarFlowStats[1] = 0;
+                m_CarFlowMaxSpeed = 0.0f;
                 std::fill( std::begin( m_WeatherStats ), std::end( m_WeatherStats ), 0ull );
                 m_CarUpVotes[0] = m_CarUpVotes[1] = 0;
                 m_CarMirrorParts[0] = m_CarMirrorParts[1] = 0;
             }
         }
         return m_WeatherFxOn;
+    }
+
+
+    // Rain drops flowing on a car (w5). World place of the part origin from the world camera (as 9.14b: world = position +
+    // x right + y up - z forward), the car = the track nearest to it (4 m). Updated once per frame per car, the speed only
+    // when the game step (Sim_gStepCount 0x606AC4, 64 Hz) moved on. The drops creep back with the air from about 18 km/h on
+    // (0.03 m/s per m/s above 5 m/s); the phase wraps at 578 cells, where the hash of the shader repeats.
+    int Driver::CarFlowTrackFor( const float model_view[16], bool mirrored )
+    {
+        std::uintptr_t context = 0;
+        std::uintptr_t view = 0;
+        float block[12] = {};
+        if (!SafeCopy( reinterpret_cast<const void *>(0x00628130), &context, 4 ) || context == 0 ||
+            !SafeCopy( reinterpret_cast<const void *>(context + 0x10), &view, 4 ) || view == 0 ||
+            !SafeCopy( reinterpret_cast<const void *>(view + 0xE8), block, sizeof( block ) ))
+            return -1;
+        if (block[9] == 0.0f && block[10] == 0.0f && block[11] == 0.0f)
+            return -1; // sky and precipitation draw with the position at the origin
+        const float * right = block;
+        const float * up = block + 3;
+        const float * forward = block + 6;
+        const auto to_world = [&]( const float * v, float * out )
+        {
+            for (int j = 0; j < 3; ++j)
+                out[j] = v[0] * right[j] + v[1] * up[j] - v[2] * forward[j];
+        };
+        float origin[3] = {};
+        to_world( model_view + 12, origin );
+        for (int j = 0; j < 3; ++j)
+            origin[j] += block[9 + j];
+        int step = 0;
+        SafeCopy( reinterpret_cast<const void *>(0x00606AC4), &step, 4 );
+
+        int best = -1;
+        float best_distance = 16.0f; // 4 m squared
+        int oldest = 0;
+        std::uint32_t oldest_age = 0;
+        for (int k = 0; k < static_cast<int>(std::size( m_CarFlowTracks )); ++k)
+        {
+            const CarFlowTrack & track = m_CarFlowTracks[k];
+            const std::uint32_t age = track.m_Used ? m_FlipCount - track.m_Flip : 0xFFFFFFFFu;
+            if (age >= oldest_age)
+            {
+                oldest_age = age;
+                oldest = k;
+            }
+            if (!track.m_Used)
+                continue;
+            float distance = 0.0f;
+            for (int j = 0; j < 3; ++j)
+                distance += (track.m_Position[j] - origin[j]) * (track.m_Position[j] - origin[j]);
+            if (distance < best_distance)
+            {
+                best_distance = distance;
+                best = k;
+            }
+        }
+        if (best < 0)
+        {
+            CarFlowTrack & track = m_CarFlowTracks[oldest];
+            track = CarFlowTrack();
+            std::memcpy( track.m_Position, origin, sizeof( origin ) );
+            track.m_Step = step;
+            track.m_Flip = m_FlipCount;
+            track.m_Used = true;
+            return oldest;
+        }
+        CarFlowTrack & track = m_CarFlowTracks[best];
+        if (track.m_Flip == m_FlipCount)
+            return best;
+        track.m_Flip = m_FlipCount;
+        const int steps = step - track.m_Step;
+        if (steps <= 0)
+            return best;
+        const float dt = static_cast<float>(steps) / 64.0f;
+        float speed2 = 0.0f;
+        float velocity[3] = {};
+        for (int j = 0; j < 3; ++j)
+        {
+            velocity[j] = (origin[j] - track.m_Position[j]) / dt;
+            speed2 += velocity[j] * velocity[j];
+        }
+        std::memcpy( track.m_Position, origin, sizeof( origin ) );
+        track.m_Step = step;
+        if (steps > 64 || speed2 > 120.0f * 120.0f)
+            return best; // pause, replay jump, reset to the track: keep the old speed
+        const float blend = std::min( 1.0f, dt * 4.0f );
+        for (int j = 0; j < 3; ++j)
+            track.m_Velocity[j] += (velocity[j] - track.m_Velocity[j]) * blend;
+        const float speed = std::sqrt( track.m_Velocity[0] * track.m_Velocity[0] + track.m_Velocity[1] * track.m_Velocity[1] +
+            track.m_Velocity[2] * track.m_Velocity[2] );
+        track.m_Speed = speed;
+        m_CarFlowMaxSpeed = std::max( m_CarFlowMaxSpeed, speed );
+        if (speed < 0.3f)
+            return best;
+        // Direction of travel in the space of the part: object axis i in the world is row i of object x view turned into the
+        // world; o_i = d . a_i / |a_i|^2. Mirrored parts: x of the part is flipped as in the corners (w4).
+        float direction[3] = {};
+        for (int i = 0; i < 3; ++i)
+        {
+            float axis[3] = {};
+            to_world( model_view + i * 4, axis );
+            const float length2 = axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2];
+            direction[i] = length2 > 1e-12f ? (track.m_Velocity[0] * axis[0] + track.m_Velocity[1] * axis[1] +
+                track.m_Velocity[2] * axis[2]) / (length2 * speed) : 0.0f;
+        }
+        if (mirrored)
+            direction[0] = -direction[0];
+        const float period = 578.0f / std::max( m_ConfigCarDropCells, 4.0f );
+        const float creep = 0.03f * std::max( speed - 5.0f, 0.0f );
+        for (int j = 0; j < 3; ++j)
+        {
+            track.m_DirObject[j] = direction[j];
+            track.m_Flow[j] += direction[j] * creep * dt;
+            track.m_Flow[j] -= std::floor( track.m_Flow[j] / period ) * period;
+        }
+        // View space of the direction: x right, y up, z = -forward.
+        for (int j = 0; j < 3; ++j)
+        {
+            const float * axis = j == 0 ? right : (j == 1 ? up : forward);
+            const float dot = (track.m_Velocity[0] * axis[0] + track.m_Velocity[1] * axis[1] + track.m_Velocity[2] * axis[2]) / speed;
+            track.m_DirView[j] = j == 2 ? -dot : dot;
+        }
+        return best;
     }
 
 

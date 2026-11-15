@@ -923,6 +923,9 @@ cbuffer CarReflectConstants : register( b0 )
     float4 g_CarWeather; // weather on the car (LFSP LfspWeatherCar, PLAN.md 15.3): x snow 0..1, y light of the snow, z rain drops 0..1, w time s
     float4 g_CarWeather2; // x drop cells per metre on the car (w3: in the space of the part), yzw snow colour
     float4 g_CarWeather3; // x sign of g_Up for the snow (from the side of the camera), y 1 = test view of the up-ness ('[Weather] SnowDebug = 3')
+    float4 g_CarFlow; // w5: xyz distance the drops of this car have crept (space of the part, m, wrapped), w speed of the car m/s
+    float4 g_CarFlowDir; // xyz direction of travel in the space of the part
+    float4 g_CarFlowView; // xyz direction of travel in view space
 };
 
 // Weather on the car: a hash per cell of the position in the space of the part (w3; stable on the car, not mirrored like
@@ -943,7 +946,8 @@ float CarNoise( float2 p )
 
 // One layer of rain drops: at most one bead per cell of q, appearing and drying at its own pace. rel = offset from the
 // centre in radii (along q). On steep faces (slide > 0) the bead runs down during its life and is drawn out.
-float DropLayer( float2 q, float aaCell, float density, float slide, float down, float salt, out float2 rel )
+float DropLayer( float2 q, float aaCell, float density, float slide, float down, float2 along, float stretch, float salt,
+                 out float2 rel )
 {
     float2 cell = floor( q );
     float h = CarHash( cell + salt );
@@ -955,6 +959,9 @@ float DropLayer( float2 q, float aaCell, float density, float slide, float down,
     centre.y += down * slide * ( life - 0.5 ) * 0.3;
     rel = ( frac( q ) - centre ) / radius;
     rel.y /= 1.0 + slide * 0.7;
+    // Fast: drawn out along the flow into short streaks (w5).
+    float ra = dot( rel, along );
+    rel += along * ( ra / ( 1.0 + stretch ) - ra );
     float aa = max( aaCell / radius, 0.02 );
     // Far away a bead is smaller than a pixel: fade the drops out instead of letting them flicker.
     return ( 1.0 - smoothstep( 1.0 - aa, 1.0 + aa, length( rel ) ) ) * present * saturate( 1.5 - aa * 2.0 );
@@ -1010,7 +1017,9 @@ float4 MainPS( PixelIn input ) : SV_Target
     float3 faceO = abs( cross( ddx( o ), ddy( o ) ) );
     bool top = faceO.y >= faceO.x && faceO.y >= faceO.z;
     float2 q = top ? o.xz : ( faceO.x >= faceO.z ? o.zy : o.xy );
-    float2 dropQ = q * g_CarWeather2.x;
+    // Drops: the same plane, shifted by the distance they have crept with the speed of the car (w5).
+    float3 od = o + g_CarFlow.xyz;
+    float2 dropQ = ( top ? od.xz : ( faceO.x >= faceO.z ? od.zy : od.xy ) ) * g_CarWeather2.x;
     float2 dq1 = ddx( dropQ );
     float2 dq2 = ddy( dropQ );
     float dropAa = max( max( abs( dq1.x ) + abs( dq2.x ), abs( dq1.y ) + abs( dq2.y ) ), 1e-6 );
@@ -1078,20 +1087,30 @@ float4 MainPS( PixelIn input ) : SV_Target
         return float4( fresnel.xxx, 1.0 );
     float a = saturate( strength * fresnel );
 
-    // Rain drops (LFSP CarDrops, w3): clear beads of water. The paint under a bead stays visible and gets a little
-    // darker (wet), the bead bends normal and reflection like a spherical cap (water, Fresnel F0 0.02), with a small sharp
-    // glint on the side towards the light and a thin dark rim. Small drops plus a few larger ones, more on faces pointing
-    // up, fewer on steep sides where they run down. The glint follows the light of the world (night, storm).
+    // Rain drops (LFSP CarDrops, w5): many small clear beads of water, seen mostly by their glint and the bent reflection,
+    // hardly by darkening. The whole wet paint is a little darker and glossier. More on faces pointing up, fewer on steep
+    // sides where they run down. With speed they creep back with the air (phase g_CarFlow), from about 70 km/h drawn out
+    // into short streaks, from about 130 km/h blown off the front; standing still they lie still. The glint follows the
+    // light of the world (night, storm).
     if ( g_CarWeather.z > 0.0 )
     {
-        a = saturate( a * ( 1.0 + 0.3 * g_CarWeather.z ) );
+        float wetAll = 1.0 - 0.1 * g_CarWeather.z;
+        float wetA = 1.0 - ( 1.0 - saturate( a * ( 1.0 + 0.5 * g_CarWeather.z ) ) ) * wetAll;
+        colour = colour * saturate( a * ( 1.0 + 0.5 * g_CarWeather.z ) ) / max( wetA, 1e-4 );
+        a = wetA;
         float upness = has_up ? saturate( dot( n, g_Up.xyz * g_CarWeather3.x ) ) : 0.5;
         float slide = top ? 0.0 : saturate( 1.0 - upness * 1.5 );
         float down = -g_CarWeather3.x; // q.y is the car's y on the side planes
-        float density = g_CarWeather.z * lerp( 0.35, 1.0, upness );
+        float speed = g_CarFlow.w;
+        float2 along = top ? g_CarFlowDir.xz : ( faceO.x >= faceO.z ? g_CarFlowDir.zy : g_CarFlowDir.xy );
+        along = dot( along, along ) > 1e-4 ? normalize( along ) : float2( 0.0, 1.0 );
+        float stretch = saturate( ( speed - 18.0 ) / 20.0 ) * 1.5;
+        float front = saturate( dot( n, g_CarFlowView.xyz ) * 2.0 ); // n faces the camera; front faces point along travel
+        float blown = saturate( ( speed - 36.0 ) / 15.0 ) * front;
+        float density = g_CarWeather.z * lerp( 0.35, 1.0, upness ) * ( 1.0 - blown );
         float2 rel1, rel2;
-        float m1 = DropLayer( dropQ, dropAa, density, slide, down, 0.0, rel1 );
-        float m2 = DropLayer( dropQ * 0.37, dropAa * 0.37, density * 0.3, slide, down, 41.7, rel2 );
+        float m1 = DropLayer( dropQ, dropAa, density, slide, down, along, stretch, 0.0, rel1 );
+        float m2 = DropLayer( dropQ * 0.5, dropAa * 0.5, density * 0.35, slide, down, along, stretch, 41.7, rel2 );
         float m = max( m1, m2 );
         if ( m > 0.0 )
         {

@@ -767,6 +767,7 @@ namespace dx11z
             float m_AlphaRef = -1.0f;
             float m_GlassRef = -1.0f;
             float m_Up[3] = {};
+            int m_CarFlow = -1; // track of the car (w5: rain drops flow with its speed), -1 = none
             std::vector<CarReflVertex> m_Vertices;
             std::vector<std::uint16_t> m_Indices;
         };
@@ -1303,7 +1304,25 @@ namespace dx11z
         float m_CarUpVote = 0.0f; // > 0: "up" of the car (row 1 of object x view) points to the camera side, as expected
         std::uint64_t m_CarUpVotes[2] = {}; // draws with the camera on the "up" side, on the other side
         std::uint64_t m_CarMirrorParts[2] = {}; // car reflection parts with object x view of positive, negative determinant (w4)
-        float m_ConfigCarDropCells = 48.0f; // '[Weather] CarDropCells' of lfsp.ini: drop cells per texture unit (larger = smaller drops)
+        // Rain drops flowing on the cars (w5): per car its place in the world between game steps, the speed from it and the
+        // distance the drops have crept, as a phase in the space of the part (no jump when the speed changes).
+        struct CarFlowTrack
+        {
+            float m_Position[3] = {};
+            float m_Velocity[3] = {}; // world, m/s, smoothed
+            float m_Flow[3] = {};     // space of the part, m
+            float m_DirObject[3] = {};
+            float m_DirView[3] = {};
+            float m_Speed = 0.0f;
+            int m_Step = 0;
+            std::uint32_t m_Flip = 0xFFFFFFFFu;
+            bool m_Used = false;
+        };
+        CarFlowTrack m_CarFlowTracks[16];
+        std::uint64_t m_CarFlowStats[2] = {}; // parts with a track, without (no camera, no matrix)
+        float m_CarFlowMaxSpeed = 0.0f;
+        int CarFlowTrackFor( const float model_view[16], bool mirrored );
+        float m_ConfigCarDropCells = 110.0f; // '[Weather] CarDropCells' of lfsp.ini: drop cells per metre on the car (larger = smaller drops)
         ULONGLONG m_WeatherNextReport = 0;
         float m_ConfigReflectionLightStreak = 6.0f; // '[Water] ReflectionLightStreak': step of the streak lookups (pixels at 1080 lines, 0 = none)
         std::uint64_t m_ReflLightsKept = 0;
