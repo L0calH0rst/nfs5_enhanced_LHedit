@@ -791,6 +791,29 @@ namespace dx11z
         int m_CarReflLines = 0;
         bool m_CarReflRoomLogged = false;
         void InstallCarReflHook();
+        // Precipitation of the game (PLAN.md 16.0a measure build p1): a mark around the two calls of R_DrawPrecipitation in
+        // R_WeatherUpdateDraw (rain, snow); draws arriving inside are logged every 10 s.
+        void InstallPrecipHooks();
+    public:
+        void OnPrecipDraw( int kind, const void * precipitation, bool begin );
+    private:
+        struct PrecipStats
+        {
+            std::uint64_t m_Marks = 0, m_MarksWithParticles = 0, m_Draws = 0, m_Vertices = 0, m_Indices = 0;
+            int m_ParticlesMax = 0;
+            std::uint32_t m_Hashes[4] = {};
+            int m_HashCount = 0;
+            std::uint32_t m_Src = 0, m_Dst = 0, m_Blend = 0, m_ZEnable = 0, m_ZWrite = 0, m_ZFunc = 0, m_Cull = 0, m_Fog = 0;
+            int m_QueueList = -1, m_Primitive = -1;
+            float m_Box[4] = { 1e30f, 1e30f, -1e30f, -1e30f }; // x, y min; x, y max (game pixels)
+            float m_Rhw[2] = { 1e30f, -1e30f };
+            float m_Z[2] = { 1e30f, -1e30f };
+            std::uint32_t m_Diffuse = 0;
+        };
+        PrecipStats m_PrecipStats[2];
+        int m_PrecipMark = 0; // 1 rain, 2 snow: inside R_DrawPrecipitation
+        ULONGLONG m_PrecipNextReport = 0;
+        void PrecipMeasureBatch();
         bool CopyCarReflSource();
         void CarReflBatch();
         const std::vector<std::uint32_t> & CarReflCellColours(

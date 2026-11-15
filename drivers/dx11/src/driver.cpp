@@ -1877,6 +1877,7 @@ namespace dx11z
             if (m_ConfigCarRefl > 0)
                 InstallCarReflHook();
         }
+        InstallPrecipHooks();
 
         // Distance probe key: one character, a hex virtual key ("0x2D") or INSERT / HOME / END / PAUSE; empty = off.
         {
@@ -5879,6 +5880,9 @@ namespace dx11z
         // Blending while writing depth, see '[Dx11] AlphaEdgeFix'.
         const auto & render = m_D3D.m_Render;
 
+        if (m_PrecipMark != 0)
+            PrecipMeasureBatch();
+
         // Water reflections (B15): the game's baked reflections are the alpha blended draws of queue list 1.
         const bool reflections = m_ConfigReflections && m_QueueList > 0 && m_MirrorVs && m_ReflCompositePs &&
             m_BatchPrimitive == Primitive::TRIANGLES;
@@ -6799,6 +6803,35 @@ namespace dx11z
             driver.OnTrackChunk( false );
         }
 
+        // Precipitation (PLAN.md 16.0a, measure build p1): R_DrawPrecipitation 0x4564E0, fastcall (ecx = precipitation
+        // object, +4 = particles drawn), called in R_WeatherUpdateDraw 0x459020 for rain (0x4591B0) and snow (0x4591B8),
+        // with the view at the origin and depth writing off (knowledge.md, row "Niederschlag des Spiels").
+        constexpr std::uintptr_t PRECIP_DRAW = 0x004564E0;
+        constexpr std::uintptr_t PRECIP_RAIN_CALL = 0x004591B0;
+        constexpr std::uintptr_t PRECIP_SNOW_CALL = 0x004591B8;
+
+        using PrecipDrawFn = void( __fastcall * )(void *);
+
+        void __fastcall PrecipRainHook(
+            void * precipitation
+        )
+        {
+            Driver & driver = Driver::GetInstance();
+            driver.OnPrecipDraw( 1, precipitation, true );
+            reinterpret_cast<PrecipDrawFn>(PRECIP_DRAW)(precipitation);
+            driver.OnPrecipDraw( 1, precipitation, false );
+        }
+
+        void __fastcall PrecipSnowHook(
+            void * precipitation
+        )
+        {
+            Driver & driver = Driver::GetInstance();
+            driver.OnPrecipDraw( 2, precipitation, true );
+            reinterpret_cast<PrecipDrawFn>(PRECIP_DRAW)(precipitation);
+            driver.OnPrecipDraw( 2, precipitation, false );
+        }
+
         // Car part draw R3DCarLOD::Draw 0x43C830, slot 2 of the table 0x5B36AC, thiscall (model part list, pass mask,
         // in-car flag); called by R3DObject::Draw 0x444E00 once per pass (doc/re/04-FAHRZEUG.md 3.4, PLAN.md 9.12b).
         constexpr std::uintptr_t CAR_LOD_DRAW = 0x0043C830;
@@ -7122,6 +7155,105 @@ namespace dx11z
             Log( "Car reflections: part entry hooked at %08X", static_cast<unsigned>(CAR_PART_ENTRY_CALL) );
         else
             Log( "Car reflections: part entry not hooked, call at %08X does not match", static_cast<unsigned>(CAR_PART_ENTRY_CALL) );
+    }
+
+    void Driver::InstallPrecipHooks()
+    {
+        if (::GetModuleHandleA( nullptr ) != reinterpret_cast<HMODULE>(0x00400000))
+            return;
+        const bool rain = PatchCall( PRECIP_RAIN_CALL, PRECIP_DRAW, reinterpret_cast<const void *>(&PrecipRainHook) );
+        const bool snow = PatchCall( PRECIP_SNOW_CALL, PRECIP_DRAW, reinterpret_cast<const void *>(&PrecipSnowHook) );
+        Log( "Precipitation (dx11z p1, measure): rain draw %s at %08X, snow draw %s at %08X", rain ? "marked" : "not marked (call does not match)",
+            static_cast<unsigned>(PRECIP_RAIN_CALL), snow ? "marked" : "not marked (call does not match)", static_cast<unsigned>(PRECIP_SNOW_CALL) );
+    }
+
+    void Driver::OnPrecipDraw(
+        int kind,
+        const void * precipitation,
+        bool begin
+    )
+    {
+        // Own batches inside the mark: what is pending belongs to the draws before it.
+        Flush();
+        if (!begin)
+        {
+            m_PrecipMark = 0;
+            const ULONGLONG now = ::GetTickCount64();
+            if (now >= m_PrecipNextReport && (m_PrecipStats[0].m_Marks + m_PrecipStats[1].m_Marks) > 0)
+            {
+                m_PrecipNextReport = now + 10000;
+                static const char * const names[2] = { "rain", "snow" };
+                for (int k = 0; k < 2; ++k)
+                {
+                    PrecipStats & s = m_PrecipStats[k];
+                    if (s.m_MarksWithParticles == 0)
+                        continue;
+                    char hashes[64] = {};
+                    for (int h = 0; h < s.m_HashCount; ++h)
+                        std::snprintf( hashes + std::strlen( hashes ), sizeof( hashes ) - std::strlen( hashes ), "%s%08X", h ? "," : "",
+                            static_cast<unsigned>(s.m_Hashes[h]) );
+                    Log( "Precipitation %s: marks %llu (with particles %llu, most %d), draws inside %llu, vertices %llu, indices %llu, "
+                        "textures %s, blend %u (%u/%u), z enable %u write %u func %u, cull %u, fog %u, queue list %d, primitive %d, "
+                        "diffuse %08X, box x %.0f..%.0f y %.0f..%.0f, rhw %.4f..%.4f, z %.4f..%.4f",
+                        names[k], static_cast<unsigned long long>(s.m_Marks), static_cast<unsigned long long>(s.m_MarksWithParticles),
+                        s.m_ParticlesMax, static_cast<unsigned long long>(s.m_Draws), static_cast<unsigned long long>(s.m_Vertices),
+                        static_cast<unsigned long long>(s.m_Indices), s.m_HashCount ? hashes : "-", s.m_Blend, s.m_Src, s.m_Dst,
+                        s.m_ZEnable, s.m_ZWrite, s.m_ZFunc, s.m_Cull, s.m_Fog, s.m_QueueList, s.m_Primitive,
+                        static_cast<unsigned>(s.m_Diffuse), s.m_Box[0], s.m_Box[2], s.m_Box[1], s.m_Box[3], s.m_Rhw[0], s.m_Rhw[1],
+                        s.m_Z[0], s.m_Z[1] );
+                }
+                m_PrecipStats[0] = PrecipStats();
+                m_PrecipStats[1] = PrecipStats();
+            }
+            return;
+        }
+        m_PrecipMark = kind;
+        PrecipStats & s = m_PrecipStats[kind - 1];
+        ++s.m_Marks;
+        int particles = 0;
+        if (SafeCopy( static_cast<const std::uint8_t *>(precipitation) + 4, &particles, 4 ) && particles > 0)
+        {
+            ++s.m_MarksWithParticles;
+            s.m_ParticlesMax = std::max( s.m_ParticlesMax, particles );
+        }
+    }
+
+    void Driver::PrecipMeasureBatch()
+    {
+        PrecipStats & s = m_PrecipStats[m_PrecipMark - 1];
+        const auto & render = m_D3D.m_Render;
+        ++s.m_Draws;
+        s.m_Vertices += m_BatchVertices.size();
+        s.m_Indices += m_BatchIndices.size();
+        const std::uint32_t hash = m_Bound[0] != nullptr ? static_cast<std::uint32_t>(m_Bound[0]->m_Hash) : 0u;
+        bool known = false;
+        for (int h = 0; h < s.m_HashCount; ++h)
+            known = known || s.m_Hashes[h] == hash;
+        if (!known && s.m_HashCount < 4)
+            s.m_Hashes[s.m_HashCount++] = hash;
+        s.m_Blend = render[rs::ALPHABLENDENABLE];
+        s.m_Src = render[rs::SRCBLEND];
+        s.m_Dst = render[rs::DESTBLEND];
+        s.m_ZEnable = render[rs::ZENABLE];
+        s.m_ZWrite = render[rs::ZWRITEENABLE];
+        s.m_ZFunc = render[rs::ZFUNC];
+        s.m_Cull = render[rs::CULLMODE];
+        s.m_Fog = render[rs::FOGENABLE];
+        s.m_QueueList = m_QueueList;
+        s.m_Primitive = static_cast<int>(m_BatchPrimitive);
+        for (const TlVertex & v : m_BatchVertices)
+        {
+            s.m_Box[0] = std::min( s.m_Box[0], v.m_X );
+            s.m_Box[1] = std::min( s.m_Box[1], v.m_Y );
+            s.m_Box[2] = std::max( s.m_Box[2], v.m_X );
+            s.m_Box[3] = std::max( s.m_Box[3], v.m_Y );
+            s.m_Rhw[0] = std::min( s.m_Rhw[0], v.m_Rhw );
+            s.m_Rhw[1] = std::max( s.m_Rhw[1], v.m_Rhw );
+            s.m_Z[0] = std::min( s.m_Z[0], v.m_Z );
+            s.m_Z[1] = std::max( s.m_Z[1], v.m_Z );
+        }
+        if (!m_BatchVertices.empty())
+            s.m_Diffuse = m_BatchVertices[0].m_Diffuse;
     }
 
     void Driver::InstallHeadlightHooks()
