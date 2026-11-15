@@ -944,18 +944,23 @@ float CarNoise( float2 p )
     return lerp( lerp( CarHash( i ), CarHash( i + float2( 1, 0 ) ), f.x ), lerp( CarHash( i + float2( 0, 1 ) ), CarHash( i + float2( 1, 1 ) ), f.x ), f.y );
 }
 
-// One layer of rain drops: at most one bead per cell of q, appearing and drying at its own pace. rel = offset from the
-// centre in radii (along q). On steep faces (slide > 0) the bead runs down during its life and is drawn out.
+// One layer of rain drops: at most one bead per cell of q. Each cell lives through drops one after the other (w6: a new
+// place, size and chance every 5 to 12 s, so the drops renew while standing too). rel = offset from the centre in radii
+// (along q). On steep faces (slide > 0) the bead runs down during its life; with speed it is drawn out along the flow.
 float DropLayer( float2 q, float aaCell, float density, float slide, float down, float2 along, float stretch, float salt,
                  out float2 rel )
 {
     float2 cell = floor( q );
-    float h = CarHash( cell + salt );
-    float h2 = CarHash( cell + salt + 17.31 );
-    float life = frac( g_CarWeather.w * ( 0.03 + 0.05 * h2 ) + h );
-    float present = step( h, density ) * smoothstep( 0.0, 0.05, life ) * ( 1.0 - smoothstep( 0.8, 1.0, life ) );
-    float radius = ( 0.11 + 0.12 * h2 ) * ( 1.0 - 0.3 * slide );
-    float2 centre = float2( CarHash( cell + salt + 3.17 ), CarHash( cell + salt + 7.73 ) ) * 0.3 + 0.35;
+    float pace = 0.08 + 0.12 * CarHash( cell + salt + 17.31 );
+    float phase = g_CarWeather.w * pace + CarHash( cell + salt );
+    float cycle = floor( phase );
+    float life = phase - cycle;
+    float2 drop = cell + salt + cycle * 7.13;
+    float h = CarHash( drop + 1.7 );
+    float h2 = CarHash( drop + 23.9 );
+    float present = step( h, density ) * smoothstep( 0.0, 0.04, life ) * ( 1.0 - smoothstep( 0.85, 1.0, life ) );
+    float radius = ( 0.11 + 0.12 * h2 ) * ( 1.0 - 0.3 * slide ) / ( 1.0 + 0.4 * stretch );
+    float2 centre = float2( CarHash( drop + 3.17 ), CarHash( drop + 7.73 ) ) * 0.3 + 0.35;
     centre.y += down * slide * ( life - 0.5 ) * 0.3;
     rel = ( frac( q ) - centre ) / radius;
     rel.y /= 1.0 + slide * 0.7;
@@ -1104,7 +1109,7 @@ float4 MainPS( PixelIn input ) : SV_Target
         float speed = g_CarFlow.w;
         float2 along = top ? g_CarFlowDir.xz : ( faceO.x >= faceO.z ? g_CarFlowDir.zy : g_CarFlowDir.xy );
         along = dot( along, along ) > 1e-4 ? normalize( along ) : float2( 0.0, 1.0 );
-        float stretch = saturate( ( speed - 18.0 ) / 20.0 ) * 1.5;
+        float stretch = saturate( ( speed - 12.0 ) / 18.0 ) * 3.0; // w6: streaks up to 4 x as long from about 110 km/h
         float front = saturate( dot( n, g_CarFlowView.xyz ) * 2.0 ); // n faces the camera; front faces point along travel
         float blown = saturate( ( speed - 36.0 ) / 15.0 ) * front;
         float density = g_CarWeather.z * lerp( 0.35, 1.0, upness ) * ( 1.0 - blown );

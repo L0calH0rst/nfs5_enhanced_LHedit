@@ -1670,6 +1670,9 @@ namespace dx11z
             char cells[32] = {};
             ::GetPrivateProfileStringA( "Weather", "CarDropCells", "110", cells, sizeof( cells ), lights_ini.c_str() );
             m_ConfigCarDropCells = std::clamp( static_cast<float>(std::atof( cells )), 4.0f, 400.0f );
+            char flow[32] = {};
+            ::GetPrivateProfileStringA( "Weather", "CarDropFlow", "0.005", flow, sizeof( flow ), lights_ini.c_str() );
+            m_ConfigCarDropFlow = std::clamp( static_cast<float>(std::atof( flow )), 0.0f, 0.1f );
             Log( "Weather fx (dx11z weather w1: storm, lightning, snow white): SnowWhite %s, track draw hook %s", snow,
                 m_ConfigSnowWhite ? "wanted" : "not needed" );
         }
@@ -9837,7 +9840,7 @@ namespace dx11z
             weather_resolved = true;
             if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                 weather_fn = reinterpret_cast<WeatherFn>(::GetProcAddress( lfsp, "LfspWeatherFx" ));
-            Log( "Weather fx (dx11z weather w5: storm, lightning, snow white, snow and clear drops on cars, fixed on the car, fine snow, drops flow with speed): LFSP export LfspWeatherFx %s",
+            Log( "Weather fx (dx11z weather w6: storm, lightning, snow white, snow and clear drops on cars, fixed on the car, fine snow, drops flow with speed, renew): LFSP export LfspWeatherFx %s",
                 weather_fn != nullptr ? "found" : "not available" );
         }
         if (weather_fn == nullptr)
@@ -9858,7 +9861,7 @@ namespace dx11z
                 car_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     car_fn = reinterpret_cast<CarFn>(::GetProcAddress( lfsp, "LfspWeatherCar" ));
-                Log( "Weather fx (dx11z weather w5): LFSP export LfspWeatherCar %s", car_fn != nullptr ? "found" : "not available" );
+                Log( "Weather fx (dx11z weather w6): LFSP export LfspWeatherCar %s", car_fn != nullptr ? "found" : "not available" );
             }
             m_CarWeatherOn = car_fn != nullptr && car_fn( m_CarWeather ) != 0;
             m_CarWeatherLight = m_CarWeatherLightNext * (NightNative() ? 0.35f : 1.0f);
@@ -9928,8 +9931,9 @@ namespace dx11z
 
     // Rain drops flowing on a car (w5). World place of the part origin from the world camera (as 9.14b: world = position +
     // x right + y up - z forward), the car = the track nearest to it (4 m). Updated once per frame per car, the speed only
-    // when the game step (Sim_gStepCount 0x606AC4, 64 Hz) moved on. The drops creep back with the air from about 18 km/h on
-    // (0.03 m/s per m/s above 5 m/s); the phase wraps at 578 cells, where the hash of the shader repeats.
+    // when the game step (Sim_gStepCount 0x606AC4, 64 Hz) moved on. The drops creep back with the air from about 30 km/h on
+    // ('[Weather] CarDropFlow' m/s per m/s above 8 m/s, w6: 0.005 = 0.15 m/s at 140 km/h; w5 had 0.03, drops then ran
+    // back nearly with the speed of the car); the phase wraps at 578 cells, where the hash of the shader repeats.
     int Driver::CarFlowTrackFor( const float model_view[16], bool mirrored )
     {
         std::uintptr_t context = 0;
@@ -10032,7 +10036,7 @@ namespace dx11z
         if (mirrored)
             direction[0] = -direction[0];
         const float period = 578.0f / std::max( m_ConfigCarDropCells, 4.0f );
-        const float creep = 0.03f * std::max( speed - 5.0f, 0.0f );
+        const float creep = m_ConfigCarDropFlow * std::max( speed - 8.0f, 0.0f );
         for (int j = 0; j < 3; ++j)
         {
             track.m_DirObject[j] = direction[j];

@@ -1323,6 +1323,7 @@ namespace dx11z
         float m_CarFlowMaxSpeed = 0.0f;
         int CarFlowTrackFor( const float model_view[16], bool mirrored );
         float m_ConfigCarDropCells = 110.0f; // '[Weather] CarDropCells' of lfsp.ini: drop cells per metre on the car (larger = smaller drops)
+        float m_ConfigCarDropFlow = 0.005f; // '[Weather] CarDropFlow' of lfsp.ini: creep of the drops, m/s per m/s above 8 m/s (w6)
         ULONGLONG m_WeatherNextReport = 0;
         float m_ConfigReflectionLightStreak = 6.0f; // '[Water] ReflectionLightStreak': step of the streak lookups (pixels at 1080 lines, 0 = none)
         std::uint64_t m_ReflLightsKept = 0;
