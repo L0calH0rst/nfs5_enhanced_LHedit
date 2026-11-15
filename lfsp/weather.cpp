@@ -7,6 +7,10 @@
 // 4. Sturm und Gewitter (Menü): Regen voll, Himmel und Welt dunkler und kühler, mehr Nebel, stärkerer Fahrtwind; beim
 //    Gewitter Blitze (Helligkeit in dx11z über LfspWeatherFx) und Donner aus dem Spiel (Snd_QueueThunder).
 // 5. Schnee-Weiß: bei Schnee mischt dx11z die Streckenflächen Richtung Weiß (Werte ebenfalls über LfspWeatherFx).
+// 6. Haftung bei Nässe und Schnee (Grip…, ab Werk aus): das Spiel kennt keine, Faktor nach Sim_UpdateWheelGrip auf die
+//    Haftgrenze aller vier Räder; KI-Soll-Tempo (AI_PlanRaceSpeed) × √Faktor, Verkehr über die stillgelegten
+//    Wetter-Schalter des Spiels (WEATHER ×0,9 in AI_GetMaxCornerSpeed, „aiwther“ in AI_SetCruiseSpeed).
+// 7. Schnee und Nässe auf dem Auto (CarSnow…, CarDrops…): Anteil über die Zeit, an dx11z über LfspWeatherCar.
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -27,6 +31,7 @@ namespace lfsp_weather
     bool NightGradeEx(float * out9);
     bool NightSynthetic();
     bool WeatherFx(float * out16);
+    bool WeatherCar(float * out8);
 }
 
 namespace
@@ -59,6 +64,10 @@ namespace
     constexpr std::uintptr_t kGameLoad      = 0x59D8E0; // File_GameLoadTagged, cdecl(pfad, pool) → Block
     constexpr std::uintptr_t kMemAllocTag   = 0x531CA0; // Mem_AllocTagged, cdecl(name, größe, pool)
     constexpr std::uintptr_t kMemFree       = 0x531F90; // Mem_Free, cdecl(block)
+    constexpr std::uintptr_t kWheelGrip     = 0x4A1900; // Sim_UpdateWheelGrip, cdecl(auto): Haftgrenze +0xAC je Rad
+    constexpr std::uintptr_t kPlanRaceSpeed = 0x40B650; // AI_PlanRaceSpeed, cdecl(auto): Soll-Tempo +0xEB8 der Gegner
+    constexpr std::uintptr_t kWeatherVar    = 0x657A24; // WEATHER: > 0 → Kurventempo der einfachen KI ×0,9 (Sim_RaceInit setzt 0)
+    constexpr std::uintptr_t kAiWeather     = 0x5CC358; // „aiwther“: Faktor auf das Reisetempo der Polizei (AI_LoadTuning setzt 1)
     constexpr std::uintptr_t kQueueThunder  = 0x4A8340; // Snd_QueueThunder, cdecl(abzug, panorama): Probe 0x3DF + Zufall 0…8
                                                         // (thunder_991…999, track.viv), Wartezeit 0x87 − abzug Takte (64 je s)
 
@@ -124,6 +133,24 @@ namespace
     float g_snowColour[3] = { 0.94f, 0.96f, 1.0f };
     int g_snowDebug = 0;
     float g_rawSnow = 0.0f;        // Schnee der Strecke (Wetterspur), ohne Menü und Abdeckung
+    float g_rawRain = 0.0f;        // Regen der Strecke (Wetterspur), ohne Menü und Abdeckung
+    // Haftung ([Weather] Grip…)
+    bool g_gripOn = false;
+    float g_gripRain = 0.85f;
+    float g_gripSnow = 0.7f;
+    float g_gripStorm = 0.8f;
+    bool g_gripAi = true;
+    float g_gripNow = 1.0f;        // gilt im laufenden Rennen
+    // Schnee und Nässe auf dem Auto ([Weather] CarSnow…, CarDrops…)
+    float g_carSnowMax = 0.5f;     // 0 = aus
+    float g_carSnowTime = 180.0f;  // Sekunden bis zum Höchstwert
+    float g_carSnowMelt = 240.0f;  // Sekunden vom Höchstwert bis 0 (bei Regen doppelt so schnell)
+    float g_carDrops = 0.6f;       // Dichte 0…1, 0 = aus
+    float g_carWetTime = 15.0f;    // Sekunden bis ganz nass
+    float g_carDryTime = 90.0f;    // Sekunden bis trocken
+    float g_carSnow = 0.0f;
+    float g_carWet = 0.0f;
+    DWORD g_carTick = 0;
     int g_nightForce = -1;         // -1 nichts, 0 Tag, 1 Nacht (Wahl dieses Rennens)
     float g_skyDarken = 0.6f;      // 0…1: Anteil des Welt-Faktors, der auf den Himmel wirkt
     float g_lightBoost = 1.6f;     // Faktor auf Leuchtsprites (additive Draws) bei erzwungener Nacht
@@ -420,10 +447,14 @@ namespace
         return mode == 4 || mode == 5;
     }
 
+    void UpdateGrip(); // Haftung, unten
+
     float __fastcall SkyRainHook(void * sky)
     {
         float v = SkyValue(sky, kSkyLerpRain);
+        g_rawRain = v;
         UpdateCover();
+        UpdateGrip();
         if (g_flagLogPending)
         {
             g_flagLogPending = false;
@@ -573,6 +604,76 @@ namespace
         }
     }
 
+    // ---- Haftung bei Nässe und Schnee ----
+    // Faktor des laufenden Rennens aus der Wetterwahl; „Original“ nach der Wetterspur der Strecke (Regen/Schnee ≥ 0,2).
+    float GripFactor()
+    {
+        if (!g_gripOn)
+        {
+            return 1.0f;
+        }
+        if (StormMode(g_effMode))
+        {
+            return g_gripStorm;
+        }
+        if (g_effMode == 1)
+        {
+            return g_gripRain;
+        }
+        if (g_effMode == 2)
+        {
+            return g_gripSnow;
+        }
+        if (g_rawSnow >= 0.2f)
+        {
+            return g_gripSnow;
+        }
+        if (g_rawRain >= 0.2f)
+        {
+            return g_gripRain;
+        }
+        return 1.0f;
+    }
+
+    using CarFn = void (__cdecl *)(void * car);
+    CarFn g_origWheelGrip = nullptr;
+    CarFn g_origPlanSpeed = nullptr;
+
+    void __cdecl WheelGripHook(void * car)
+    {
+        g_origWheelGrip(car);
+        if (g_gripNow < 1.0f)
+        {
+            static const std::size_t kLimit[4] = { 0x864, 0x928, 0x9EC, 0xAB0 }; // Rad-Blöcke +0x7B8 + i·0xC4, Haftgrenze +0xAC
+            for (std::size_t offset : kLimit)
+            {
+                At<float>(car, offset) *= g_gripNow;
+            }
+        }
+    }
+
+    void __cdecl PlanSpeedHook(void * car)
+    {
+        g_origPlanSpeed(car);
+        if (g_gripNow < 1.0f && g_gripAi)
+        {
+            // Kurventempo ∝ √Haftung; auf Geraden ist das Soll-Tempo ohnehin über dem Höchsttempo
+            At<float>(car, 0xEB8) *= std::sqrt(g_gripNow);
+        }
+    }
+
+    // Je Bild im Rennen (SkyRainHook): Faktor und die Wetter-Schalter der einfachen KI
+    void UpdateGrip()
+    {
+        g_gripNow = GripFactor();
+        if (g_gripOn && g_gripAi)
+        {
+            const bool wet = g_gripNow < 1.0f;
+            *reinterpret_cast<int *>(kWeatherVar) = wet ? 1 : 0;
+            *reinterpret_cast<float *>(kAiWeather) = wet ? std::sqrt(g_gripNow) : 1.0f;
+        }
+    }
+
     // ---- Menü: Accessoren Track1.Weather und Track1.TimeOfDay ----
     // Wie Track1.Traffic in FEdaTrack__Initialize: FELocalizedTextAccessor mit nullterminierter Liste von Text-IDs,
     // aktueller Eintrag +0x18, Rückruf +0x10 (cdecl(accessor)) bei jeder Wahl (FEPositionableAccessor__SetCurrent).
@@ -711,6 +812,14 @@ namespace
             Log("Wetter: Zufall -> Modus %d", g_effMode);
         }
         g_flashNext = 0; // erster Blitz erst einige Sekunden nach dem Start
+        g_carSnow = 0.0f; // jedes Rennen mit sauberem, trockenem Auto
+        g_carWet = 0.0f;
+        g_carTick = 0;
+        g_gripNow = 1.0f;
+        if (g_gripOn)
+        {
+            *reinterpret_cast<int *>(kWeatherVar) = 0; // nicht ins nächste Rennen (Regenton, Streckendatensatz) tragen
+        }
         if (g_timeMode != 0)
         {
             const int night = g_timeMode == 3 ? static_cast<int>(Roll(2)) : g_timeMode - 1;
@@ -1009,6 +1118,17 @@ void lfsp_weather::Install(const char * ini, LogFn log)
     g_snowSlope = ReadFloat(ini, "SnowSlope", "0", 0.0f, 1.0f);
     ReadColour(ini, "SnowColour", "F0F5FF", g_snowColour);
     g_snowDebug = GetPrivateProfileIntA("Weather", "SnowDebug", 0, ini);
+    g_gripOn = GetPrivateProfileIntA("Weather", "Grip", 0, ini) != 0;
+    g_gripRain = ReadFloat(ini, "GripRain", "0.85", 0.3f, 1.0f);
+    g_gripSnow = ReadFloat(ini, "GripSnow", "0.7", 0.3f, 1.0f);
+    g_gripStorm = ReadFloat(ini, "GripStorm", "0.8", 0.3f, 1.0f);
+    g_gripAi = GetPrivateProfileIntA("Weather", "GripAi", 1, ini) != 0;
+    g_carSnowMax = ReadFloat(ini, "CarSnow", "0.5", 0.0f, 1.0f);
+    g_carSnowTime = ReadFloat(ini, "CarSnowTime", "180", 1.0f, 3600.0f);
+    g_carSnowMelt = ReadFloat(ini, "CarSnowMelt", "240", 1.0f, 3600.0f);
+    g_carDrops = ReadFloat(ini, "CarDrops", "0.6", 0.0f, 1.0f);
+    g_carWetTime = ReadFloat(ini, "CarWetTime", "15", 0.5f, 600.0f);
+    g_carDryTime = ReadFloat(ini, "CarDryTime", "90", 0.5f, 3600.0f);
     g_effMode = g_mode == 3 ? 0 : g_mode;
     g_nightGrade = GetPrivateProfileIntA("Weather", "NightGrade", 1, ini) != 0;
     {
@@ -1050,6 +1170,10 @@ void lfsp_weather::Install(const char * ini, LogFn log)
         g_stormOn ? 1 : 0, g_stormRain, g_stormWorld[0], g_stormWorld[1], g_stormWorld[2], g_stormSky[0], g_stormSky[1], g_stormSky[2],
         g_stormFog, g_stormDropWind, g_lightMin, g_lightMax, g_lightWorld, g_lightSky, g_thunderOn ? 1 : 0, g_thunderMin, g_thunderMax,
         g_snowWhite, g_snowDesat, g_snowSlope, g_snowDebug);
+    Log("Wetter: Haftung %d (Regen %.2f, Schnee %.2f, Sturm %.2f, KI %d), Auto: Schnee %.2f (%.0f s, Abbau %.0f s), Tropfen %.2f "
+        "(nass %.0f s, trocken %.0f s)",
+        g_gripOn ? 1 : 0, g_gripRain, g_gripSnow, g_gripStorm, g_gripAi ? 1 : 0, g_carSnowMax, g_carSnowTime, g_carSnowMelt,
+        g_carDrops, g_carWetTime, g_carDryTime);
 
     static const unsigned char kSkyBytes[] = { 0x51, 0x56, 0x8B, 0xF1, 0x8B, 0x46, 0x50 };
     PatchJump("Regen (Sky_InterpLerp18)", kSkyRain, kSkyBytes, sizeof(kSkyBytes), reinterpret_cast<void *>(&SkyRainHook));
@@ -1057,6 +1181,18 @@ void lfsp_weather::Install(const char * ini, LogFn log)
     if (g_dropsOn)
     {
         PatchCall("Scheibentropfen", kDropsTickCall, kDropsTick, reinterpret_cast<void *>(&DropsTickHook));
+    }
+    if (g_gripOn)
+    {
+        static const unsigned char kGripBytes[] = { 0x83, 0xEC, 0x08, 0x53, 0x55 };
+        static const unsigned char kPlanBytes[] = { 0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x3C };
+        InstallHook("Haftung (Sim_UpdateWheelGrip)", kWheelGrip, kGripBytes, sizeof(kGripBytes),
+                    reinterpret_cast<void *>(&WheelGripHook), reinterpret_cast<void **>(&g_origWheelGrip));
+        if (g_gripAi)
+        {
+            InstallHook("KI-Tempo (AI_PlanRaceSpeed)", kPlanRaceSpeed, kPlanBytes, sizeof(kPlanBytes),
+                        reinterpret_cast<void *>(&PlanSpeedHook), reinterpret_cast<void **>(&g_origPlanSpeed));
+        }
     }
     if (true) // immer: die Wahl kann im Menü wechseln
     {
@@ -1246,4 +1382,49 @@ bool lfsp_weather::WeatherFx(float * out)
         out[13] = g_snowColour[2];
     }
     return active;
+}
+
+// dx11z (Wetter w2): einmal je Bild, für den Reflexionsdurchgang der Autos. out[0] Schnee auf dem Auto 0…1, [1] Tropfen
+// (Dichte × Nässe) 0…1, [2] Zeit in Sekunden (Tropfen erscheinen und vergehen), [3…7] frei. 1 = etwas davon aktiv.
+extern "C" __declspec(dllexport) int LfspWeatherCar(float * out)
+{
+    return lfsp_weather::WeatherCar(out) ? 1 : 0;
+}
+
+bool lfsp_weather::WeatherCar(float * out)
+{
+    for (int i = 0; i < 8; ++i)
+    {
+        out[i] = 0.0f;
+    }
+    if (Log == nullptr || *reinterpret_cast<const int *>(kFrontEnd) != 0)
+    {
+        g_carTick = 0;
+        return false;
+    }
+    const DWORD now = timeGetTime();
+    const float dt = g_carTick ? std::fmin((now - g_carTick) / 1000.0f, 0.5f) : 0.0f;
+    g_carTick = now;
+    // Schnee fällt (Menü oder Schneestrecke): steigt bis CarSnow; sonst Abbau, bei Regen doppelt so schnell
+    const bool snowing = g_lastSnow > 0.05f;
+    const bool raining = g_lastRain > 0.05f;
+    if (g_carSnowMax > 0.0f)
+    {
+        if (snowing)
+        {
+            g_carSnow = std::fmin(g_carSnow + dt * g_carSnowMax / g_carSnowTime * std::fmin(g_lastSnow / 0.5f, 1.5f), g_carSnowMax);
+        }
+        else
+        {
+            g_carSnow = std::fmax(g_carSnow - dt * g_carSnowMax / g_carSnowMelt * (raining ? 2.0f : 1.0f), 0.0f);
+        }
+    }
+    if (g_carDrops > 0.0f)
+    {
+        g_carWet = raining ? std::fmin(g_carWet + dt / g_carWetTime, 1.0f) : std::fmax(g_carWet - dt / g_carDryTime, 0.0f);
+    }
+    out[0] = g_carSnow;
+    out[1] = g_carDrops * g_carWet;
+    out[2] = static_cast<float>(now % 3600000u) / 1000.0f;
+    return out[0] > 0.0f || out[1] > 0.0f;
 }
