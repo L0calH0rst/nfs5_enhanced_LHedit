@@ -922,7 +922,8 @@ cbuffer CarReflectConstants : register( b0 )
                     // z: 1 = blur from the shared chain (9.16a, '[CarReflections] BlurChain'), w: its top level
     float4 g_CarWeather; // weather on the car (LFSP LfspWeatherCar, PLAN.md 15.3): x snow 0..1, y light of the snow, z rain drops 0..1, w time s
     float4 g_CarWeather2; // x drop cells per metre on the car (w3: in the space of the part), yzw snow colour
-    float4 g_CarWeather3; // x sign of g_Up for the snow (from the side of the camera), y 1 = test view of the up-ness ('[Weather] SnowDebug = 3')
+    float4 g_CarWeather3; // x sign of g_Up for the snow (from the side of the camera), y test view ('[Weather] SnowDebug' 3 up-ness,
+                          // 4 drops), z shine of the drops ('[Weather] CarDropShine', w7)
     float4 g_CarFlow; // w5: xyz distance the drops of this car have crept (space of the part, m, wrapped), w speed of the car m/s
     float4 g_CarFlowDir; // xyz direction of travel in the space of the part
     float4 g_CarFlowView; // xyz direction of travel in view space
@@ -959,7 +960,10 @@ float DropLayer( float2 q, float aaCell, float density, float slide, float down,
     float h = CarHash( drop + 1.7 );
     float h2 = CarHash( drop + 23.9 );
     float present = step( h, density ) * smoothstep( 0.0, 0.04, life ) * ( 1.0 - smoothstep( 0.85, 1.0, life ) );
-    float radius = ( 0.11 + 0.12 * h2 ) * ( 1.0 - 0.3 * slide ) / ( 1.0 + 0.4 * stretch );
+    float radius = ( 0.12 + 0.10 * h2 ) * ( 1.0 - 0.3 * slide ) / ( 1.0 + 0.4 * stretch );
+    // w7: at least about 1.3 pixels for a radius, so a bead does not drop out of the pixel grid; cells smaller than about
+    // three pixels fade out (the wet gloss of the paint stays).
+    radius = min( max( radius, 1.3 * aaCell ), 0.3 );
     float2 centre = float2( CarHash( drop + 3.17 ), CarHash( drop + 7.73 ) ) * 0.3 + 0.35;
     centre.y += down * slide * ( life - 0.5 ) * 0.3;
     rel = ( frac( q ) - centre ) / radius;
@@ -968,8 +972,7 @@ float DropLayer( float2 q, float aaCell, float density, float slide, float down,
     float ra = dot( rel, along );
     rel += along * ( ra / ( 1.0 + stretch ) - ra );
     float aa = max( aaCell / radius, 0.02 );
-    // Far away a bead is smaller than a pixel: fade the drops out instead of letting them flicker.
-    return ( 1.0 - smoothstep( 1.0 - aa, 1.0 + aa, length( rel ) ) ) * present * saturate( 1.5 - aa * 2.0 );
+    return ( 1.0 - smoothstep( 1.0 - aa, 1.0 + aa, length( rel ) ) ) * present * ( 1.0 - smoothstep( 0.2, 0.35, aaCell ) );
 }
 
 Texture2D g_Scene : register( t0 );
@@ -1099,9 +1102,13 @@ float4 MainPS( PixelIn input ) : SV_Target
     // light of the world (night, storm).
     if ( g_CarWeather.z > 0.0 )
     {
-        float wetAll = 1.0 - 0.1 * g_CarWeather.z;
-        float wetA = 1.0 - ( 1.0 - saturate( a * ( 1.0 + 0.5 * g_CarWeather.z ) ) ) * wetAll;
-        colour = colour * saturate( a * ( 1.0 + 0.5 * g_CarWeather.z ) ) / max( wetA, 1e-4 );
+        // Wet paint (w7): only a little glossier and darker. w5/w6 raised the whole reflection by up to 1.3 x, the blurred
+        // ground and surroundings then showed as large blotches on the lower parts.
+        float shine = g_CarWeather3.z;
+        float wetAll = 1.0 - 0.06 * g_CarWeather.z;
+        float glossA = min( a * ( 1.0 + 0.15 * g_CarWeather.z ), max( a, 0.85 ) );
+        float wetA = 1.0 - ( 1.0 - glossA ) * wetAll;
+        colour = colour * glossA / max( wetA, 1e-4 );
         a = wetA;
         float upness = has_up ? saturate( dot( n, g_Up.xyz * g_CarWeather3.x ) ) : 0.5;
         float slide = top ? 0.0 : saturate( 1.0 - upness * 1.5 );
@@ -1117,6 +1124,9 @@ float4 MainPS( PixelIn input ) : SV_Target
         float m1 = DropLayer( dropQ, dropAa, density, slide, down, along, stretch, 0.0, rel1 );
         float m2 = DropLayer( dropQ * 0.5, dropAa * 0.5, density * 0.35, slide, down, along, stretch, 41.7, rel2 );
         float m = max( m1, m2 );
+        // Test view '[Weather] SnowDebug = 4': red small drops, green large drops, blue alpha of the reflection.
+        if ( g_CarWeather3.y > 3.5 )
+            return float4( m1, m2, a, 1.0 );
         if ( m > 0.0 )
         {
             float2 rel = m2 > m1 ? rel2 : rel1;
@@ -1130,7 +1140,7 @@ float4 MainPS( PixelIn input ) : SV_Target
             tq *= scale;
             bq *= scale;
             float s2 = saturate( dot( rel, rel ) );
-            float3 nb = normalize( n * sqrt( 1.0 - 0.85 * s2 ) + ( tq * rel.x + bq * rel.y ) * 0.8 );
+            float3 nb = normalize( n * sqrt( 1.0 - 0.85 * s2 ) + ( tq * rel.x + bq * rel.y ) * 0.9 );
             if ( dot( nb, v ) > 0.0 )
                 nb = n;
             float3 rb = reflect( v, nb );
@@ -1143,19 +1153,25 @@ float4 MainPS( PixelIn input ) : SV_Target
             float3 reflB = g_Scene.SampleLevel( g_SceneSampler, pb * 0.5 + 0.5, max( g_Params.z - 1.0 - g_Shape.y, 0.0 ) ).rgb;
             if ( has_up )
                 reflB = lerp( reflB, g_SkyColour.rgb, saturate( ( edgeB - 1.0 ) / 0.3 ) * saturate( dot( rb, g_Up.xyz ) * 4.0 + 0.5 ) );
-            float fb = 0.02 + 0.98 * pow( 1.0 - saturate( -dot( nb, v ) ), 5.0 );
+            float fb = 0.04 + 0.96 * pow( 1.0 - saturate( -dot( nb, v ) ), 5.0 );
             float3 light = has_up ? normalize( g_Up.xyz * g_CarWeather3.x - v * 0.6 ) : -v;
-            float glint = pow( saturate( dot( rb, light ) ), 400.0 ) * 1.2 * g_CarWeather.y;
+            // Glint (w7): a spot where the cap leans to the half vector of light and view, at least about a pixel wide,
+            // so every bead shows it (sampling the cap per pixel missed it on small beads).
+            float3 halfV = normalize( light - v );
+            float2 hq = float2( dot( halfV, tq ), dot( halfV, bq ) ) / 0.9;
+            float2 spot = hq * min( 1.0, 0.75 / max( length( hq ), 1e-4 ) );
+            float width = max( 0.05, dropAa * dropAa * 4.0 );
+            float glint = exp( -dot( rel - spot, rel - spot ) / width ) * saturate( 1.6 - length( hq ) ) * 1.6 * shine * g_CarWeather.y;
             float rim = smoothstep( 0.7, 1.0, sqrt( s2 ) );
-            float dark = lerp( 1.0, 0.85 - 0.3 * rim, m );
+            float dark = lerp( 1.0, 0.92 - 0.1 * rim, m );
             float outA = 1.0 - ( 1.0 - a ) * dark;
-            colour = ( colour * a * dark + ( reflB * fb + glint ) * m ) / max( outA, 1e-4 );
+            colour = ( colour * a * dark + ( reflB * ( 0.1 + fb ) * shine + glint ) * m ) / max( outA, 1e-4 );
             a = outA;
         }
     }
 
     // Test view '[Weather] SnowDebug = 3': red = face points up (gets snow), blue = points down, black = up unknown.
-    if ( g_CarWeather3.y > 0.5 )
+    if ( g_CarWeather3.y > 2.5 && g_CarWeather3.y < 3.5 )
     {
         float facingUp = has_up ? dot( n, g_Up.xyz * g_CarWeather3.x ) : 0.0;
         return float4( saturate( facingUp ), 0.0, saturate( -facingUp ), 1.0 );
