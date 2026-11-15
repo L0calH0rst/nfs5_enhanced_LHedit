@@ -921,11 +921,12 @@ cbuffer CarReflectConstants : register( b0 )
     float4 g_Shape; // x: exponent of the Fresnel term (5 = Schlick, smaller = softer change), y: mip levels the frame copy is smaller by,
                     // z: 1 = blur from the shared chain (9.16a, '[CarReflections] BlurChain'), w: its top level
     float4 g_CarWeather; // weather on the car (LFSP LfspWeatherCar, PLAN.md 15.3): x snow 0..1, y light of the snow, z rain drops 0..1, w time s
-    float4 g_CarWeather2; // x drops per texture unit, yzw snow colour
+    float4 g_CarWeather2; // x drop cells per metre on the car (w3: in the space of the part), yzw snow colour
     float4 g_CarWeather3; // x sign of g_Up for the snow (from the side of the camera), y 1 = test view of the up-ness ('[Weather] SnowDebug = 3')
 };
 
-// Weather on the car: a hash per cell of the texture coordinates (stable on the car, no texture needed).
+// Weather on the car: a hash per cell of the position in the space of the part (w3; stable on the car, not mirrored like
+// the UV of the car textures, no texture needed).
 float CarHash( float2 p )
 {
     return frac( sin( dot( p, float2( 12.9898, 78.233 ) ) ) * 43758.5453 );
@@ -937,6 +938,25 @@ float CarNoise( float2 p )
     float2 f = frac( p );
     f = f * f * ( 3.0 - 2.0 * f );
     return lerp( lerp( CarHash( i ), CarHash( i + float2( 1, 0 ) ), f.x ), lerp( CarHash( i + float2( 0, 1 ) ), CarHash( i + float2( 1, 1 ) ), f.x ), f.y );
+}
+
+// One layer of rain drops: at most one bead per cell of q, appearing and drying at its own pace. rel = offset from the
+// centre in radii (along q). On steep faces (slide > 0) the bead runs down during its life and is drawn out.
+float DropLayer( float2 q, float aaCell, float density, float slide, float down, float salt, out float2 rel )
+{
+    float2 cell = floor( q );
+    float h = CarHash( cell + salt );
+    float h2 = CarHash( cell + salt + 17.31 );
+    float life = frac( g_CarWeather.w * ( 0.03 + 0.05 * h2 ) + h );
+    float present = step( h, density ) * smoothstep( 0.0, 0.05, life ) * ( 1.0 - smoothstep( 0.8, 1.0, life ) );
+    float radius = ( 0.11 + 0.12 * h2 ) * ( 1.0 - 0.3 * slide );
+    float2 centre = float2( CarHash( cell + salt + 3.17 ), CarHash( cell + salt + 7.73 ) ) * 0.3 + 0.35;
+    centre.y += down * slide * ( life - 0.5 ) * 0.3;
+    rel = ( frac( q ) - centre ) / radius;
+    rel.y /= 1.0 + slide * 0.7;
+    float aa = max( aaCell / radius, 0.02 );
+    // Far away a bead is smaller than a pixel: fade the drops out instead of letting them flicker.
+    return ( 1.0 - smoothstep( 1.0 - aa, 1.0 + aa, length( rel ) ) ) * present * saturate( 1.5 - aa * 2.0 );
 }
 
 Texture2D g_Scene : register( t0 );
@@ -951,6 +971,7 @@ struct VertexIn
     float3 m_View : TEXCOORD0;
     float3 m_Normal : TEXCOORD1;
     float3 m_Uv : TEXCOORD2; // u, v, alpha of the vertex colour
+    float3 m_Object : TEXCOORD3; // position in the space of the part (m)
 };
 
 struct PixelIn
@@ -959,6 +980,7 @@ struct PixelIn
     float3 m_View : TEXCOORD0;
     float3 m_Normal : TEXCOORD1;
     float3 m_Uv : TEXCOORD2;
+    float3 m_Object : TEXCOORD3;
 };
 
 PixelIn MainVS( VertexIn input )
@@ -975,14 +997,24 @@ PixelIn MainVS( VertexIn input )
     output.m_View = input.m_View;
     output.m_Normal = input.m_Normal;
     output.m_Uv = input.m_Uv;
+    output.m_Object = input.m_Object;
     return output;
 }
 
 float4 MainPS( PixelIn input ) : SV_Target
 {
-    // Rain drops: the size of a drop cell on the screen, before any clip (the derivatives need all pixels of the quad).
-    float2 dropUv = input.m_Uv.xy * g_CarWeather2.x;
-    float2 dropWidth = fwidth( dropUv );
+    // Weather on the car (w3): the position in the space of the part, projected onto the main plane of the face (the axis
+    // of the face normal left out; y = up of the car). Before any clip: the derivatives need all pixels of the quad.
+    float3 o = input.m_Object;
+    float3 faceO = abs( cross( ddx( o ), ddy( o ) ) );
+    bool top = faceO.y >= faceO.x && faceO.y >= faceO.z;
+    float2 q = top ? o.xz : ( faceO.x >= faceO.z ? o.zy : o.xy );
+    float2 dropQ = q * g_CarWeather2.x;
+    float2 dq1 = ddx( dropQ );
+    float2 dq2 = ddy( dropQ );
+    float dropAa = max( max( abs( dq1.x ) + abs( dq2.x ), abs( dq1.y ) + abs( dq2.y ) ), 1e-6 );
+    float3 dp1 = ddx( input.m_View );
+    float3 dp2 = ddy( input.m_View );
 
     // Cut out parts (grilles) keep their holes; the game blends the whole body, glass is what is not opaque.
     float alpha = g_Texture.Sample( g_TextureSampler, input.m_Uv.xy ).a * input.m_Uv.z;
@@ -1045,30 +1077,55 @@ float4 MainPS( PixelIn input ) : SV_Target
         return float4( fresnel.xxx, 1.0 );
     float a = saturate( strength * fresnel );
 
-    // Rain drops (LFSP CarDrops): round beads per cell of the texture coordinates, each appearing and drying at its own
-    // pace; inside a bead the reflection is brighter with a small highlight and a darker rim. Wet paint is a little glossier.
+    // Rain drops (LFSP CarDrops, w3): clear beads of water. The paint under a bead stays visible and gets a little
+    // darker (wet), the bead bends normal and reflection like a spherical cap (water, Fresnel F0 0.02), with a small sharp
+    // glint on the side towards the light and a thin dark rim. Small drops plus a few larger ones, more on faces pointing
+    // up, fewer on steep sides where they run down. The glint follows the light of the world (night, storm).
     if ( g_CarWeather.z > 0.0 )
     {
         a = saturate( a * ( 1.0 + 0.3 * g_CarWeather.z ) );
-        float2 cell = floor( dropUv );
-        float h = CarHash( cell );
-        float h2 = CarHash( cell + 17.31 );
-        float life = frac( g_CarWeather.w * ( 0.04 + 0.08 * h2 ) + h );
-        float present = step( h, g_CarWeather.z ) * smoothstep( 0.0, 0.08, life ) * ( 1.0 - smoothstep( 0.75, 1.0, life ) );
-        float2 centre = float2( CarHash( cell + 3.17 ), CarHash( cell + 7.73 ) ) * 0.5 + 0.25;
-        float radius = 0.1 + 0.14 * h2;
-        float d = length( frac( dropUv ) - centre ) / radius;
-        float aa = max( max( dropWidth.x, dropWidth.y ) / radius, 0.02 );
-        // Far away a bead is smaller than a pixel: fade the drops out instead of letting them flicker.
-        float drop = ( 1.0 - smoothstep( 1.0 - aa, 1.0 + aa, d ) ) * present * saturate( 1.5 - aa * 2.0 );
-        if ( drop > 0.0 )
+        float upness = has_up ? saturate( dot( n, g_Up.xyz * g_CarWeather3.x ) ) : 0.5;
+        float slide = top ? 0.0 : saturate( 1.0 - upness * 1.5 );
+        float down = -g_CarWeather3.x; // q.y is the car's y on the side planes
+        float density = g_CarWeather.z * lerp( 0.35, 1.0, upness );
+        float2 rel1, rel2;
+        float m1 = DropLayer( dropQ, dropAa, density, slide, down, 0.0, rel1 );
+        float m2 = DropLayer( dropQ * 0.37, dropAa * 0.37, density * 0.3, slide, down, 41.7, rel2 );
+        float m = max( m1, m2 );
+        if ( m > 0.0 )
         {
-            float2 spot = frac( dropUv ) - centre + radius * float2( 0.35, 0.35 );
-            float highlight = exp( -dot( spot, spot ) / ( radius * radius * 0.06 ) );
-            float rim = smoothstep( 0.6, 1.0, d );
-            float3 bead = colour * lerp( 1.7, 0.6, rim ) + highlight * 0.6;
-            colour = lerp( colour, bead, drop );
-            a = lerp( a, 0.85, drop );
+            float2 rel = m2 > m1 ? rel2 : rel1;
+            // Directions of +q in view space (cotangent frame from the screen derivatives).
+            float3 ng = normalize( cross( dp1, dp2 ) );
+            float3 dp2perp = cross( dp2, ng );
+            float3 dp1perp = cross( ng, dp1 );
+            float3 tq = dp2perp * dq1.x + dp1perp * dq2.x;
+            float3 bq = dp2perp * dq1.y + dp1perp * dq2.y;
+            float scale = rsqrt( max( max( dot( tq, tq ), dot( bq, bq ) ), 1e-30 ) );
+            tq *= scale;
+            bq *= scale;
+            float s2 = saturate( dot( rel, rel ) );
+            float3 nb = normalize( n * sqrt( 1.0 - 0.85 * s2 ) + ( tq * rel.x + bq * rel.y ) * 0.8 );
+            if ( dot( nb, v ) > 0.0 )
+                nb = n;
+            float3 rb = reflect( v, nb );
+            float alongB = dot( rb, g_Forward.xyz );
+            rb += g_Forward.xyz * ( max( abs( alongB ), 0.2 ) - alongB );
+            float3 cb = mul( float4( rb, 0.0 ), g_ClipOfView ).xyz;
+            float2 pb = ( cb.xy / cb.z * g_Viewport.xy + g_Viewport.zw + g_Target.xy ) * g_Target.zw * 2.0 - 1.0;
+            float edgeB = max( abs( pb.x ), abs( pb.y ) );
+            pb /= max( 1.0, edgeB / 0.99 );
+            float3 reflB = g_Scene.SampleLevel( g_SceneSampler, pb * 0.5 + 0.5, max( g_Params.z - 1.0 - g_Shape.y, 0.0 ) ).rgb;
+            if ( has_up )
+                reflB = lerp( reflB, g_SkyColour.rgb, saturate( ( edgeB - 1.0 ) / 0.3 ) * saturate( dot( rb, g_Up.xyz ) * 4.0 + 0.5 ) );
+            float fb = 0.02 + 0.98 * pow( 1.0 - saturate( -dot( nb, v ) ), 5.0 );
+            float3 light = has_up ? normalize( g_Up.xyz * g_CarWeather3.x - v * 0.6 ) : -v;
+            float glint = pow( saturate( dot( rb, light ) ), 400.0 ) * 1.2 * g_CarWeather.y;
+            float rim = smoothstep( 0.7, 1.0, sqrt( s2 ) );
+            float dark = lerp( 1.0, 0.85 - 0.3 * rim, m );
+            float outA = 1.0 - ( 1.0 - a ) * dark;
+            colour = ( colour * a * dark + ( reflB * fb + glint ) * m ) / max( outA, 1e-4 );
+            a = outA;
         }
     }
 
@@ -1084,7 +1141,8 @@ float4 MainPS( PixelIn input ) : SV_Target
     if ( g_CarWeather.x > 0.0 && has_up )
     {
         float up = smoothstep( 0.3, 0.8, dot( n, g_Up.xyz * g_CarWeather3.x ) );
-        float patch = CarNoise( input.m_Uv.xy * 24.0 ) * 0.7 + CarNoise( input.m_Uv.xy * 70.0 ) * 0.3;
+        // Patches of about 30 and 10 cm on the car itself (w3; the UV are mirrored left and right).
+        float patch = CarNoise( q * 3.2 ) * 0.7 + CarNoise( q * 9.5 + 5.3 ) * 0.3;
         float grow = saturate( ( g_CarWeather.x * 1.6 - ( 1.0 - patch ) * 0.9 ) * 2.5 );
         float k = up * min( grow, 0.95 );
         float outA = 1.0 - ( 1.0 - a ) * ( 1.0 - k );

@@ -665,6 +665,7 @@ namespace dx11z
             float m_View[3];
             float m_Normal[3];
             float m_Uv[3]; // u, v, alpha of the vertex colour
+            float m_Object[3]; // position in the space of the part (rain drops and snow, w3: fixed on the car, not mirrored like the UV)
         };
         int m_ConfigCarRefl = 0;
         float m_ConfigCarReflStrength = 0.8f;

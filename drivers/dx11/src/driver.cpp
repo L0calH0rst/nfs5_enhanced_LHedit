@@ -784,6 +784,7 @@ namespace dx11z
                 { "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
                 { "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 28, D3D11_INPUT_PER_VERTEX_DATA, 0 },
                 { "TEXCOORD", 2, DXGI_FORMAT_R32G32B32_FLOAT, 0, 40, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                { "TEXCOORD", 3, DXGI_FORMAT_R32G32B32_FLOAT, 0, 52, D3D11_INPUT_PER_VERTEX_DATA, 0 },
             };
             m_Device->CreateInputLayout( car_layout, static_cast<UINT>(std::size( car_layout )), vs->GetBufferPointer(), vs->GetBufferSize(),
                 m_CarReflLayout.Put() );
@@ -8485,6 +8486,29 @@ namespace dx11z
                 }
             }
         }
+        // Weather on the car (w3): view -> space of the part, the inverse of object x view (row vectors: view = object x R + t).
+        // Drops and snow hash this position, the UV of the car textures are mirrored left and right.
+        double object_of_view[9] = {};
+        bool object_valid = false;
+        {
+            const double r[9] = { model_view[0], model_view[1], model_view[2], model_view[4], model_view[5], model_view[6],
+                                  model_view[8], model_view[9], model_view[10] };
+            const double det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) + r[2] * (r[3] * r[7] - r[4] * r[6]);
+            if (std::abs( det ) > 1e-9 && std::abs( det ) < 1e9)
+            {
+                const double inv = 1.0 / det;
+                object_of_view[0] = (r[4] * r[8] - r[5] * r[7]) * inv;
+                object_of_view[1] = (r[2] * r[7] - r[1] * r[8]) * inv;
+                object_of_view[2] = (r[1] * r[5] - r[2] * r[4]) * inv;
+                object_of_view[3] = (r[5] * r[6] - r[3] * r[8]) * inv;
+                object_of_view[4] = (r[0] * r[8] - r[2] * r[6]) * inv;
+                object_of_view[5] = (r[2] * r[3] - r[0] * r[5]) * inv;
+                object_of_view[6] = (r[3] * r[7] - r[4] * r[6]) * inv;
+                object_of_view[7] = (r[1] * r[6] - r[0] * r[7]) * inv;
+                object_of_view[8] = (r[0] * r[4] - r[1] * r[3]) * inv;
+                object_valid = true;
+            }
+        }
 
         // Camera space of every corner: screen -> clip (xc, yc, wc) -> view, as the water reflections.
         const float * viewport = m_CarReflViewport.data();
@@ -8657,6 +8681,12 @@ namespace dx11z
             out.m_Uv[0] = v.m_U0;
             out.m_Uv[1] = v.m_V0;
             out.m_Uv[2] = blended ? static_cast<float>(v.m_Diffuse >> 24) / 255.0f : 1.0f;
+            // object = (view - t) x R^-1; without a matrix the view position (drops then move with the camera)
+            const double d[3] = { view[0] - model_view[12], view[1] - model_view[13], view[2] - model_view[14] };
+            for (int j = 0; j < 3; ++j)
+                out.m_Object[j] = static_cast<float>(object_valid
+                    ? d[0] * object_of_view[j] + d[1] * object_of_view[3 + j] + d[2] * object_of_view[6 + j]
+                    : view[static_cast<std::size_t>(j)]);
         }
 
         // Paint of a matte part: its triangles instead of those of the batch.
@@ -9773,7 +9803,7 @@ namespace dx11z
             weather_resolved = true;
             if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                 weather_fn = reinterpret_cast<WeatherFn>(::GetProcAddress( lfsp, "LfspWeatherFx" ));
-            Log( "Weather fx (dx11z weather w2: storm, lightning, snow white, snow and drops on cars): LFSP export LfspWeatherFx %s",
+            Log( "Weather fx (dx11z weather w3: storm, lightning, snow white, snow and clear drops on cars, fixed on the car): LFSP export LfspWeatherFx %s",
                 weather_fn != nullptr ? "found" : "not available" );
         }
         if (weather_fn == nullptr)
@@ -9794,7 +9824,7 @@ namespace dx11z
                 car_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     car_fn = reinterpret_cast<CarFn>(::GetProcAddress( lfsp, "LfspWeatherCar" ));
-                Log( "Weather fx (dx11z weather w2): LFSP export LfspWeatherCar %s", car_fn != nullptr ? "found" : "not available" );
+                Log( "Weather fx (dx11z weather w3): LFSP export LfspWeatherCar %s", car_fn != nullptr ? "found" : "not available" );
             }
             m_CarWeatherOn = car_fn != nullptr && car_fn( m_CarWeather ) != 0;
             m_CarWeatherLight = m_CarWeatherLightNext * (NightNative() ? 0.35f : 1.0f);
