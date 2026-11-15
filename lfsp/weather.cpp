@@ -84,9 +84,9 @@ namespace
         { "random", "Zufall" },
         { "time of day", "Tageszeit" },
         { "day", "Tag" },
-        { "night", "Nacht" },
-        { "Choose the time of day: as on the track, day, night or random.",
-          "Tageszeit w\xE4hlen: wie auf der Strecke, Tag, Nacht oder Zufall." },
+        { "dusk/dawn", "D\xE4mmerung" },
+        { "Choose the time of day: as on the track, day, dusk/dawn or random.",
+          "Tageszeit w\xE4hlen: wie auf der Strecke, Tag, D\xE4mmerung oder Zufall." },
     };
 
     // ---- Einstellungen ----
