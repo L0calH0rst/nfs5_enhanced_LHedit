@@ -1668,7 +1668,7 @@ namespace dx11z
             ::GetPrivateProfileStringA( "Weather", "SnowWhite", "0.25", snow, sizeof( snow ), lights_ini.c_str() );
             m_ConfigSnowWhite = ::GetPrivateProfileIntA( "Weather", "Enabled", 1, lights_ini.c_str() ) != 0 && std::atof( snow ) > 0.0;
             char cells[32] = {};
-            ::GetPrivateProfileStringA( "Weather", "CarDropCells", "30", cells, sizeof( cells ), lights_ini.c_str() );
+            ::GetPrivateProfileStringA( "Weather", "CarDropCells", "40", cells, sizeof( cells ), lights_ini.c_str() );
             m_ConfigCarDropCells = std::clamp( static_cast<float>(std::atof( cells )), 4.0f, 400.0f );
             char flow[32] = {};
             ::GetPrivateProfileStringA( "Weather", "CarDropFlow", "0.005", flow, sizeof( flow ), lights_ini.c_str() );
@@ -1680,7 +1680,7 @@ namespace dx11z
             ::GetPrivateProfileStringA( "Weather", "CarSnowSoft", "1.0", snow_soft, sizeof( snow_soft ), lights_ini.c_str() );
             m_ConfigCarSnowSoft = std::clamp( static_cast<float>(std::atof( snow_soft )), 0.0f, 5.0f );
             char snow_bright[32] = {};
-            ::GetPrivateProfileStringA( "Weather", "CarSnowBright", "0.65", snow_bright, sizeof( snow_bright ), lights_ini.c_str() );
+            ::GetPrivateProfileStringA( "Weather", "CarSnowBright", "0.5", snow_bright, sizeof( snow_bright ), lights_ini.c_str() );
             m_ConfigCarSnowBright = std::clamp( static_cast<float>(std::atof( snow_bright )), 0.0f, 2.0f );
             Log( "Weather fx (dx11z weather w1: storm, lightning, snow white): SnowWhite %s, track draw hook %s", snow,
                 m_ConfigSnowWhite ? "wanted" : "not needed" );
@@ -9852,7 +9852,7 @@ namespace dx11z
             weather_resolved = true;
             if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                 weather_fn = reinterpret_cast<WeatherFn>(::GetProcAddress( lfsp, "LfspWeatherFx" ));
-            Log( "Weather fx (dx11z weather w8: storm, lightning, snow white, snow and clear drops on cars, fixed on the car, fine snow, drops flow with speed, renew, visible beads, soft snow): LFSP export LfspWeatherFx %s",
+            Log( "Weather fx (dx11z weather w9: storm, lightning, snow white, snow and clear drops on cars, fixed on the car, fine snow, drops flow with speed, renew, visible beads, even snow, varied streaks): LFSP export LfspWeatherFx %s",
                 weather_fn != nullptr ? "found" : "not available" );
         }
         if (weather_fn == nullptr)
@@ -9873,7 +9873,7 @@ namespace dx11z
                 car_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     car_fn = reinterpret_cast<CarFn>(::GetProcAddress( lfsp, "LfspWeatherCar" ));
-                Log( "Weather fx (dx11z weather w8): LFSP export LfspWeatherCar %s", car_fn != nullptr ? "found" : "not available" );
+                Log( "Weather fx (dx11z weather w9): LFSP export LfspWeatherCar %s", car_fn != nullptr ? "found" : "not available" );
             }
             m_CarWeatherOn = car_fn != nullptr && car_fn( m_CarWeather ) != 0;
             m_CarWeatherLight = m_CarWeatherLightNext * (NightNative() ? 0.35f : 1.0f);

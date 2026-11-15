@@ -923,7 +923,7 @@ cbuffer CarReflectConstants : register( b0 )
     float4 g_CarWeather; // weather on the car (LFSP LfspWeatherCar, PLAN.md 15.3): x snow 0..1, y light of the snow, z rain drops 0..1, w time s
     float4 g_CarWeather2; // x drop cells per metre on the car (w3: in the space of the part), yzw snow colour
     float4 g_CarWeather3; // x sign of g_Up for the snow (from the side of the camera), y test view ('[Weather] SnowDebug' 3 up-ness,
-                          // 4 drops), z shine of the drops ('[Weather] CarDropShine', w7), w softness of the snow ('CarSnowSoft', w8)
+                          // 4 drops), z shine of the drops ('[Weather] CarDropShine', w7), w evenness of the snow ('CarSnowSoft', w9)
     float4 g_CarFlow; // w5: xyz distance the drops of this car have crept (space of the part, m, wrapped), w speed of the car m/s
     float4 g_CarFlowDir; // xyz direction of travel in the space of the part, w brightness of the snow ('[Weather] CarSnowBright', w8)
     float4 g_CarFlowView; // xyz direction of travel in view space
@@ -959,18 +959,26 @@ float DropLayer( float2 q, float aaCell, float density, float slide, float down,
     float2 drop = cell + salt + cycle * 7.13;
     float h = CarHash( drop + 1.7 );
     float h2 = CarHash( drop + 23.9 );
-    float present = step( h, density ) * smoothstep( 0.0, 0.04, life ) * ( 1.0 - smoothstep( 0.85, 1.0, life ) );
-    float radius = ( 0.12 + 0.10 * h2 ) * ( 1.0 - 0.3 * slide ) / ( 1.0 + 0.4 * stretch );
-    // w7: at least about 1.3 pixels for a radius, so a bead does not drop out of the pixel grid; cells smaller than about
-    // three pixels fade out (the wet gloss of the paint stays).
-    radius = min( max( radius, 1.3 * aaCell ), 0.3 );
-    float2 centre = float2( CarHash( drop + 3.17 ), CarHash( drop + 7.73 ) ) * 0.3 + 0.35;
+    float h3 = CarHash( drop + 11.1 );
+    // w9: not every drop is drawn out the same: none, a little or up to about 3 x the given streak (random per drop), so
+    // the streaks vary in length; streaking drops are fewer.
+    float own = stretch * ( h3 < 0.3 ? 0.0 : ( h3 - 0.3 ) * ( h3 - 0.3 ) * 4.0 );
+    float present = step( h, density * ( 1.0 - 0.4 * saturate( own / 3.0 ) ) ) * smoothstep( 0.0, 0.04, life ) *
+                    ( 1.0 - smoothstep( 0.85, 1.0, life ) );
+    float radius = ( 0.08 + 0.08 * h2 ) * ( 1.0 - 0.3 * slide ) / ( 1.0 + 0.3 * own );
+    // At least about a pixel for a radius, so a bead does not drop out of the pixel grid; cells smaller than about three
+    // pixels fade out (the wet gloss of the paint stays).
+    radius = min( max( radius, 1.0 * aaCell ), 0.3 );
+    // Full jitter of the place in the cell (w9), so no grid shows.
+    float2 centre = float2( CarHash( drop + 3.17 ), CarHash( drop + 7.73 ) ) * 0.6 + 0.2;
     centre.y += down * slide * ( life - 0.5 ) * 0.3;
     rel = ( frac( q ) - centre ) / radius;
     rel.y /= 1.0 + slide * 0.7;
-    // Fast: drawn out along the flow into short streaks (w5).
+    // Streaks along the flow, slightly bent sideways.
     float ra = dot( rel, along );
-    rel += along * ( ra / ( 1.0 + stretch ) - ra );
+    float2 side = float2( -along.y, along.x );
+    rel += along * ( ra / ( 1.0 + own ) - ra );
+    rel += side * sin( ra * 0.8 + h2 * 6.28 ) * 0.25 * saturate( own );
     float aa = max( aaCell / radius, 0.02 );
     return ( 1.0 - smoothstep( 1.0 - aa, 1.0 + aa, length( rel ) ) ) * present * ( 1.0 - smoothstep( 0.2, 0.35, aaCell ) );
 }
@@ -1115,14 +1123,22 @@ float4 MainPS( PixelIn input ) : SV_Target
         float down = -g_CarWeather3.x; // q.y is the car's y on the side planes
         float speed = g_CarFlow.w;
         float2 along = top ? g_CarFlowDir.xz : ( faceO.x >= faceO.z ? g_CarFlowDir.zy : g_CarFlowDir.xy );
-        along = dot( along, along ) > 1e-4 ? normalize( along ) : float2( 0.0, 1.0 );
-        float stretch = saturate( ( speed - 12.0 ) / 18.0 ) * 3.0; // w6: streaks up to 4 x as long from about 110 km/h
+        // w9: streaks only where the air runs along the face (at the back it hits the face head on: no streak there).
+        float alongLength = length( along );
+        along = alongLength > 1e-3 ? along / alongLength : float2( 0.0, 1.0 );
+        float stretch = saturate( ( speed - 12.0 ) / 18.0 ) * 1.5 * saturate( alongLength * 1.5 - 0.3 );
         float front = saturate( dot( n, g_CarFlowView.xyz ) * 2.0 ); // n faces the camera; front faces point along travel
         float blown = saturate( ( speed - 36.0 ) / 15.0 ) * front;
         float density = g_CarWeather.z * lerp( 0.35, 1.0, upness ) * ( 1.0 - blown );
         float2 rel1, rel2;
         float m1 = DropLayer( dropQ, dropAa, density, slide, down, along, stretch, 0.0, rel1 );
-        float m2 = DropLayer( dropQ * 0.5, dropAa * 0.5, density * 0.35, slide, down, along, stretch, 41.7, rel2 );
+        // Large drops on a grid turned by 37 degrees, so the two grids do not line up.
+        const float2 turn = float2( 0.7986, 0.6018 );
+        float2 q2 = dropQ * 0.5;
+        q2 = float2( q2.x * turn.x - q2.y * turn.y, q2.x * turn.y + q2.y * turn.x );
+        float2 along2 = float2( along.x * turn.x - along.y * turn.y, along.x * turn.y + along.y * turn.x );
+        float m2 = DropLayer( q2, dropAa * 0.5, density * 0.25, slide, down, along2, stretch, 41.7, rel2 );
+        rel2 = float2( rel2.x * turn.x + rel2.y * turn.y, -rel2.x * turn.y + rel2.y * turn.x );
         float m = max( m1, m2 );
         // Test view '[Weather] SnowDebug = 4': red small drops, green large drops, blue alpha of the reflection.
         if ( g_CarWeather3.y > 3.5 )
@@ -1163,7 +1179,7 @@ float4 MainPS( PixelIn input ) : SV_Target
             float width = max( 0.05, dropAa * dropAa * 4.0 );
             float glint = exp( -dot( rel - spot, rel - spot ) / width ) * saturate( 1.6 - length( hq ) ) * 1.6 * shine * g_CarWeather.y;
             float rim = smoothstep( 0.7, 1.0, sqrt( s2 ) );
-            float dark = lerp( 1.0, 0.92 - 0.1 * rim, m );
+            float dark = lerp( 1.0, 0.97 - 0.03 * rim, m ); // w9: hardly any dark rim
             float outA = 1.0 - ( 1.0 - a ) * dark;
             colour = ( colour * a * dark + ( reflB * ( 0.1 + fb ) * shine + glint ) * m ) / max( outA, 1e-4 );
             a = outA;
@@ -1177,43 +1193,33 @@ float4 MainPS( PixelIn input ) : SV_Target
         return float4( saturate( facingUp ), 0.0, saturate( -facingUp ), 1.0 );
     }
 
-    // Snow on the car (LFSP CarSnow, w8): a soft layer of powder on faces pointing up. The cover comes from three coarse
-    // octaves (33, 11 and 3 cm), so it lies as connected fluffy areas instead of blots; two fine octaves (12 and 4 mm) only
-    // shade it as grain. Wide soft edge ('[Weather] CarSnowSoft'), thin snow towards the edge shows the paint through.
-    // Much on top, running out softly down the sides, none below. Grey-blue white times '[Weather] CarSnowBright', lit like
-    // the world; a few glints that twinkle with the view. Octaves finer than about two pixels fade to their mean.
+    // Snow on the car (LFSP CarSnow, w9): an even thin layer of powder that grows over every face pointing up, only gently
+    // varied by large low waves (no threshold, no blots). The noise runs on the position in the space of the part in three
+    // planes at once, so it does not jump at triangle edges (the main plane of a face does). The amount follows the
+    // interpolated normal: much on top, gently less down the sides, none below. '[Weather] CarSnowSoft' = how even (1 =
+    // even, smaller = more varied), '[Weather] CarSnowBright' = brightness; neutral grey-white, lit like the world.
     if ( g_CarWeather.x > 0.0 && has_up )
     {
         float upDot = dot( n, g_Up.xyz * g_CarWeather3.x );
-        float slope = pow( smoothstep( 0.2, 0.95, upDot ), 1.2 );
+        float slope = smoothstep( 0.15, 0.95, upDot );
         if ( slope > 0.0 )
         {
             float fp = dropAa / max( g_CarWeather2.x, 1.0 ); // metres per pixel on the face
-            const float3 freq = float3( 3.0, 9.0, 30.0 );
-            const float3 amp = float3( 0.55, 0.3, 0.15 );
-            float3 fade = saturate( 1.6 - freq * fp * 2.2 );
-            float3 oct = float3( CarNoise( q * freq.x ), CarNoise( q * freq.y + 3.1 ), CarNoise( q * freq.z + 7.7 ) );
-            float body = dot( amp, lerp( 0.5, oct, fade ) );
-            float2 fineFade = saturate( 1.6 - float2( 80.0, 240.0 ) * fp * 2.2 );
-            float fine = ( CarNoise( q * 80.0 + 1.9 ) - 0.5 ) * 0.6 * fineFade.x + ( CarNoise( q * 240.0 + 4.3 ) - 0.5 ) * 0.4 * fineFade.y;
-            float soft = max( g_CarWeather3.w, 0.05 );
-            float width = max( 0.1 * soft, dot( amp * fade, freq ) * fp * 1.2 );
-            // CarSnow 0.5 covers a flat roof to about three quarters, the sides little.
-            float cover = saturate( g_CarWeather.x * 1.5 ) * slope;
-            float level = lerp( 0.72, 0.3, cover );
-            float k = smoothstep( level - width, level + width, body + fine * 0.04 ) * saturate( cover * 3.0 );
+            float3 oS = o * 2.5;
+            float wave = ( CarNoise( oS.xy ) + CarNoise( oS.yz + 3.7 ) + CarNoise( oS.zx + 8.1 ) ) / 3.0;
+            float3 oS2 = o * 7.0;
+            wave = wave * 0.65 + ( CarNoise( oS2.xy + 1.3 ) + CarNoise( oS2.yz + 5.9 ) + CarNoise( oS2.zx + 2.2 ) ) / 3.0 * 0.35 *
+                   saturate( 1.6 - 7.0 * fp * 2.2 );
+            float vary = clamp( 0.5 / max( g_CarWeather3.w, 0.1 ), 0.1, 1.5 );
+            float cover = saturate( g_CarWeather.x * 1.6 ) * slope;
+            float k = cover * saturate( 1.0 + vary * ( wave - 0.5 ) * 2.0 ) * 0.9;
             if ( k > 0.0 )
             {
-                // Thin towards the edge: the paint shows through.
-                float depth = saturate( ( body - level ) / ( 0.15 + 0.1 * soft ) + 0.5 );
-                k *= lerp( 0.45, 0.92, depth );
-                float grain = 1.0 + fine * 0.18;
-                float3 snow = g_CarWeather2.yzw * float3( 0.9, 0.93, 1.0 ) * lerp( 0.85, 1.0, depth ) * grain *
-                              ( 0.85 + 0.15 * saturate( upDot ) );
-                float2 cell = floor( q * 180.0 );
-                float gh = CarHash( cell + floor( dot( v, float3( 7.0, 11.0, 5.0 ) ) * 6.0 ) * 0.37 );
-                float glitter = step( 0.993, gh ) * saturate( 1.0 - 180.0 * fp * 1.5 ) * depth;
-                snow = ( snow * g_CarFlowDir.w + glitter * 0.5 ) * g_CarWeather.y;
+                float3 oG = o * 90.0;
+                float grain = ( CarNoise( oG.xy ) + CarNoise( oG.yz + 4.4 ) ) * 0.5 - 0.5;
+                grain *= saturate( 1.6 - 90.0 * fp * 2.2 );
+                float3 snow = g_CarWeather2.yzw * float3( 0.97, 0.97, 0.96 ) * ( 1.0 + grain * 0.12 ) * ( 0.88 + 0.12 * saturate( upDot ) );
+                snow *= g_CarFlowDir.w * g_CarWeather.y;
                 float outA = 1.0 - ( 1.0 - a ) * ( 1.0 - k );
                 colour = ( colour * a * ( 1.0 - k ) + snow * k ) / max( outA, 1e-4 );
                 a = outA;
