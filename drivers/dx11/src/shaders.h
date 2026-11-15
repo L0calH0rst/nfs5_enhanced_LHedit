@@ -29,6 +29,9 @@ cbuffer DrawConstants : register( b0 )
     float4 g_Test; // test switches (BUGS.md B21): x '[Dx11] TestVertexAlpha', y '[Weather] NightEdgeLight'
     float4 g_Clip; // clip rectangle of the game in game pixels: left, top, right, bottom
     float4 g_Night; // rgb: factor, w: 0 off, 1 world, 2 sky, 3 light sprites (LFSP LfspNightGradeEx)
+    float4 g_Weather; // x snow white amount (0 off), y desaturation, z slope (0 uniform, 1 only faces up), w test view (LFSP LfspWeatherFx)
+    float4 g_Weather2; // x fog exponent (storm, 1 = as the game), yzw snow colour
+    row_major float4x4 g_SnowToWorld; // screen side (xc, yc, wc, 1) to track space, for the slope of the snow
     // The light arrays come last (the driver uploads only the used entries of each).
     float4 g_ExtraColour[16];
     row_major float4x4 g_ExtraViewToLight[16];
@@ -300,6 +303,28 @@ float4 MainPS( PixelIn input ) : SV_Target
     float4 tex0 = ( g_Flags.w & 1 ) ? g_Texture0.Sample( g_Sampler0, input.m_Uv.xy ) : float4( 1, 1, 1, 1 );
     float4 tex1 = ( g_Flags.w & 2 ) ? g_Texture1.Sample( g_Sampler1, input.m_Uv.zw ) : float4( 1, 1, 1, 1 );
 
+    // Snow white (LFSP SnowWhite, g_Weather.x > 0, track draws only): the vertices carry no normals, the face normal comes
+    // from the screen derivatives of the position in track space. Facing the camera, y = up. Before any discard: the
+    // derivatives need all pixels of the quad.
+    float snowUp = 1.0;
+    float3 snowNormal = float3( 0.0, 1.0, 0.0 );
+#ifndef MIRROR_PASS
+    if ( g_Weather.x > 0.0 && ( g_Weather.z > 0.0 || g_Weather.w > 0.5 ) && g_Head.x > 0.0 && g_SnowToWorld[3].w > 0.5 )
+    {
+        float3 p = mul( float4( input.m_View, 1.0 ), g_SnowToWorld ).xyz;
+        float3 n = cross( ddx( p ), ddy( p ) );
+        float len = length( n );
+        if ( len > 1e-12 )
+        {
+            n /= len;
+            if ( dot( n, g_SnowToWorld[3].xyz - p ) < 0.0 )
+                n = -n;
+            snowNormal = n;
+            snowUp = smoothstep( 0.35, 0.85, n.y );
+        }
+    }
+#endif
+
     // Shore textures fade out towards the water: the lower alpha range becomes transparent, the rest ramps up.
     if ( g_AlphaRef.y > 0.0 )
         tex0.a = saturate( ( tex0.a - g_AlphaRef.y ) / ( 1.0 - g_AlphaRef.y ) );
@@ -426,6 +451,17 @@ float4 MainPS( PixelIn input ) : SV_Target
     }
     current.a = alpha;
 
+    // Snow white: a little desaturated, then mixed towards the snow colour (shaded by the vertex colour of the game, and
+    // by the night or storm factor of the world). With the slope (g_Weather.z) mostly on faces that point up.
+    if ( g_Weather.x > 0.0 )
+    {
+        const float3 lumWeights = float3( 0.299, 0.587, 0.114 );
+        current.rgb = lerp( current.rgb, dot( current.rgb, lumWeights ).xxx, g_Weather.y );
+        float shade = saturate( dot( diffuseBase.rgb, lumWeights ) * 1.2 + 0.2 );
+        float amount = g_Weather.x * lerp( 1.0, snowUp, saturate( g_Weather.z ) );
+        current.rgb = lerp( current.rgb, g_Weather2.yzw * shade * nightMul, amount );
+    }
+
     if ( g_Flags.x != 0 )
     {
         float fog;
@@ -441,12 +477,21 @@ float4 MainPS( PixelIn input ) : SV_Target
             fog = ( g_FogParams.y - depth ) / max( g_FogParams.y - g_FogParams.x, 1e-6 );
         else
             fog = specular.a;
+        // Storm (LFSP StormFog): the share seen through the fog to a power, thicker fog at the same start.
+        if ( g_Weather2.x > 1.0 )
+            fog = pow( saturate( fog ), g_Weather2.x );
         current.rgb = lerp( g_FogColor.rgb * nightMul, current.rgb, saturate( fog ) );
     }
 
     // Night, sky (2) and light sprites (3): the factor of the draw.
     if ( g_Night.w > 1.5 )
         current.rgb *= g_Night.rgb;
+
+    // '[Weather] SnowDebug': 1 = snow share as grey (white = full snow), 2 = face normal in track space as colour.
+    if ( g_Weather.w > 1.5 )
+        current.rgb = snowNormal * 0.5 + 0.5;
+    else if ( g_Weather.w > 0.5 )
+        current.rgb = ( g_Weather.x > 0.0 ? lerp( 1.0, snowUp, saturate( g_Weather.z ) ) : 0.0 ).xxx;
 
     if ( g_Debug.x > 0 )
         current.rgb = lerp( current.rgb, float3( 1, 0, 1 ), 0.7 );
@@ -875,7 +920,24 @@ cbuffer CarReflectConstants : register( b0 )
     float4 g_SkyColour; // rgb: sky where the frame has nothing (the fog colour), w: 1 = use it
     float4 g_Shape; // x: exponent of the Fresnel term (5 = Schlick, smaller = softer change), y: mip levels the frame copy is smaller by,
                     // z: 1 = blur from the shared chain (9.16a, '[CarReflections] BlurChain'), w: its top level
+    float4 g_CarWeather; // weather on the car (LFSP LfspWeatherCar, PLAN.md 15.3): x snow 0..1, y light of the snow, z rain drops 0..1, w time s
+    float4 g_CarWeather2; // x drops per texture unit, yzw snow colour
+    float4 g_CarWeather3; // x sign of g_Up for the snow (from the side of the camera), y 1 = test view of the up-ness ('[Weather] SnowDebug = 3')
 };
+
+// Weather on the car: a hash per cell of the texture coordinates (stable on the car, no texture needed).
+float CarHash( float2 p )
+{
+    return frac( sin( dot( p, float2( 12.9898, 78.233 ) ) ) * 43758.5453 );
+}
+
+float CarNoise( float2 p )
+{
+    float2 i = floor( p );
+    float2 f = frac( p );
+    f = f * f * ( 3.0 - 2.0 * f );
+    return lerp( lerp( CarHash( i ), CarHash( i + float2( 1, 0 ) ), f.x ), lerp( CarHash( i + float2( 0, 1 ) ), CarHash( i + float2( 1, 1 ) ), f.x ), f.y );
+}
 
 Texture2D g_Scene : register( t0 );
 Texture2D g_Texture : register( t1 );
@@ -918,6 +980,10 @@ PixelIn MainVS( VertexIn input )
 
 float4 MainPS( PixelIn input ) : SV_Target
 {
+    // Rain drops: the size of a drop cell on the screen, before any clip (the derivatives need all pixels of the quad).
+    float2 dropUv = input.m_Uv.xy * g_CarWeather2.x;
+    float2 dropWidth = fwidth( dropUv );
+
     // Cut out parts (grilles) keep their holes; the game blends the whole body, glass is what is not opaque.
     float alpha = g_Texture.Sample( g_TextureSampler, input.m_Uv.xy ).a * input.m_Uv.z;
     if ( g_Forward.w >= 0.0 )
@@ -977,7 +1043,55 @@ float4 MainPS( PixelIn input ) : SV_Target
         return float4( colour, 1.0 );
     if ( g_Params.w == 3.0 )
         return float4( fresnel.xxx, 1.0 );
-    return float4( colour, saturate( strength * fresnel ) );
+    float a = saturate( strength * fresnel );
+
+    // Rain drops (LFSP CarDrops): round beads per cell of the texture coordinates, each appearing and drying at its own
+    // pace; inside a bead the reflection is brighter with a small highlight and a darker rim. Wet paint is a little glossier.
+    if ( g_CarWeather.z > 0.0 )
+    {
+        a = saturate( a * ( 1.0 + 0.3 * g_CarWeather.z ) );
+        float2 cell = floor( dropUv );
+        float h = CarHash( cell );
+        float h2 = CarHash( cell + 17.31 );
+        float life = frac( g_CarWeather.w * ( 0.04 + 0.08 * h2 ) + h );
+        float present = step( h, g_CarWeather.z ) * smoothstep( 0.0, 0.08, life ) * ( 1.0 - smoothstep( 0.75, 1.0, life ) );
+        float2 centre = float2( CarHash( cell + 3.17 ), CarHash( cell + 7.73 ) ) * 0.5 + 0.25;
+        float radius = 0.1 + 0.14 * h2;
+        float d = length( frac( dropUv ) - centre ) / radius;
+        float aa = max( max( dropWidth.x, dropWidth.y ) / radius, 0.02 );
+        // Far away a bead is smaller than a pixel: fade the drops out instead of letting them flicker.
+        float drop = ( 1.0 - smoothstep( 1.0 - aa, 1.0 + aa, d ) ) * present * saturate( 1.5 - aa * 2.0 );
+        if ( drop > 0.0 )
+        {
+            float2 spot = frac( dropUv ) - centre + radius * float2( 0.35, 0.35 );
+            float highlight = exp( -dot( spot, spot ) / ( radius * radius * 0.06 ) );
+            float rim = smoothstep( 0.6, 1.0, d );
+            float3 bead = colour * lerp( 1.7, 0.6, rim ) + highlight * 0.6;
+            colour = lerp( colour, bead, drop );
+            a = lerp( a, 0.85, drop );
+        }
+    }
+
+    // Test view '[Weather] SnowDebug = 3': red = face points up (gets snow), blue = points down, black = up unknown.
+    if ( g_CarWeather3.y > 0.5 )
+    {
+        float facingUp = has_up ? dot( n, g_Up.xyz * g_CarWeather3.x ) : 0.0;
+        return float4( saturate( facingUp ), 0.0, saturate( -facingUp ), 1.0 );
+    }
+
+    // Snow on the car (LFSP CarSnow): on faces pointing up (roof, bonnet, boot lid), lit like the world. It starts as
+    // scattered patches that grow together as the amount rises (CarSnow 0.5 covers a flat roof almost fully).
+    if ( g_CarWeather.x > 0.0 && has_up )
+    {
+        float up = smoothstep( 0.3, 0.8, dot( n, g_Up.xyz * g_CarWeather3.x ) );
+        float patch = CarNoise( input.m_Uv.xy * 24.0 ) * 0.7 + CarNoise( input.m_Uv.xy * 70.0 ) * 0.3;
+        float grow = saturate( ( g_CarWeather.x * 1.6 - ( 1.0 - patch ) * 0.9 ) * 2.5 );
+        float k = up * min( grow, 0.95 );
+        float outA = 1.0 - ( 1.0 - a ) * ( 1.0 - k );
+        colour = ( colour * a * ( 1.0 - k ) + g_CarWeather2.yzw * g_CarWeather.y * k ) / max( outA, 1e-4 );
+        a = outA;
+    }
+    return float4( colour, a );
 }
 )hlsl";
 

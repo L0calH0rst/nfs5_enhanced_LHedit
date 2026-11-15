@@ -193,6 +193,11 @@ namespace dx11z
         float m_Test[4];
         float m_Clip[4]; // clip rectangle of the game in game pixels: left, top, right, bottom
         float m_Night[4]; // rgb: factor of the world at night (LFSP LfspNightGrade), w: 1 = on
+        // Weather (LFSP LfspWeatherFx): x snow white amount (0 = off), y desaturation, z slope (0 uniform, 1 only faces up), w test view;
+        // m_Weather2: x fog exponent (storm, 1 = as the game), yzw snow colour. m_SnowToWorld: screen side (xc, yc, wc, 1) to track space.
+        float m_Weather[4];
+        float m_Weather2[4];
+        float m_SnowToWorld[16];
         // The light arrays come last: a draw uploads only the head of the block and the first m_Extra[0] / m_Rear[0] entries of each array.
         float m_ExtraColour[16][4];
         float m_ExtraViewToLight[16][16];
@@ -201,9 +206,9 @@ namespace dx11z
         float m_RearViewToLight[16][16];
     };
 
-    static_assert( offsetof( DrawConstants, m_ExtraColour ) == 400 && offsetof( DrawConstants, m_ExtraViewToLight ) == 656 &&
-        offsetof( DrawConstants, m_RearLeft ) == 1680 && offsetof( DrawConstants, m_RearRight ) == 1936 &&
-        offsetof( DrawConstants, m_RearViewToLight ) == 2192 && sizeof( DrawConstants ) == 3216, "DrawConstants must match the fxc listing of shaders::SCENE" );
+    static_assert( offsetof( DrawConstants, m_ExtraColour ) == 496 && offsetof( DrawConstants, m_ExtraViewToLight ) == 752 &&
+        offsetof( DrawConstants, m_RearLeft ) == 1776 && offsetof( DrawConstants, m_RearRight ) == 2032 &&
+        offsetof( DrawConstants, m_RearViewToLight ) == 2288 && sizeof( DrawConstants ) == 3312, "DrawConstants must match the fxc listing of shaders::SCENE" );
 
     struct Texture
     {
@@ -825,6 +830,7 @@ namespace dx11z
         int m_HeadCount = 0;
         bool m_HeadValidated = false;
         std::array<float, 16> m_HeadViewToLight = {}; // screen side (xc, yc, wc, 1) to headlight space
+        std::array<float, 16> m_HeadClipToObject = {}; // screen side (xc, yc, wc, 1) to the space of the track mesh (snow slope)
         std::array<float, 16> m_HeadModelView = {};
         std::array<float, 16> m_HeadProjectionMatrix = {};
         std::array<float, 4> m_HeadProjection = {}; // fx, fy, cx, cy
@@ -1271,6 +1277,27 @@ namespace dx11z
         // brightens them and draws streaks.
         int m_ConfigReflectionLights = 0; // '[Water] ReflectionLights'
         float m_ConfigReflectionLightBoost = 3.0f; // '[Water] ReflectionLightBoost': factor on their colour
+        bool m_NightGradeSeen = false; // LFSP NightGrade reported active for the last draw
+        // Weather (LFSP LfspWeatherFx, PLAN.md 15.2): world rgb, sky rgb, fog exponent, snow white, desaturation, slope, test, snow rgb,
+        // lightning, mode; read once per frame.
+        float m_WeatherFx[16] = {};
+        bool m_WeatherFxOn = false; // LFSP reported weather effects for this frame
+        bool m_WeatherGrade = false; // storm or lightning: factors of world and sky differ from 1
+        std::uint32_t m_WeatherFxFlip = 0xFFFFFFFFu;
+        bool m_ConfigSnowWhite = false; // '[Weather] SnowWhite' of lfsp.ini above 0: the track chunk draw is hooked for it
+        int m_TrackDrawDepth = 0; // inside the game's track chunk draw (FUN_00450ca0)
+        bool m_SnowDraw = false; // the batch being drawn gets snow white
+        // snow draws, left out outside the track draw, left out inside (car, water), with slope matrix; car reflection draws with snow, with drops only
+        std::uint64_t m_WeatherStats[6] = {};
+        // Snow and drops on the cars (LFSP LfspWeatherCar, PLAN.md 15.3): snow, drops, time; light of the snow (world factor of the last frame).
+        float m_CarWeather[8] = {};
+        bool m_CarWeatherOn = false;
+        float m_CarWeatherLight = 1.0f;
+        float m_CarWeatherLightNext = 1.0f;
+        float m_CarUpVote = 0.0f; // > 0: "up" of the car (row 1 of object x view) points to the camera side, as expected
+        std::uint64_t m_CarUpVotes[2] = {}; // draws with the camera on the "up" side, on the other side
+        float m_ConfigCarDropCells = 48.0f; // '[Weather] CarDropCells' of lfsp.ini: drop cells per texture unit (larger = smaller drops)
+        ULONGLONG m_WeatherNextReport = 0;
         float m_ConfigReflectionLightStreak = 6.0f; // '[Water] ReflectionLightStreak': step of the streak lookups (pixels at 1080 lines, 0 = none)
         std::uint64_t m_ReflLightsKept = 0;
         ComPtr<ID3D11Texture2D> m_ReflLight;
@@ -1472,6 +1499,14 @@ namespace dx11z
         void OnDayTrackDraw(
             bool begin
         );
+
+        // Around the track chunk draw for both: snow white marks the track draws (m_TrackDrawDepth), then OnDayTrackDraw.
+        void OnTrackChunk(
+            bool begin
+        );
+
+        // LFSP LfspWeatherFx once per frame into m_WeatherFx (storm, lightning, snow white). True when LFSP reports any.
+        bool WeatherFxFrame();
 
         // Called around the game's skid mark draw 0x451420 (begin, end), '[World] SkidDepthBias' (BUGS.md 19.1).
         void OnSkidDraw(

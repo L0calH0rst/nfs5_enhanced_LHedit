@@ -596,9 +596,9 @@ namespace dx11z
         m_Device->CreateBuffer( &desc, nullptr, m_PresentConstants.Put() );
         desc.ByteWidth = sizeof( ClearConstants );
         m_Device->CreateBuffer( &desc, nullptr, m_ClearConstants.Put() );
-        desc.ByteWidth = 256; // MirrorConstants of the scene shader, also the constants of the reflection composite
+        desc.ByteWidth = 368; // MirrorConstants of the scene shader, also the constants of the reflection composite (9.14b: 368)
         m_Device->CreateBuffer( &desc, nullptr, m_MirrorConstants.Put() );
-        desc.ByteWidth = 256; // CarReflectConstants
+        desc.ByteWidth = 304; // CarReflectConstants (15.3: + weather on the car)
         m_Device->CreateBuffer( &desc, nullptr, m_CarReflConstants.Put() );
 
         D3D11_SAMPLER_DESC sampler = {};
@@ -1662,6 +1662,16 @@ namespace dx11z
 
         m_ConfigNightEdgeLight = ::GetPrivateProfileIntA( "Weather", "NightEdgeLight", 1, lights_ini.c_str() ) != 0;
         Log( "Config NightEdgeLight %d", m_ConfigNightEdgeLight ? 1 : 0 );
+        {
+            char snow[32] = {};
+            ::GetPrivateProfileStringA( "Weather", "SnowWhite", "0.25", snow, sizeof( snow ), lights_ini.c_str() );
+            m_ConfigSnowWhite = ::GetPrivateProfileIntA( "Weather", "Enabled", 1, lights_ini.c_str() ) != 0 && std::atof( snow ) > 0.0;
+            char cells[32] = {};
+            ::GetPrivateProfileStringA( "Weather", "CarDropCells", "48", cells, sizeof( cells ), lights_ini.c_str() );
+            m_ConfigCarDropCells = std::clamp( static_cast<float>(std::atof( cells )), 4.0f, 400.0f );
+            Log( "Weather fx (dx11z weather w1: storm, lightning, snow white): SnowWhite %s, track draw hook %s", snow,
+                m_ConfigSnowWhite ? "wanted" : "not needed" );
+        }
         m_ConfigHeadlights = std::clamp( std::atoi( light_value( "Headlights", "0" ).c_str() ), 0, 2 );
         m_ConfigHeadlightsDay = std::clamp( std::atoi( light_value( "HeadlightsDay", "0" ).c_str() ), 0, 2 );
         m_ConfigDayStrength = std::clamp( static_cast<float>(std::atof( light_value( "HeadlightsDayStrength", "1.0" ).c_str() )), 0.0f, 4.0f );
@@ -5249,7 +5259,24 @@ namespace dx11z
             float grade[9] = {}; // world rgb, sky rgb, light boost rgb
             static std::uint64_t night_counts[6] = {};
             int mode = 0;
-            if (night_fn != nullptr && night_fn( grade ) != 0)
+            m_NightGradeSeen = night_fn != nullptr && night_fn( grade ) != 0;
+            // Weather (LFSP 'Storm', 'Lightning', 'SnowWhite', PLAN.md 15.2): read once per frame, the same draw classes as the
+            // night. Storm and lightning multiply the factors of world and sky; snow white is for track draws of class 1 only.
+            const bool weather_grade = WeatherFxFrame() && m_WeatherGrade;
+            const bool weather_snow = m_WeatherFxOn && m_WeatherFx[7] > 0.0f;
+            if (weather_grade)
+            {
+                if (!m_NightGradeSeen)
+                    std::fill( std::begin( grade ), std::end( grade ), 1.0f );
+                for (int c = 0; c < 3; ++c)
+                {
+                    grade[c] *= m_WeatherFx[c];
+                    grade[3 + c] *= m_WeatherFx[3 + c];
+                }
+                if (m_WeatherFx[6] > 1.0f && !flat_draw)
+                    constants.m_Weather2[0] = m_WeatherFx[6];
+            }
+            if (m_NightGradeSeen || weather_grade || weather_snow)
             {
                 const bool sky = render[rs::ZFUNC] == 8 && !m_BatchVertices.empty() && flat_z[0] >= 0.99f && flat_rhw[1] < 0.05f;
                 if (sky)
@@ -5261,6 +5288,8 @@ namespace dx11z
                 else if (render[rs::ZENABLE] != 0 && (render[rs::ALPHABLENDENABLE] == 0 ||
                     (night_normal && (render[rs::ZWRITEENABLE] != 0 || m_ConfigNightGradeBlended != 0))))
                     mode = 1;
+                if (m_NightGradeSeen)
+                {
                 // Which textures stay bright (not graded, not HUD) and which alpha tested ones are graded, to find rims (log below).
                 {
                     const std::uint32_t texture = m_Bound[0] != nullptr ? static_cast<std::uint32_t>(m_Bound[0]->m_Hash) : 0u;
@@ -5310,15 +5339,34 @@ namespace dx11z
                         static_cast<unsigned>(render[rs::ALPHABLENDENABLE]), night_source, night_destination,
                         m_Bound[0] != nullptr ? static_cast<unsigned>(m_Bound[0]->m_Hash) : 0u );
                 }
+                }
             }
-            if (mode > 0)
+            // Light sprites (3) only at night; storm alone leaves them as they are.
+            if (mode > 0 && (m_NightGradeSeen || (weather_grade && mode != 3)))
             {
                 const float * rgb = &grade[(mode - 1) * 3];
                 constants.m_Night[0] = rgb[0];
                 constants.m_Night[1] = rgb[1];
                 constants.m_Night[2] = rgb[2];
                 constants.m_Night[3] = static_cast<float>(mode);
+                if (mode == 1)
+                    m_CarWeatherLightNext = (rgb[0] + rgb[1] + rgb[2]) / 3.0f; // light of the snow on the cars, next frame
             }
+            // Snow white: track draws (track chunk draw, not a car part), not the water.
+            m_SnowDraw = weather_snow && mode == 1 && m_TrackDrawDepth > 0 && m_CarLodMask == 0 && !IsWaterTexture();
+            if (m_SnowDraw)
+            {
+                constants.m_Weather[0] = m_WeatherFx[7];
+                constants.m_Weather[1] = m_WeatherFx[8];
+                constants.m_Weather[2] = m_WeatherFx[9];
+                constants.m_Weather[3] = m_WeatherFx[10];
+                constants.m_Weather2[1] = m_WeatherFx[11];
+                constants.m_Weather2[2] = m_WeatherFx[12];
+                constants.m_Weather2[3] = m_WeatherFx[13];
+                ++m_WeatherStats[0];
+            }
+            else if (weather_snow && mode == 1)
+                ++m_WeatherStats[m_TrackDrawDepth > 0 ? 2 : 1];
         }
 
         // Other draws of the frame (cars, signs, objects) with the light of the last track mesh (PLAN.md 11.4, doc/LICHT.md 9.7):
@@ -5376,6 +5424,13 @@ namespace dx11z
             }
             std::memcpy( constants.m_HeadProjection, m_HeadProjection.data(), sizeof( constants.m_HeadProjection ) );
             std::memcpy( constants.m_ViewToLight, m_HeadViewToLight.data(), sizeof( constants.m_ViewToLight ) );
+            // Snow slope: the same screen side as the light, to track space (camera position in the last row).
+            if (m_SnowDraw && m_HeadMesh)
+            {
+                std::memcpy( constants.m_SnowToWorld, m_HeadClipToObject.data(), sizeof( constants.m_SnowToWorld ) );
+                constants.m_SnowToWorld[15] = 1.0f;
+                ++m_WeatherStats[3];
+            }
             const int extra_all = std::min( m_HeadExtraCount, std::min( static_cast<int>(m_CarLights.size()), MAX_CAR_LIGHTS ) );
             const int rear_all = std::min( m_HeadRearCount, std::min( static_cast<int>(m_RearLights.size()), MAX_REAR_LIGHTS ) );
             std::memcpy( constants.m_HeadHigh, m_HeadHigh.data(), sizeof( constants.m_HeadHigh ) );
@@ -6726,9 +6781,9 @@ namespace dx11z
         )
         {
             Driver & driver = Driver::GetInstance();
-            driver.OnDayTrackDraw( true );
+            driver.OnTrackChunk( true );
             reinterpret_cast<TrackDrawFn>(TRACK_DRAW)(self, a, b);
-            driver.OnDayTrackDraw( false );
+            driver.OnTrackChunk( false );
         }
 
         // Car part draw R3DCarLOD::Draw 0x43C830, slot 2 of the table 0x5B36AC, thiscall (model part list, pass mask,
@@ -7096,8 +7151,9 @@ namespace dx11z
             PatchCall( site.m_Site, site.m_Target, site.m_Hook );
         }
 
-        // By day: the track chunk draw, '[Dx11] HeadlightsDay'.
-        if (m_ConfigHeadlightsDay > 0)
+        // By day: the track chunk draw, '[Dx11] HeadlightsDay'; also for snow white (LFSP '[Weather] SnowWhite'), which needs to
+        // know the track draws.
+        if (m_ConfigHeadlightsDay > 0 || m_ConfigSnowWhite)
         {
             if (*reinterpret_cast<const std::uintptr_t *>(TRACK_DRAW_SLOT) == TRACK_DRAW)
             {
@@ -8417,6 +8473,17 @@ namespace dx11z
             if (up_length > 1e-6 && up_length < 1e6)
                 for (int j = 0; j < 3; ++j)
                     up[j] = model_view[4 + j] / up_length;
+            // Snow on the car (15.3b): which way this "up" points was never checked on screen. The camera is above the car
+            // in nearly every view (chase, bonnet, cockpit, most TV cameras), so the side of the camera votes for the sign.
+            if (up_length > 1e-6 && up_length < 1e6)
+            {
+                const double side = -(model_view[12] * up[0] + model_view[13] * up[1] + model_view[14] * up[2]);
+                if (std::abs( side ) > 0.2)
+                {
+                    m_CarUpVote += ((side > 0.0 ? 1.0f : -1.0f) - m_CarUpVote) * 0.01f;
+                    ++m_CarUpVotes[side > 0.0 ? 0 : 1];
+                }
+            }
         }
 
         // Camera space of every corner: screen -> clip (xc, yc, wc) -> view, as the water reflections.
@@ -8759,6 +8826,22 @@ namespace dx11z
             const bool chain = m_ConfigCarReflBlurChain > 0 && m_BlurChainValid && m_BlurChainView;
             constants[62] = chain ? 1.0f : 0.0f;
             constants[63] = chain ? static_cast<float>(m_BlurDownLevels - 2) : 0.0f;
+            // Weather on the car (PLAN.md 15.3): snow, its light, drops, time; drops per texture unit, snow colour.
+            WeatherFxFrame();
+            if (m_CarWeatherOn)
+            {
+                constants[64] = m_CarWeather[0];
+                constants[65] = m_CarWeatherLight;
+                constants[66] = m_CarWeather[1];
+                constants[67] = m_CarWeather[2];
+                constants[68] = m_ConfigCarDropCells;
+                constants[69] = m_WeatherFx[11] > 0.0f ? m_WeatherFx[11] : 0.94f;
+                constants[70] = m_WeatherFx[12] > 0.0f ? m_WeatherFx[12] : 0.96f;
+                constants[71] = m_WeatherFx[13] > 0.0f ? m_WeatherFx[13] : 1.0f;
+                constants[72] = m_CarUpVote >= 0.0f ? 1.0f : -1.0f; // sign of "up" for the snow
+                constants[73] = m_CarWeather[3] > 2.5f ? 1.0f : 0.0f; // '[Weather] SnowDebug = 3': up-ness of the car
+                ++m_WeatherStats[m_CarWeather[0] > 0.0f ? 4 : 5];
+            }
             std::memcpy( mapped.pData, constants, sizeof( constants ) );
             m_Context->Unmap( m_CarReflConstants.Get(), 0 );
         }
@@ -9538,6 +9621,7 @@ namespace dx11z
         // Screen side (xc, yc, wc, 1) -> view -> object -> headlight space.
         float clip_to_object[16] = {};
         Multiply( view_of_clip, inverse, clip_to_object );
+        std::memcpy( m_HeadClipToObject.data(), clip_to_object, sizeof( clip_to_object ) );
         Multiply( clip_to_object, reinterpret_cast<const float *>(0x0061BCCC), m_HeadViewToLight.data() );
 
         CollectCarLights();
@@ -9663,6 +9747,88 @@ namespace dx11z
                 Log( "Headlights by day: track draw not lit, step %d failed", m_HeadFailStep );
             }
         }
+    }
+
+
+    void Driver::OnTrackChunk(
+        bool begin
+    )
+    {
+        // Snow white goes on the draws inside the chunk draw: batches must not reach across its edges.
+        if (m_ConfigSnowWhite && m_WeatherFxOn && m_WeatherFx[7] > 0.0f)
+            Flush();
+        m_TrackDrawDepth = std::max( m_TrackDrawDepth + (begin ? 1 : -1), 0 );
+        if (m_ConfigHeadlightsDay > 0)
+            OnDayTrackDraw( begin );
+    }
+
+
+    bool Driver::WeatherFxFrame()
+    {
+        using WeatherFn = int( __cdecl * )(float *);
+        static WeatherFn weather_fn = nullptr;
+        static bool weather_resolved = false;
+        if (!weather_resolved)
+        {
+            weather_resolved = true;
+            if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
+                weather_fn = reinterpret_cast<WeatherFn>(::GetProcAddress( lfsp, "LfspWeatherFx" ));
+            Log( "Weather fx (dx11z weather w2: storm, lightning, snow white, snow and drops on cars): LFSP export LfspWeatherFx %s",
+                weather_fn != nullptr ? "found" : "not available" );
+        }
+        if (weather_fn == nullptr)
+            return false;
+        if (m_WeatherFxFlip == m_FlipCount)
+            return m_WeatherFxOn;
+
+        m_WeatherFxFlip = m_FlipCount;
+        m_WeatherFxOn = weather_fn( m_WeatherFx ) != 0;
+
+        // Snow and drops on the cars (LfspWeatherCar, LFSP v9r): lit like the world of the last frame (night, storm).
+        {
+            using CarFn = int( __cdecl * )(float *);
+            static CarFn car_fn = nullptr;
+            static bool car_resolved = false;
+            if (!car_resolved)
+            {
+                car_resolved = true;
+                if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
+                    car_fn = reinterpret_cast<CarFn>(::GetProcAddress( lfsp, "LfspWeatherCar" ));
+                Log( "Weather fx (dx11z weather w2): LFSP export LfspWeatherCar %s", car_fn != nullptr ? "found" : "not available" );
+            }
+            m_CarWeatherOn = car_fn != nullptr && car_fn( m_CarWeather ) != 0;
+            m_CarWeatherLight = m_CarWeatherLightNext * (NightNative() ? 0.35f : 1.0f);
+            m_CarWeatherLightNext = 1.0f;
+        }
+        m_WeatherGrade = false;
+        if (m_WeatherFxOn)
+        {
+            for (int i = 0; i < 6; ++i)
+                m_WeatherGrade = m_WeatherGrade || std::abs( m_WeatherFx[i] - 1.0f ) > 1e-4f;
+            m_WeatherGrade = m_WeatherGrade || m_WeatherFx[6] > 1.0f;
+        }
+        if (m_WeatherFxOn || m_CarWeatherOn)
+        {
+            const ULONGLONG now = ::GetTickCount64();
+            if (now >= m_WeatherNextReport)
+            {
+                m_WeatherNextReport = now + 10000;
+                Log( "Weather fx: mode %.0f, world %.2f %.2f %.2f, sky %.2f %.2f %.2f, fog x%.2f, lightning %.2f, snow %.2f "
+                    "(desaturate %.2f, slope %.2f); snow draws %llu (with slope matrix %llu), left out: outside track draw %llu, car/water %llu; "
+                    "cars: snow %.2f (light %.2f), drops %.2f, reflection draws with snow %llu, with drops only %llu; "
+                    "car up: camera on its side %llu, on the other %llu, sign %+.0f",
+                    m_WeatherFx[15], m_WeatherFx[0], m_WeatherFx[1], m_WeatherFx[2], m_WeatherFx[3], m_WeatherFx[4], m_WeatherFx[5],
+                    m_WeatherFx[6], m_WeatherFx[14], m_WeatherFx[7], m_WeatherFx[8], m_WeatherFx[9],
+                    static_cast<unsigned long long>(m_WeatherStats[0]), static_cast<unsigned long long>(m_WeatherStats[3]),
+                    static_cast<unsigned long long>(m_WeatherStats[1]), static_cast<unsigned long long>(m_WeatherStats[2]),
+                    m_CarWeather[0], m_CarWeatherLight, m_CarWeather[1], static_cast<unsigned long long>(m_WeatherStats[4]),
+                    static_cast<unsigned long long>(m_WeatherStats[5]), static_cast<unsigned long long>(m_CarUpVotes[0]),
+                    static_cast<unsigned long long>(m_CarUpVotes[1]), m_CarUpVote >= 0.0f ? 1.0 : -1.0 );
+                std::fill( std::begin( m_WeatherStats ), std::end( m_WeatherStats ), 0ull );
+                m_CarUpVotes[0] = m_CarUpVotes[1] = 0;
+            }
+        }
+        return m_WeatherFxOn;
     }
 
 
