@@ -8507,6 +8507,16 @@ namespace dx11z
                 object_of_view[7] = (r[1] * r[6] - r[0] * r[7]) * inv;
                 object_of_view[8] = (r[0] * r[4] - r[1] * r[3]) * inv;
                 object_valid = true;
+                // w4: a negative determinant is a mirrored draw (one half of the body drawn twice, flipped left/right): the
+                // same object x on both sides. With y up and z along the car kept, the flipped axis is x.
+                if (det < 0.0)
+                {
+                    for (int j = 0; j < 3; ++j)
+                        object_of_view[j * 3] = -object_of_view[j * 3];
+                    ++m_CarMirrorParts[1];
+                }
+                else
+                    ++m_CarMirrorParts[0];
             }
         }
 
@@ -9803,7 +9813,7 @@ namespace dx11z
             weather_resolved = true;
             if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                 weather_fn = reinterpret_cast<WeatherFn>(::GetProcAddress( lfsp, "LfspWeatherFx" ));
-            Log( "Weather fx (dx11z weather w3: storm, lightning, snow white, snow and clear drops on cars, fixed on the car): LFSP export LfspWeatherFx %s",
+            Log( "Weather fx (dx11z weather w4: storm, lightning, snow white, snow and clear drops on cars, fixed on the car, fine snow): LFSP export LfspWeatherFx %s",
                 weather_fn != nullptr ? "found" : "not available" );
         }
         if (weather_fn == nullptr)
@@ -9824,7 +9834,7 @@ namespace dx11z
                 car_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     car_fn = reinterpret_cast<CarFn>(::GetProcAddress( lfsp, "LfspWeatherCar" ));
-                Log( "Weather fx (dx11z weather w3): LFSP export LfspWeatherCar %s", car_fn != nullptr ? "found" : "not available" );
+                Log( "Weather fx (dx11z weather w4): LFSP export LfspWeatherCar %s", car_fn != nullptr ? "found" : "not available" );
             }
             m_CarWeatherOn = car_fn != nullptr && car_fn( m_CarWeather ) != 0;
             m_CarWeatherLight = m_CarWeatherLightNext * (NightNative() ? 0.35f : 1.0f);
@@ -9868,16 +9878,19 @@ namespace dx11z
                 Log( "Weather fx: mode %.0f, world %.2f %.2f %.2f, sky %.2f %.2f %.2f, fog x%.2f, lightning %.2f, snow %.2f "
                     "(desaturate %.2f, slope %.2f); snow draws %llu (with slope matrix %llu), left out: outside track draw %llu, car/water %llu; "
                     "cars: snow %.2f (light %.2f), drops %.2f, reflection draws with snow %llu, with drops only %llu; "
-                    "car up: camera on its side %llu, on the other %llu, sign %+.0f",
+                    "car up: camera on its side %llu, on the other %llu, sign %+.0f; car parts mirrored %llu of %llu",
                     m_WeatherFx[15], m_WeatherFx[0], m_WeatherFx[1], m_WeatherFx[2], m_WeatherFx[3], m_WeatherFx[4], m_WeatherFx[5],
                     m_WeatherFx[6], m_WeatherFx[14], m_WeatherFx[7], m_WeatherFx[8], m_WeatherFx[9],
                     static_cast<unsigned long long>(m_WeatherStats[0]), static_cast<unsigned long long>(m_WeatherStats[3]),
                     static_cast<unsigned long long>(m_WeatherStats[1]), static_cast<unsigned long long>(m_WeatherStats[2]),
                     m_CarWeather[0], m_CarWeatherLight, m_CarWeather[1], static_cast<unsigned long long>(m_WeatherStats[4]),
                     static_cast<unsigned long long>(m_WeatherStats[5]), static_cast<unsigned long long>(m_CarUpVotes[0]),
-                    static_cast<unsigned long long>(m_CarUpVotes[1]), m_CarUpVote >= 0.0f ? 1.0 : -1.0 );
+                    static_cast<unsigned long long>(m_CarUpVotes[1]), m_CarUpVote >= 0.0f ? 1.0 : -1.0,
+                    static_cast<unsigned long long>(m_CarMirrorParts[1]),
+                    static_cast<unsigned long long>(m_CarMirrorParts[0] + m_CarMirrorParts[1]) );
                 std::fill( std::begin( m_WeatherStats ), std::end( m_WeatherStats ), 0ull );
                 m_CarUpVotes[0] = m_CarUpVotes[1] = 0;
+                m_CarMirrorParts[0] = m_CarMirrorParts[1] = 0;
             }
         }
         return m_WeatherFxOn;

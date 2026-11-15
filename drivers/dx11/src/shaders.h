@@ -929,6 +929,7 @@ cbuffer CarReflectConstants : register( b0 )
 // the UV of the car textures, no texture needed).
 float CarHash( float2 p )
 {
+    p -= floor( p * ( 1.0 / 289.0 ) ) * 289.0; // small arguments for sin (fine snow has up to 240 cells per metre)
     return frac( sin( dot( p, float2( 12.9898, 78.233 ) ) ) * 43758.5453 );
 }
 
@@ -1136,18 +1137,42 @@ float4 MainPS( PixelIn input ) : SV_Target
         return float4( saturate( facingUp ), 0.0, saturate( -facingUp ), 1.0 );
     }
 
-    // Snow on the car (LFSP CarSnow): on faces pointing up (roof, bonnet, boot lid), lit like the world. It starts as
-    // scattered patches that grow together as the amount rises (CarSnow 0.5 covers a flat roof almost fully).
+    // Snow on the car (LFSP CarSnow, w4): powder lying on faces pointing up. Four octaves of grain from 25 cm drifts down to
+    // 4 mm, each faded to its mean once it is finer than about two pixels; a sharp edge between snow and paint, its width
+    // the change of the grain over one pixel (no flicker, no derivatives inside the branch). Much on top, little on the
+    // sides, none below. Matte, slightly blue in thin snow, lit like the world; a few glints that twinkle with the view.
     if ( g_CarWeather.x > 0.0 && has_up )
     {
-        float up = smoothstep( 0.3, 0.8, dot( n, g_Up.xyz * g_CarWeather3.x ) );
-        // Patches of about 30 and 10 cm on the car itself (w3; the UV are mirrored left and right).
-        float patch = CarNoise( q * 3.2 ) * 0.7 + CarNoise( q * 9.5 + 5.3 ) * 0.3;
-        float grow = saturate( ( g_CarWeather.x * 1.6 - ( 1.0 - patch ) * 0.9 ) * 2.5 );
-        float k = up * min( grow, 0.95 );
-        float outA = 1.0 - ( 1.0 - a ) * ( 1.0 - k );
-        colour = ( colour * a * ( 1.0 - k ) + g_CarWeather2.yzw * g_CarWeather.y * k ) / max( outA, 1e-4 );
-        a = outA;
+        float upDot = dot( n, g_Up.xyz * g_CarWeather3.x );
+        float slope = pow( smoothstep( 0.35, 0.97, upDot ), 1.5 );
+        if ( slope > 0.0 )
+        {
+            float fp = dropAa / max( g_CarWeather2.x, 1.0 ); // metres per pixel on the face
+            const float4 freq = float4( 4.0, 22.0, 80.0, 240.0 );
+            const float4 amp = float4( 0.35, 0.3, 0.2, 0.15 );
+            float4 fade = saturate( 1.6 - freq * fp * 2.2 );
+            float4 oct = float4( CarNoise( q * freq.x ), CarNoise( q * freq.y + 3.1 ), CarNoise( q * freq.z + 7.7 ),
+                                 CarNoise( q * freq.w + 1.9 ) );
+            float grain = dot( amp, lerp( 0.5, oct, fade ) );
+            float width = clamp( dot( amp * fade, freq ) * fp * 1.2, 0.015, 0.35 );
+            // CarSnow 0.5 covers a flat roof to about 0.75 of its grain range, a steep side hardly at all.
+            float cover = saturate( g_CarWeather.x * 1.5 ) * slope;
+            float level = lerp( 0.75, 0.3, cover );
+            float k = smoothstep( level - width, level + width, grain ) * saturate( cover * 4.0 ) * 0.97;
+            if ( k > 0.0 )
+            {
+                float depth = saturate( ( grain - level ) / 0.12 );
+                float3 snow = g_CarWeather2.yzw * lerp( float3( 0.8, 0.86, 0.95 ), float3( 1.0, 1.0, 1.0 ), depth ) *
+                              ( 0.86 + 0.14 * saturate( upDot ) );
+                float2 cell = floor( q * 180.0 );
+                float gh = CarHash( cell + floor( dot( v, float3( 7.0, 11.0, 5.0 ) ) * 6.0 ) * 0.37 );
+                float glitter = step( 0.992, gh ) * saturate( 1.0 - 180.0 * fp * 1.5 ) * depth;
+                snow = ( snow + glitter * 0.8 ) * g_CarWeather.y;
+                float outA = 1.0 - ( 1.0 - a ) * ( 1.0 - k );
+                colour = ( colour * a * ( 1.0 - k ) + snow * k ) / max( outA, 1e-4 );
+                a = outA;
+            }
+        }
     }
     return float4( colour, a );
 }
