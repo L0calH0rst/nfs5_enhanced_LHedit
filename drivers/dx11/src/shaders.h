@@ -1436,4 +1436,140 @@ float4 UpPS( float4 position : SV_Position ) : SV_Target
     return sum / 12.0;
 }
 )hlsl";
+
+    // Sky edge (BUGS.md B32, '[Dx11] SkyEdgeFill'). g_Frame: copy of the frame right after the sky, alpha = share of the clear
+    // colour g_Clear left in the pixel. ColumnPS (target: render width x 2): row 0 the sky colour and row of the first fully
+    // covered pixel from the top, row 1 the same from the bottom, row -1 without sky in the column. FillPS: the clear colour
+    // left in a pixel becomes the edge colour of its column (between two edges a blend of both). Fullscreen triangle of
+    // REFLECT's MainVS.
+    inline constexpr char SKY_EDGE[] = R"hlsl(
+Texture2D g_Frame : register( t0 );
+Texture2D<float4> g_Table : register( t1 );
+
+cbuffer SkyEdge : register( b0 )
+{
+    float4 g_Clear;
+    float4 g_Size; // render width, height, smoothing radius, seam outside the band
+    float4 g_Seam; // seam inside the band
+};
+
+// The clear colour as it is in the frame for column x on one side of the band: the top (upper) or bottom pixel when only
+// clear colour is left there (it may be a flat sky plane instead of the clear, or graded by the night settings), else the
+// colour of the clear. Per side: the flat plane often covers only the upper part, below the band is the real clear colour
+// (B32, 2026-11-19: the top pixel taken for the bottom turned the fill there dark blue).
+float3 ClearOf( int x, bool upper )
+{
+    float4 edge = g_Frame.Load( int3( x, upper ? 0 : (int)g_Size.y - 1, 0 ) );
+    return edge.a > 0.98 ? edge.rgb : g_Clear.rgb;
+}
+
+float4 ColumnPS( float4 position : SV_Position ) : SV_Target
+{
+    int x = (int)position.x;
+    int height = (int)g_Size.y;
+    bool top = position.y < 1.0;
+    float3 clear = ClearOf( x, top );
+    int y = top ? 0 : height - 1;
+    int step = top ? 1 : -1;
+    [loop]
+    for (int i = 0; i < height; ++i)
+    {
+        if (g_Frame.Load( int3( x, y, 0 ) ).a < 0.02)
+        {
+            // Mean of 8 rows from 2 pixels further in: clear of the soft (multisampled) edge and of single bright texels.
+            float3 sum = 0.0;
+            [unroll]
+            for (int k = 2; k < 10; ++k)
+            {
+                float4 inner = g_Frame.Load( int3( x, clamp( y + step * k, 0, height - 1 ), 0 ) );
+                sum += saturate( inner.rgb - clear * inner.a );
+            }
+            return float4( sum / 8.0, (float)y );
+        }
+        y += step;
+    }
+    return float4( 0.0, 0.0, 0.0, -1.0 );
+}
+
+// The edge colours of the columns around (g_Size.z columns to each side) averaged, the edge row stays that of the column.
+// A column without any sky pixel (the dome left the screen there, e.g. a high camera looking down) takes colour and row of
+// the nearest columns with sky to the left and right, blended by distance, so its clear colour is filled too.
+float4 SmoothPS( float4 position : SV_Position ) : SV_Target
+{
+    int2 p = int2( position.xy );
+    int width = (int)g_Size.x;
+    int radius = (int)g_Size.z;
+    float4 own = g_Table.Load( int3( p, 0 ) );
+    if (own.w < 0.0)
+    {
+        float4 left = float4( 0.0, 0.0, 0.0, -1.0 );
+        float4 right = left;
+        int dl = 0;
+        int dr = 0;
+        [loop]
+        for (int d = 1; d < width && ( left.w < 0.0 || right.w < 0.0 ); ++d)
+        {
+            if (left.w < 0.0 && p.x - d >= 0)
+            {
+                left = g_Table.Load( int3( p.x - d, p.y, 0 ) );
+                dl = d;
+            }
+            if (right.w < 0.0 && p.x + d < width)
+            {
+                right = g_Table.Load( int3( p.x + d, p.y, 0 ) );
+                dr = d;
+            }
+            if (p.x - d < 0 && p.x + d >= width)
+                break;
+        }
+        if (left.w < 0.0)
+            return right;
+        if (right.w < 0.0)
+            return left;
+        return lerp( left, right, (float)dl / (float)( dl + dr ) );
+    }
+    float3 sum = 0.0;
+    float count = 0.0;
+    [loop]
+    for (int k = -radius; k <= radius; ++k)
+    {
+        float4 other = g_Table.Load( int3( clamp( p.x + k, 0, width - 1 ), p.y, 0 ) );
+        if (other.w >= 0.0)
+        {
+            sum += other.rgb;
+            count += 1.0;
+        }
+    }
+    return float4( sum / max( count, 1.0 ), own.w );
+}
+
+float4 FillPS( float4 position : SV_Position ) : SV_Target
+{
+    int2 p = int2( position.xy );
+    float4 frame = g_Frame.Load( int3( p, 0 ) );
+    float4 upper = g_Table.Load( int3( p.x, 0, 0 ) );
+    float4 lower = g_Table.Load( int3( p.x, 1, 0 ) );
+    if (upper.w < 0.0)
+        discard;
+    float y = position.y;
+    // Soft seam: g_Size.w pixels to both sides of the nearer edge blend into the edge colour, so the fringe of the
+    // sky texture (bright filtered texels at its alpha border) and mixed edge samples leave no line.
+    float edge = y < 0.5 * ( upper.w + lower.w ) ? upper.w : lower.w;
+    // Positive inside the band (below the upper edge, above the lower one).
+    float inside = edge == upper.w ? y - edge : edge - y;
+    float seam = inside >= 0.0 ? ( g_Seam.x > 0.0 ? saturate( 1.0 - inside / g_Seam.x ) : 0.0 ) : saturate( 1.0 + inside / g_Size.w );
+    seam = seam * seam * ( 3.0 - 2.0 * seam );
+    if (frame.a < 1.0 / 512.0 && seam <= 0.0)
+        discard;
+    float3 fill = y <= upper.w ? upper.rgb : y >= lower.w ? lower.rgb :
+        lerp( upper.rgb, lower.rgb, saturate( ( y - upper.w ) / max( lower.w - upper.w, 1.0 ) ) );
+    // Base under the sky: a pixel with only clear colour left is its own base, else the clear colour of its side.
+    float3 base = frame.a > 0.98 ? frame.rgb : ClearOf( p.x, y < 0.5 * ( upper.w + lower.w ) );
+    float3 colour = saturate( frame.rgb + ( fill - base ) * frame.a );
+    // 'SkyEdgeFill = 2': red = share of clear colour replaced (bright red = pure fill), green = soft seam, blue line = edge row.
+    if (g_Clear.w > 1.5)
+        return float4( frame.a, 0.6 * seam, abs( y - edge ) < 1.0 ? 1.0 : 0.0, 1.0 );
+    return float4( lerp( colour, fill, seam ), 1.0 );
+}
+)hlsl";
 }

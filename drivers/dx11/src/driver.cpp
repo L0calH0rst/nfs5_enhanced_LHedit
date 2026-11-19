@@ -805,6 +805,13 @@ namespace dx11z
             m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_BlurDownPs.Put() );
         if (build( shaders::BLUR, sizeof( shaders::BLUR ) - 1, "UpPS", "ps_4_0", ps ))
             m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_BlurUpPs.Put() );
+        // '[Dx11] SkyEdgeFill' (B32).
+        if (build( shaders::SKY_EDGE, sizeof( shaders::SKY_EDGE ) - 1, "ColumnPS", "ps_4_0", ps ))
+            m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_SkyEdgeColumnPs.Put() );
+        if (build( shaders::SKY_EDGE, sizeof( shaders::SKY_EDGE ) - 1, "SmoothPS", "ps_4_0", ps ))
+            m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_SkyEdgeSmoothPs.Put() );
+        if (build( shaders::SKY_EDGE, sizeof( shaders::SKY_EDGE ) - 1, "FillPS", "ps_4_0", ps ))
+            m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_SkyEdgeFillPs.Put() );
 
         return m_SceneVs && m_ScenePs && m_SceneLayout && m_PresentVs && m_PresentPs && m_ClearVs && m_ClearPs;
     }
@@ -1642,6 +1649,9 @@ namespace dx11z
         m_ConfigTestNoZBias = ::GetPrivateProfileIntA( "Dx11", "TestNoZBias", 0, ini.c_str() ) != 0;
         m_ConfigTestDraw = static_cast<int>(::GetPrivateProfileIntA( "Dx11", "TestDraw", 0, ini.c_str() ));
         Log( "Config TestNoZBias %d TestDraw %d", m_ConfigTestNoZBias ? 1 : 0, m_ConfigTestDraw );
+        m_ConfigSkyEdgeFill = std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Dx11", "SkyEdgeFill", 1, ini.c_str() )), 0, 2 );
+        m_ConfigSkyEdgeBlend = static_cast<float>(std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Dx11", "SkyEdgeBlend", 12, ini.c_str() )), 0, 64 ));
+        Log( "Config SkyEdgeFill %d SkyEdgeBlend %.0f", m_ConfigSkyEdgeFill, m_ConfigSkyEdgeBlend );
         Log( "Config AlphaMipScale %.2f TestNoMips %d TestVertexAlpha %d", m_ConfigAlphaMipScale, m_ConfigTestNoMips ? 1 : 0,
             m_ConfigTestVertexAlpha ? 1 : 0 );
         Log( "Config AlphaEdgeFix %d AlphaEdgeRef %d ForceTwoSided %d", m_ConfigAlphaToCoverage ? 3 : (m_ConfigAlphaEdgeFix ? 1 : 0), m_ConfigAlphaEdgeRef,
@@ -2177,6 +2187,20 @@ namespace dx11z
         m_BlurChain.Reset();
         m_BlurChainValid = false;
         m_ReflCompositeVs.Reset();
+        m_SkyEdgeCopyView.Reset();
+        m_SkyEdgeCopy.Reset();
+        m_SkyEdgeTableRtv.Reset();
+        m_SkyEdgeTableView.Reset();
+        m_SkyEdgeTable.Reset();
+        m_SkyEdgeSmoothRtv.Reset();
+        m_SkyEdgeSmoothView.Reset();
+        m_SkyEdgeSmooth.Reset();
+        m_SkyEdgeSmoothPs.Reset();
+        m_SkyEdgeColumnPs.Reset();
+        m_SkyEdgeFillPs.Reset();
+        m_SkyEdgeConstants.Reset();
+        m_SkyEdgeRaster.Reset();
+        m_SkyEdgeState = 0;
         m_ReflCompositePs.Reset();
         m_ReflPackPs.Reset();
         m_ReflPackMsPs.Reset();
@@ -2274,6 +2298,15 @@ namespace dx11z
         {
             if (!depth_only)
             {
+                // '[Dx11] SkyEdgeFill' (B32): alpha 1 = all clear colour, the sky draws lower it.
+                if (m_ConfigSkyEdgeFill != 0)
+                {
+                    color[3] = 1.0f;
+                    std::memcpy( m_SkyEdgeClear, color, sizeof( color ) );
+                    m_SkyEdgeState = 1;
+                    m_SkyEdgeLogging = m_ConfigSkyEdgeFill == 2 && ::GetTickCount64() >= m_SkyEdgeLogNext;
+                    m_SkyEdgeLogIndex = 0;
+                }
                 m_Context->ClearRenderTargetView( m_FrameView.Get(), color );
             }
 
@@ -5202,6 +5235,42 @@ namespace dx11z
         const PerfScope profile_scope( m_ConfigProfile > 0, m_ProfileApplyTicks, m_ProfileDepth );
         const auto & render = m_D3D.m_Render;
 
+        // '[Dx11] SkyEdgeFill' (B32): the sky comes right after the full clear; the first other draw ends it.
+        m_SkyEdgeDraw = false;
+        m_SkyEdgeFlatDraw = false;
+        if (m_SkyEdgeState == 1 || m_SkyEdgeState == 2)
+        {
+            if (BatchIsSky())
+            {
+                // Some skies start with an opaque untextured plane of one vertex colour behind the band: it stands for the
+                // clear colour (share stays 1), the band edge then blends into it like into the clear colour.
+                if (m_SkyEdgeState == 1 && m_Bound[0] == nullptr && render[rs::ALPHABLENDENABLE] == 0)
+                {
+                    const std::uint32_t first = m_BatchVertices.front().m_Diffuse;
+                    m_SkyEdgeFlatDraw = (first >> 24) == 0xFF && std::all_of( m_BatchVertices.begin(), m_BatchVertices.end(),
+                        [first] ( const TlVertex & v ) { return v.m_Diffuse == first; } );
+                }
+                m_SkyEdgeState = 2;
+                m_SkyEdgeDraw = m_EdgePass != 3;
+                if (m_SkyEdgeLogging && m_EdgePass != 2)
+                    LogSkyDraw();
+            }
+            else
+            {
+                if (m_SkyEdgeState == 2)
+                    SkyEdgeFill();
+                m_SkyEdgeState = 3;
+                if (m_SkyEdgeLogging)
+                {
+                    Log( "SkyEdge: %d sky draws, clear %.3f %.3f %.3f, first other draw zfunc %u, %u vertices", m_SkyEdgeLogIndex,
+                        m_SkyEdgeClear[0], m_SkyEdgeClear[1], m_SkyEdgeClear[2], static_cast<unsigned>(render[rs::ZFUNC]),
+                        static_cast<unsigned>(m_BatchVertices.size()) );
+                    m_SkyEdgeLogging = false;
+                    m_SkyEdgeLogNext = ::GetTickCount64() + 10000;
+                }
+            }
+        }
+
         // Constants.
         DrawConstants constants = {};
         // Offset of the vertices in game pixels. 0: a clip edge of the game lands on the edge of the render pixels the
@@ -5549,7 +5618,8 @@ namespace dx11z
         // Blend.
         const std::uint64_t blend_key = static_cast<std::uint64_t>(render[rs::ALPHABLENDENABLE] != 0) | (static_cast<std::uint64_t>(m_EdgePass == 3) << 32) |
             (static_cast<std::uint64_t>(render[rs::SRCBLEND] & 0xFF) << 8) |
-            (static_cast<std::uint64_t>(render[rs::DESTBLEND] & 0xFF) << 16);
+            (static_cast<std::uint64_t>(render[rs::DESTBLEND] & 0xFF) << 16) | (static_cast<std::uint64_t>(m_SkyEdgeDraw) << 40) |
+            (static_cast<std::uint64_t>(m_SkyEdgeDraw && m_SkyEdgeFlatDraw) << 41);
 
         auto & blend = m_Blends[blend_key];
 
@@ -5586,6 +5656,25 @@ namespace dx11z
             target.DestBlendAlpha = ToBlend( destination_blend, true );
             target.BlendOpAlpha = D3D11_BLEND_OP_ADD;
             target.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+            // '[Dx11] SkyEdgeFill' (B32): alpha = share of the clear colour left, it only shrinks by the destination factor
+            // (opaque: 0, alpha blended: times 1 - alpha, additive: unchanged).
+            if (m_SkyEdgeDraw)
+            {
+                if (!target.BlendEnable)
+                {
+                    target.BlendEnable = TRUE;
+                    target.SrcBlend = D3D11_BLEND_ONE;
+                    target.DestBlend = D3D11_BLEND_ZERO;
+                    target.DestBlendAlpha = D3D11_BLEND_ZERO;
+                }
+                target.SrcBlendAlpha = D3D11_BLEND_ZERO;
+                // The flat plane: share 1 again (its alpha, vertex alpha 255 without texture).
+                if (m_SkyEdgeFlatDraw)
+                {
+                    target.SrcBlendAlpha = D3D11_BLEND_ONE;
+                    target.DestBlendAlpha = D3D11_BLEND_ZERO;
+                }
+            }
             m_Device->CreateBlendState( &desc, blend.Put() );
         }
 
@@ -11303,6 +11392,223 @@ namespace dx11z
 
         const float one[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
         m_Context->ClearRenderTargetView( m_ReflWeightRtv.Get(), one );
+    }
+
+
+    // ---- Sky edge, doc/BUGS.md B32 ----
+
+    bool Driver::BatchIsSky() const
+    {
+        const auto & render = m_D3D.m_Render;
+
+        if (render[rs::ZFUNC] != 8 || m_BatchVertices.empty())
+            return false;
+
+        // As the profile tells the sky: depth func ALWAYS at the far end (z near 1, rhw tiny).
+        float z_min = 1e30f, rhw_max = -1e30f;
+        for (const TlVertex & v : m_BatchVertices)
+        {
+            z_min = std::min( z_min, v.m_Z );
+            rhw_max = std::max( rhw_max, v.m_Rhw );
+        }
+        return z_min >= 0.99f && rhw_max < 0.05f;
+    }
+
+
+    void Driver::LogSkyDraw()
+    {
+        const auto & render = m_D3D.m_Render;
+        const TlVertex * top = nullptr;
+        const TlVertex * bottom = nullptr;
+        std::uint32_t fog_min = 255, fog_max = 0, alpha_min = 255, alpha_max = 0;
+        for (const TlVertex & v : m_BatchVertices)
+        {
+            if (top == nullptr || v.m_Y < top->m_Y)
+                top = &v;
+            if (bottom == nullptr || v.m_Y > bottom->m_Y)
+                bottom = &v;
+            fog_min = std::min( fog_min, v.m_Specular >> 24 );
+            fog_max = std::max( fog_max, v.m_Specular >> 24 );
+            alpha_min = std::min( alpha_min, v.m_Diffuse >> 24 );
+            alpha_max = std::max( alpha_max, v.m_Diffuse >> 24 );
+        }
+        const Texture * texture = m_Bound[0];
+        if (top == nullptr)
+            return;
+        // y in game pixels; colours ARGB of the topmost and lowest vertex; fog = specular alpha (255 = no fog).
+        Log( "SkyEdge draw %d (flat %d): texture %08X %dx%d translucent %d, blend %u src %u dst %u, alpha test %u, fog %u, zwrite %u, %u vertices %u indices, "
+            "y %.1f..%.1f, top %08X uv %.3f %.3f, bottom %08X uv %.3f %.3f, vertex alpha %u..%u, fog %u..%u",
+            m_SkyEdgeLogIndex, m_SkyEdgeFlatDraw ? 1 : 0, texture != nullptr ? texture->m_Hash : 0u, texture != nullptr ? texture->m_Width : 0, texture != nullptr ? texture->m_Height : 0,
+            texture != nullptr && texture->m_Translucent ? 1 : 0, static_cast<unsigned>(render[rs::ALPHABLENDENABLE]), static_cast<unsigned>(render[rs::SRCBLEND]),
+            static_cast<unsigned>(render[rs::DESTBLEND]), static_cast<unsigned>(render[rs::ALPHATESTENABLE]), static_cast<unsigned>(render[rs::FOGENABLE]),
+            static_cast<unsigned>(render[rs::ZWRITEENABLE]), static_cast<unsigned>(m_BatchVertices.size()), static_cast<unsigned>(m_BatchIndices.size()),
+            top->m_Y, bottom->m_Y, top->m_Diffuse, top->m_U0, top->m_V0, bottom->m_Diffuse, bottom->m_U0, bottom->m_V0, alpha_min, alpha_max, fog_min, fog_max );
+        ++m_SkyEdgeLogIndex;
+    }
+
+
+    void Driver::SkyEdgeFill()
+    {
+        if (!m_Frame || !m_FrameView || !m_ReflCompositeVs || !m_SkyEdgeColumnPs || !m_SkyEdgeSmoothPs || !m_SkyEdgeFillPs || m_RenderWidth <= 0 ||
+            m_RenderHeight <= 0)
+            return;
+
+        D3D11_TEXTURE2D_DESC desc = {};
+        m_Frame->GetDesc( &desc );
+
+        D3D11_TEXTURE2D_DESC have = {};
+        if (m_SkyEdgeCopy)
+            m_SkyEdgeCopy->GetDesc( &have );
+
+        if (!m_SkyEdgeCopy || have.Width != desc.Width || have.Height != desc.Height || have.Format != desc.Format)
+        {
+            m_SkyEdgeCopyView.Reset();
+            m_SkyEdgeCopy.Reset();
+            D3D11_TEXTURE2D_DESC copy = desc;
+            copy.MipLevels = 1;
+            copy.ArraySize = 1;
+            copy.SampleDesc.Count = 1;
+            copy.SampleDesc.Quality = 0;
+            copy.Usage = D3D11_USAGE_DEFAULT;
+            copy.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            copy.CPUAccessFlags = 0;
+            copy.MiscFlags = 0;
+            if (FAILED( m_Device->CreateTexture2D( &copy, nullptr, m_SkyEdgeCopy.Put() ) ) ||
+                FAILED( m_Device->CreateShaderResourceView( m_SkyEdgeCopy.Get(), nullptr, m_SkyEdgeCopyView.Put() ) ))
+            {
+                m_SkyEdgeCopyView.Reset();
+                m_SkyEdgeCopy.Reset();
+                Log( "SkyEdgeFill: frame copy %ux%u failed, off", desc.Width, desc.Height );
+                m_ConfigSkyEdgeFill = 0;
+                return;
+            }
+        }
+
+        const UINT width = static_cast<UINT>(m_RenderWidth);
+        const UINT height = static_cast<UINT>(m_RenderHeight);
+
+        have = {};
+        if (m_SkyEdgeTable)
+            m_SkyEdgeTable->GetDesc( &have );
+
+        if (!m_SkyEdgeTable || !m_SkyEdgeSmooth || have.Width != width)
+        {
+            m_SkyEdgeTableRtv.Reset();
+            m_SkyEdgeTableView.Reset();
+            m_SkyEdgeTable.Reset();
+            m_SkyEdgeSmoothRtv.Reset();
+            m_SkyEdgeSmoothView.Reset();
+            m_SkyEdgeSmooth.Reset();
+            D3D11_TEXTURE2D_DESC table = {};
+            table.Width = width;
+            table.Height = 2;
+            table.MipLevels = 1;
+            table.ArraySize = 1;
+            table.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+            table.SampleDesc.Count = 1;
+            table.Usage = D3D11_USAGE_DEFAULT;
+            table.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED( m_Device->CreateTexture2D( &table, nullptr, m_SkyEdgeTable.Put() ) ) ||
+                FAILED( m_Device->CreateRenderTargetView( m_SkyEdgeTable.Get(), nullptr, m_SkyEdgeTableRtv.Put() ) ) ||
+                FAILED( m_Device->CreateShaderResourceView( m_SkyEdgeTable.Get(), nullptr, m_SkyEdgeTableView.Put() ) ) ||
+                FAILED( m_Device->CreateTexture2D( &table, nullptr, m_SkyEdgeSmooth.Put() ) ) ||
+                FAILED( m_Device->CreateRenderTargetView( m_SkyEdgeSmooth.Get(), nullptr, m_SkyEdgeSmoothRtv.Put() ) ) ||
+                FAILED( m_Device->CreateShaderResourceView( m_SkyEdgeSmooth.Get(), nullptr, m_SkyEdgeSmoothView.Put() ) ))
+            {
+                m_SkyEdgeTableRtv.Reset();
+                m_SkyEdgeTableView.Reset();
+                m_SkyEdgeTable.Reset();
+                m_SkyEdgeSmoothRtv.Reset();
+                m_SkyEdgeSmoothView.Reset();
+                m_SkyEdgeSmooth.Reset();
+                Log( "SkyEdgeFill: edge table %u failed, off", width );
+                m_ConfigSkyEdgeFill = 0;
+                return;
+            }
+        }
+
+        if (!m_SkyEdgeConstants)
+        {
+            D3D11_BUFFER_DESC buffer = {};
+            buffer.ByteWidth = 48;
+            buffer.Usage = D3D11_USAGE_DYNAMIC;
+            buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            if (FAILED( m_Device->CreateBuffer( &buffer, nullptr, m_SkyEdgeConstants.Put() ) ))
+                return;
+        }
+
+        if (!m_SkyEdgeRaster)
+        {
+            D3D11_RASTERIZER_DESC raster = {};
+            raster.FillMode = D3D11_FILL_SOLID;
+            raster.CullMode = D3D11_CULL_NONE;
+            raster.DepthClipEnable = FALSE;
+            if (FAILED( m_Device->CreateRasterizerState( &raster, m_SkyEdgeRaster.Put() ) ))
+                return;
+        }
+
+        // Smoothing radius 12 columns and soft seam 6 rows at 2560 x 1440, scaled with the render size.
+        const float radius = std::max( 4.0f, std::round( 12.0f * static_cast<float>(width) / 2560.0f ) );
+        const float seam = std::max( 3.0f, 6.0f * static_cast<float>(height) / 1440.0f );
+        // Into the band '[Dx11] SkyEdgeBlend' rows (at 1440): the top rows of a 16 bit band texture keep a colour step there.
+        const float seam_in = m_ConfigSkyEdgeBlend * static_cast<float>(height) / 1440.0f;
+        float constants[12] = { m_SkyEdgeClear[0], m_SkyEdgeClear[1], m_SkyEdgeClear[2], m_ConfigSkyEdgeFill == 2 ? 2.0f : 1.0f,
+            static_cast<float>(width), static_cast<float>(height), radius, seam, seam_in, 0.0f, 0.0f, 0.0f };
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if (FAILED( m_Context->Map( m_SkyEdgeConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
+            return;
+        std::memcpy( mapped.pData, constants, sizeof( constants ) );
+        m_Context->Unmap( m_SkyEdgeConstants.Get(), 0 );
+
+        ID3D11ShaderResourceView * none[2] = {};
+        m_Context->PSSetShaderResources( 0, 2, none );
+
+        if (desc.SampleDesc.Count > 1)
+            m_Context->ResolveSubresource( m_SkyEdgeCopy.Get(), 0, m_Frame.Get(), 0, desc.Format );
+        else
+            m_Context->CopyResource( m_SkyEdgeCopy.Get(), m_Frame.Get() );
+
+        m_Context->OMSetBlendState( nullptr, nullptr, 0xFFFFFFFF );
+        m_Context->OMSetDepthStencilState( nullptr, 0 );
+        m_Context->RSSetState( m_SkyEdgeRaster.Get() );
+        m_Context->IASetInputLayout( nullptr );
+        m_Context->IASetPrimitiveTopology( D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST );
+        m_Context->VSSetShader( m_ReflCompositeVs.Get(), nullptr, 0 );
+        ID3D11Buffer * buffer = m_SkyEdgeConstants.Get();
+        m_Context->PSSetConstantBuffers( 0, 1, &buffer );
+
+        // Pass 1: per column the first fully covered pixel from the top (row 0) and from the bottom (row 1).
+        ID3D11RenderTargetView * table_target = m_SkyEdgeTableRtv.Get();
+        m_Context->OMSetRenderTargets( 1, &table_target, nullptr );
+        D3D11_VIEWPORT viewport = { 0, 0, static_cast<float>(width), 2.0f, 0, 1 };
+        m_Context->RSSetViewports( 1, &viewport );
+        ID3D11ShaderResourceView * frame_view = m_SkyEdgeCopyView.Get();
+        m_Context->PSSetShaderResources( 0, 1, &frame_view );
+        m_Context->PSSetShader( m_SkyEdgeColumnPs.Get(), nullptr, 0 );
+        m_Context->Draw( 3, 0 );
+
+        // Pass 1b: edge colours averaged over the columns around, so neighbouring columns differ by almost nothing.
+        ID3D11RenderTargetView * smooth_target = m_SkyEdgeSmoothRtv.Get();
+        m_Context->OMSetRenderTargets( 1, &smooth_target, nullptr );
+        ID3D11ShaderResourceView * table_views[2] = { nullptr, m_SkyEdgeTableView.Get() };
+        m_Context->PSSetShaderResources( 0, 2, table_views );
+        m_Context->PSSetShader( m_SkyEdgeSmoothPs.Get(), nullptr, 0 );
+        m_Context->Draw( 3, 0 );
+        m_Context->PSSetShaderResources( 0, 2, none );
+
+        // Pass 2: the clear colour left in a pixel becomes the colour of the sky edge of its column. Depth stays as cleared.
+        ID3D11RenderTargetView * frame_target = m_FrameView.Get();
+        m_Context->OMSetRenderTargets( 1, &frame_target, nullptr );
+        viewport = { 0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1 };
+        m_Context->RSSetViewports( 1, &viewport );
+        ID3D11ShaderResourceView * views[2] = { m_SkyEdgeCopyView.Get(), m_SkyEdgeSmoothView.Get() };
+        m_Context->PSSetShaderResources( 0, 2, views );
+        m_Context->PSSetShader( m_SkyEdgeFillPs.Get(), nullptr, 0 );
+        m_Context->Draw( 3, 0 );
+
+        m_Context->PSSetShaderResources( 0, 2, none );
+        InvalidatePipeline();
     }
 
 

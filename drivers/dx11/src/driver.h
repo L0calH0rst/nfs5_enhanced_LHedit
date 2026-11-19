@@ -942,6 +942,36 @@ namespace dx11z
         int m_ConfigTestDraw = 0;
         std::set< std::uint64_t > m_LoggedNoDepth;
 
+        // '[Dx11] SkyEdgeFill' (BUGS.md B32): the sky dome is a band, above and below it the flat clear colour shows. While the
+        // sky is drawn the alpha of the frame keeps the share of the clear colour left in each pixel; at the first draw after
+        // the sky each column gets the colour of the sky at its upper and lower edge there instead of the clear colour.
+        int m_ConfigSkyEdgeFill = 1;
+        float m_ConfigSkyEdgeBlend = 12.0f; // '[Dx11] SkyEdgeBlend': soft seam into the band, pixels at 1440 lines
+        int m_SkyEdgeState = 0; // 0 idle, 1 after a full clear, 2 sky draws running, 3 done for this frame
+        bool m_SkyEdgeDraw = false; // the draw being applied is part of the sky
+        bool m_SkyEdgeFlatDraw = false; // first sky draw is a flat untextured opaque colour: it counts as the clear colour
+        // 'SkyEdgeFill = 2': fill drawn in debug colours, the sky draws of one frame every 10 s in dx11z.log.
+        bool m_SkyEdgeLogging = false;
+        int m_SkyEdgeLogIndex = 0;
+        std::uint64_t m_SkyEdgeLogNext = 0;
+        void LogSkyDraw();
+        float m_SkyEdgeClear[4] = {};
+        ComPtr<ID3D11Texture2D> m_SkyEdgeCopy;
+        ComPtr<ID3D11ShaderResourceView> m_SkyEdgeCopyView;
+        ComPtr<ID3D11Texture2D> m_SkyEdgeTable; // render width x 2: colour and row of the upper / lower sky edge per column
+        ComPtr<ID3D11RenderTargetView> m_SkyEdgeTableRtv;
+        ComPtr<ID3D11ShaderResourceView> m_SkyEdgeTableView;
+        ComPtr<ID3D11Texture2D> m_SkyEdgeSmooth; // the same with the colours averaged over the columns around
+        ComPtr<ID3D11RenderTargetView> m_SkyEdgeSmoothRtv;
+        ComPtr<ID3D11ShaderResourceView> m_SkyEdgeSmoothView;
+        ComPtr<ID3D11PixelShader> m_SkyEdgeSmoothPs;
+        ComPtr<ID3D11PixelShader> m_SkyEdgeColumnPs;
+        ComPtr<ID3D11PixelShader> m_SkyEdgeFillPs;
+        ComPtr<ID3D11Buffer> m_SkyEdgeConstants;
+        ComPtr<ID3D11RasterizerState> m_SkyEdgeRaster;
+        bool BatchIsSky() const;
+        void SkyEdgeFill();
+
         // 0 normal draw, 1 opaque part only, 2 faint part only without depth writes.
         int m_EdgePass = 0;
 
