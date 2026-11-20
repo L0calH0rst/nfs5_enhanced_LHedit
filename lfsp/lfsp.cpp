@@ -308,6 +308,7 @@ namespace
     int g_cineInCycle = 1;     // Cinematic als fünfte Ansicht der Kamerataste des Spiels (C)
     int g_cineKey = 0;         // eigene Taste zum Umschalten, 0 = keine
     int g_cineEngine = 1;      // Motor in Cinematic laut wie in der Wiederholung
+    float g_tvSoundDist = 6.0f; // TV-Kamera: Hörer höchstens so weit vom Auto (m), Pegel wie Verfolger; 0 = Original
     int g_sprayColour = -1;    // B29: RGB der Wasser-Gischt (WTSP), -1 = Original
     int g_action = 1;          // Verfolgerkameras reagieren auf die Fahrt
     int g_actionKey = 0;       // Taste: Action an/aus, 0 = keine
@@ -638,6 +639,7 @@ namespace
         g_cineInCycle = GetPrivateProfileIntA("Camera", "CinematicInCycle", 1, ini);
         g_cineKey = readOptionalKey("CinematicKey");
         g_cineEngine = GetPrivateProfileIntA("Camera", "CinematicEngineSound", 1, ini);
+        g_tvSoundDist = readFloat("TvSoundDistance", "6", 0.0f, 100.0f);
         {
             char text[32] = {};
             GetPrivateProfileStringA("Weather", "SprayColour", "B4BCC4", text, sizeof(text), ini);
@@ -3713,6 +3715,49 @@ namespace
         g_origEngineVoice(slot, volume, pitch, a4, a5, a6, a7, a8);
     }
 
+    // TV-Kamera-Ton (doc/KAMERA.md §4): Game_CamListener 0x4654A0 (cdecl Spieler, Hörer, Bewegung) kopiert aus
+    // Snd_RaceTick die Kameraposition als Ton-Hörer nach 0x655E50. Die TV-Kamera (Typ 12) steht oft 20–100 m weg;
+    // dafür nehmen Motor, Rollgeräusch, Aufprall und Hupe des Hörerautos eigene, weit reichende Kurven (Motor
+    // 40000 / (Abstand + 15) statt 2048 / (Abstand + 2), Aufprall 8192 / (Abstand + 1) statt 512 / (Abstand + 2)).
+    // Bei 30 m ist das 3–4× so laut wie die Verfolgerkamera. LFSP schaltet diese Kurven ab und rückt den Hörer bei
+    // Typ 12 auf der Linie Kamera → Auto bis auf g_tvSoundDist ans Zielauto heran. Richtung (Panorama) und Doppler
+    // bleiben die der TV-Kamera (Bewegung des Hörers 0 wie im Original), Pegel und Gegner wie bei einer Verfolgerkamera.
+    using CamListenerFn = void (__cdecl *)(int player, float * out, int * motion);
+    CamListenerFn g_origCamListener = nullptr;
+    DWORD g_tvSoundLogTick = 0;
+
+    void __cdecl HookCamListener(int player, float * out, int * motion)
+    {
+        unsigned char * cam = CamState(player);
+        unsigned char * car = At<unsigned char *>(cam, 0);
+        float * pos = &At<float>(cam, 0x24);
+        if (g_tvSoundDist > 0.0f && At<short>(cam, 0xBC) == 12 && car)
+        {
+            const float * carPos = &At<float>(car, kCarPos);
+            const float d[3] = { pos[0] - carPos[0], pos[1] - carPos[1], pos[2] - carPos[2] };
+            const float dist = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            if (dist > g_tvSoundDist)
+            {
+                const float saved[3] = { pos[0], pos[1], pos[2] };
+                const float k = g_tvSoundDist / dist;
+                for (int i = 0; i < 3; ++i)
+                {
+                    pos[i] = carPos[i] + d[i] * k;
+                }
+                g_origCamListener(player, out, motion);
+                std::memcpy(pos, saved, sizeof(saved));
+                const DWORD tick = GetTickCount();
+                if (g_measure && tick - g_tvSoundLogTick >= 1000)
+                {
+                    g_tvSoundLogTick = tick;
+                    Log("Ton: TV-Kamera %.1f m vom Auto, Hoerer auf %.1f m", dist, g_tvSoundDist);
+                }
+                return;
+            }
+        }
+        g_origCamListener(player, out, motion);
+    }
+
     // ---- Freecam (Testzwecke): ersetzt Position und Drehung der fertigen Kamera ----
     // Numpad 8/5/4/6 vor/zurück/links/rechts, Numpad 9/3 hoch/runter, Numpad 7/1 Blick hoch/runter,
     // Numpad / und * Blick links/rechts, Maus = Blick (eingefangen, das Spiel bekommt keine Mausnachrichten),
@@ -6442,6 +6487,26 @@ namespace
             static const unsigned char kOld[] = { 0x7C, 0x1A };
             static const unsigned char kNew[] = { 0x90, 0x90 };
             PatchBytes("Cinematic Motorgeraeusch", 0x4AA083, kOld, kNew, sizeof(kOld));
+        }
+        if (g_tvSoundDist > 0.0f)
+        {
+            static const unsigned char kListener[] = { 0x81, 0xEC, 0x84, 0x00, 0x00, 0x00 };
+            InstallHook("TV-Kamera Hoerer", 0x4654A0, kListener, sizeof(kListener),
+                        reinterpret_cast<void *>(&HookCamListener), reinterpret_cast<void **>(&g_origCamListener));
+            // Sonderkurven für Typ 12 abschalten: jne nach "cmp word [0x627F3C], 0xC" wird jmp.
+            struct TvJump { const char * name; std::uintptr_t at; unsigned char rel; };
+            static const TvJump kJumps[] = {
+                { "TV-Ton Motor", 0x4AA07A, 0x23 },     // Snd_UpdateCarEngine: Motorkurve
+                { "TV-Ton Rollen", 0x4AA3BC, 0x26 },    // Snd_UpdateCarEngine: Rollgeräusch
+                { "TV-Ton Aufprall", 0x4A93D8, 0x1C },  // Snd_PlayCollision
+                { "TV-Ton Hupe", 0x4AAC18, 0x1C },      // Snd_PlayHorn
+            };
+            for (const TvJump & j : kJumps)
+            {
+                const unsigned char oldJ[] = { 0x75, j.rel };
+                const unsigned char newJ[] = { 0xEB, j.rel };
+                PatchBytes(j.name, j.at, oldJ, newJ, sizeof(oldJ));
+            }
         }
 
         if (g_sprayColour >= 0)

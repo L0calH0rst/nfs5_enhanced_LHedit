@@ -522,6 +522,10 @@ namespace dx11z
         float m_ConfigOpponentsStrength = 1.0f;
         float m_ConfigTrafficGlow = 0.35f; // [Lights] TrafficHeadlightGlow: share of the opponents' light for traffic cars, 0 = off
         float m_ConfigTrafficRange = 0.5f; // [Lights] TrafficHeadlightRange: reach of the traffic cars' light as a share of the opponents' (0.1-2)
+        // '[Lights] HeadlightsOpponentsRange': reach of the opponents' light as a share of the game's map (1 = as the player's).
+        float m_ConfigOpponentsRange = 1.5f;
+        // '[Lights] CarLightRadius': cars this close to the camera can light the road (was fixed 100).
+        float m_ConfigCarLightRadius = 250.0f;
         int m_ConfigMaxCarLights = 16; // [Lights] MaxCarLights: active car lights (opponents and traffic), 1 to MAX_CAR_LIGHTS
         int m_ConfigNightGradeBlended = 1; // [Lights] NightGradeBlended: normal blended draws without depth write (foliage fringe) are darkened too
         std::map<std::uint32_t, std::array<std::uint64_t, 3>> m_NightTextures;
@@ -534,7 +538,7 @@ namespace dx11z
         // Frame profile ('[Lights] FrameProfile'): GPU time per draw category from timestamp queries (a few frames late) and the
         // CPU side of the light constants. Categories: 0 opaque world without light, 1 opaque world with light, 2 sky, 3 additive
         // sprites, 4 HUD and 2D, 5 second pass of the alpha edge fix, 6 alpha tested or blended world with light, 7 the same without.
-        static constexpr int PROFILE_CATEGORIES = 12;
+        static constexpr int PROFILE_CATEGORIES = 13;
         static constexpr int PROFILE_STAMPS = 255;
         struct ProfileSlot
         {
@@ -694,6 +698,36 @@ namespace dx11z
         // Colours of the first page seen per size, the undamaged state (damage repaints the page under a new hash).
         struct CarReflBaseline { std::uint32_t m_Width, m_Height; std::vector<std::uint32_t> m_Colours; };
         std::vector<CarReflBaseline> m_CarReflBaselines;
+        // B28: which triangles of a matte part reflect as paint, decided once per car object, part and geometry (triangle
+        // count and texture coordinates) and kept: damage repaints the page under a new hash (with HD textures the undamaged
+        // page cannot be read at all, so there is no baseline), and scratched cloth would read as paint.
+        // '[CarReflections] MatteKeep' (1 = on).
+        struct CarReflMatteKeep { std::uint32_t m_Hash; bool m_Logged; std::vector<std::uint8_t> m_Keep; };
+        std::map<std::uint64_t, CarReflMatteKeep> m_CarReflMatteKeep;
+        int m_ConfigCarReflMatteKeep = 1;
+        // '[CarReflections] MatteGrey' (B28): 0 = grey, unsaturated colours of the paint cells count as paint only when they
+        // are the main colour (black, grey, silver, white cars); 1 = all colours as before. Dark trim and shading of a
+        // coloured car otherwise let the dark cloth read as paint (356 opponents without HD textures, part 41).
+        int m_ConfigCarReflMatteGrey = 0;
+        // '[CarReflections] MatteSolid' (B28): matte parts without any paint in them, matte all over (no split by cells or
+        // colour). Default 41, the rigid top of the cabrios: opponents keep it (LFSP swaps it for the animated top 37 on the
+        // player's car only), and on their own 256 pages all its triangles read as paint.
+        std::vector<int> m_ConfigCarReflMatteSolid;
+        // '[CarReflections] SkipAlphaMid' (B34): textures whose share of half transparent texels (alpha 32..224) is at least
+        // this get no reflection: grilles and meshes (GT1: part 27, 64 x 64, 58 %); their half covered texels reflected like
+        // paint, a small texture blown up into a bright block pattern. 0 = off.
+        float m_ConfigCarReflSkipAlphaMid = 0.3f;
+        std::set<std::uint32_t> m_CarReflAlphaSkipped;
+        // '[CarReflections] GlassParts' (B34): glass parts (35/47 side windows outside/inside, 48 windscreen inside) reflect as
+        // a whole like glass: 'GlassStrength' at a flat angle, 'GlassReflectance' head on, Schlick exponent 5, no highlight
+        // boost, no clearcoat, no paint split. Glass used to be told apart per pixel by alpha; where a window lies on opaque
+        // texels of the paint page, half of it reflected like paint (GT1 rear quarter window).
+        std::vector<int> m_ConfigCarReflGlassParts;
+        std::set<int> m_CarReflGlassLogged;
+        float m_ConfigCarReflGlassStrength = 0.5f;
+        float m_ConfigCarReflGlassF0 = 0.12f;
+        std::set<std::uint32_t> m_CarReflPaletteLogged;
+        const void * m_CarLodObject = nullptr; // R3DCarLOD of the call being drawn
         int m_CarPart = -1; // part << 8 | variant being drawn
         std::vector<std::uint16_t> m_CarReflIndices;
         std::set<std::uint64_t> m_CarReflMatteSeen;
@@ -712,6 +746,16 @@ namespace dx11z
         // half size on (BLUR DownPS), m_BlurChain level k is level k + 1 of it drawn back up to the size of level k (UpPS).
         static constexpr int BLUR_DOWN_LEVELS = 6;
         int m_ConfigCarReflBlurChain = 0;
+        float m_ConfigCarReflHighlightBoost = 0.0f; // 9.15b '[CarReflections] HighlightBoost' (0 = off)
+        float m_ConfigCarReflHighlightThreshold = 0.75f; // 9.15b '[CarReflections] HighlightThreshold'
+        float m_ConfigCarReflCreaseCos = -2.0f; // 9.15b cos of '[CarReflections] CreaseAngle' (< -1 = off, all faces of a point)
+        int m_ConfigCarReflClearCoat = 0; // 9.15b '[CarReflections] ClearCoat'
+        float m_ConfigCarReflBaseCoat = 0.2f; // 9.15b '[CarReflections] BaseCoat': strength of the soft coloured base reflection
+        float m_ConfigCarReflBaseBlur = 2.5f; // 9.15b '[CarReflections] BaseCoatBlur': its extra blur levels
+        float m_ConfigCarReflBaseTint = 0.7f; // 9.15b '[CarReflections] BaseCoatTint': how much it takes the paint colour
+        int m_ConfigCarReflSky = 0; // '[CarReflections] Sky' (9.15a): sky image of the water reflection above the frame instead of the fog colour
+        std::uint32_t m_SkyImageFlip = 0xFFFFFFFFu; // flip in which the sky image was last drawn (main view)
+        bool CarSkyImageUsable() const;
         ComPtr<ID3D11Texture2D> m_BlurDown;
         ComPtr<ID3D11Texture2D> m_BlurChain;
         std::array<ComPtr<ID3D11RenderTargetView>, BLUR_DOWN_LEVELS> m_BlurDownRtv;
@@ -1201,6 +1245,20 @@ namespace dx11z
         float m_ProbeX = -1.0f; // game pixels, this frame
         float m_ProbeY = -1.0f;
         float m_ProbeBest = 0.0f; // largest rhw this frame
+        // Every draw under the probe this frame (texture, blend, depth write, rhw), logged once a second (9.14b: shore textures).
+        struct ProbeHit
+        {
+            float m_Rhw = 0.0f;
+            std::uint32_t m_Hash = 0;
+            float m_AlphaMid = 0.0f;
+            std::uint8_t m_Blend = 0, m_Source = 0, m_Destination = 0, m_DepthWrite = 0, m_Water = 0, m_Shore = 0;
+            // B32: what kind of draw it is (sky draw by BatchIsSky, depth, colour and fog at the probe, sky edge state).
+            std::uint8_t m_Sky = 0, m_ZEnable = 0, m_ZFunc = 0, m_Fog = 0, m_FogFactor = 0, m_SkyEdge = 0;
+            float m_Z = 0.0f;
+            std::uint32_t m_Diffuse = 0, m_FogColour = 0, m_Vertices = 0;
+        };
+        std::vector<ProbeHit> m_ProbeHits;
+        std::uint64_t m_ProbeLogTick = 0;
         float m_ProbeShown = 0.0f;
         int m_ProbeCursorX = 0; // back buffer pixels
         int m_ProbeCursorY = 0;
@@ -1350,6 +1408,10 @@ namespace dx11z
         // brightens them and draws streaks.
         int m_ConfigReflectionLights = 0; // '[Water] ReflectionLights'
         float m_ConfigReflectionLightBoost = 3.0f; // '[Water] ReflectionLightBoost': factor on their colour
+        float m_ConfigReflectionWaveSlope = 0.06f; // '[Water] ReflectionWaveSlope': slope of the waves fixed on the water (9.14b)
+        float m_ConfigReflectionSunGlint = 0.0f; // '[Water] ReflectionSunGlint': strength of the sun glint on the water (0 = off)
+        float m_ConfigReflectionStrengthNight = 0.6f; // '[Water] ReflectionStrengthNight': strength at night (native or LFSP NightGrade)
+        int m_ConfigReflectionWorldWaves = 0; // '[Water] ReflectionWorldWaves': waves fixed on the water instead of on the screen
         bool m_NightGradeSeen = false; // LFSP NightGrade reported active for the last draw
         // Weather (LFSP LfspWeatherFx, PLAN.md 15.2): world rgb, sky rgb, fog exponent, snow white, desaturation, slope, test, snow rgb,
         // lightning, mode; read once per frame.
@@ -1399,6 +1461,18 @@ namespace dx11z
         float m_ConfigCarSnowBright = 0.5f; // '[Weather] CarSnowBright' of lfsp.ini: brightness of the car snow (w8)
         float m_ConfigCarDropFlow = 0.005f; // '[Weather] CarDropFlow' of lfsp.ini: creep of the drops, m/s per m/s above 8 m/s (w6)
         ULONGLONG m_WeatherNextReport = 0;
+        std::uint64_t m_WorldCameraLogTick = 0;
+        float m_ConfigReflectionWaveDirection = 35.0f; // '[Water] ReflectionWaveDirection': main direction of the waves (degrees in the world)
+        float m_ConfigReflectionWaveSpread = 1.0f; // '[Water] ReflectionWaveSpread': spread of the waves about it (0 = all parallel)
+        float m_ConfigReflectionWaveHeight = 0.0f; // '[Water] ReflectionWaveHeight': relief height of the waves (m, 0 = flat)
+        float m_ConfigReflectionWaveSize = 5.0f; // '[Water] ReflectionWaveSize': wavelengths x this (1 = 0.65 ... 3.5 m)
+        // World camera of the queue run (read at its start like the clip; the last good one if the read fails).
+        bool m_ReflWorldValid = false;
+        float m_ReflWorldRows[9] = {};
+        float m_ReflWorldPosition[3] = {};
+        std::uint64_t m_ReflWorldReads = 0, m_ReflWorldFails = 0;
+        bool ReadWorldCamera( float rows[9], float position[3] );
+        bool ReadSunDirection( float direction[3] );
         float m_ConfigReflectionLightStreak = 6.0f; // '[Water] ReflectionLightStreak': step of the streak lookups (pixels at 1080 lines, 0 = none)
         std::uint64_t m_ReflLightsKept = 0;
         ComPtr<ID3D11Texture2D> m_ReflLight;
@@ -1412,6 +1486,9 @@ namespace dx11z
         float m_ConfigReflectionBlur = 2.0f;
         float m_ConfigReflectionFresnel = 0.3f;
         float m_ConfigShoreFade = 0.27f;
+        // '[Water] ShoreWaterLight' (B33): the see-through part of a shore texture takes the light colour of the water (the
+        // running colour of WaterEvenColour) instead of the shore's own vertex colour; 0 = off, 1 = fully by transparency.
+        float m_ConfigShoreWaterLight = 1.0f;
         float m_ConfigWaterFarFade = 0.3f;
         float m_ReflWaterFar = 0.0f;
         // '[Water] EdgeFade': where the water surface ends against open sky (stencil 0: nothing of the render queue
@@ -1458,6 +1535,69 @@ namespace dx11z
         ComPtr<ID3D11VertexShader> m_ReflCompositeVs;
         ComPtr<ID3D11PixelShader> m_ReflCompositePs;
         ComPtr<ID3D11Buffer> m_MirrorConstants;
+        // Ambient occlusion ('[AmbientOcclusion]' in lfsp.ini, after MXAO type 2; shaders::AO). Defaults: the user's MXAO values.
+        int m_ConfigAo = 0;
+        int m_ConfigAoQuality = 1; // 'Quality' 0 Niedrig, 1 Mittel, 2 Hoch (slices x samples per side 2x4, 2x10, 4x14)
+        int m_ConfigAoShadingRate = 1; // 'ShadingRate' 0 all pixels, 1 checkerboard per frame
+        float m_ConfigAoRadius = 1.893f; // 'SampleRadius'
+        int m_ConfigAoGrow = 1; // 'IncreaseRadiusWithDistance'
+        float m_ConfigAoAmount = 1.0f; // 'Amount'
+        float m_ConfigAoFade = 0.333f; // 'FadeDepth'
+        int m_ConfigAoFilter = 2; // 'FilterQuality' 0 ... 2
+        int m_ConfigAoDebug = 0; // 'Debug' 1 = raw occlusion
+        float m_ConfigAoFarPlane = 1000.0f; // 'FadeFarPlane': ReShade's depth far plane, for the fade
+        int m_ConfigAoMethod = 0; // 'Method' 0 as MXAO, 1 exact weighting of the slices and back face along the sample's ray (GT-VBAO)
+        float m_ConfigAoThickness = 1.0f; // 'Thickness': scale of the thickness given to the objects
+        float m_ConfigAoAngleBias = 10.0f; // 'AngleBias' (B35): degrees above the face a rise has to reach to occlude
+        int m_ConfigAoDepthMips = 0; // 'DepthMips' 1: far samples from a pyramid of the linear depth
+        int m_ConfigAoTemporal = 0; // 'Temporal' 1: accumulation over the frames, reprojected with the world camera
+        float m_ConfigAoTemporalBlend = 0.85f; // 'TemporalBlend': share of the history
+        int m_ConfigAoMultiBounce = 0; // 'MultiBounce' 1: light thrown back by the surroundings (Jimenez et al. 2016)
+        int m_ConfigAoFogFade = 0; // 'FogFade' 1: no occlusion where the fog of the game covers the scene
+        ComPtr<ID3D11PixelShader> m_AoPs, m_AoFilterPs, m_AoApplyPs, m_AoDepthHalfPs, m_AoDepthMipPs;
+        // m_AoTemp / m_AoHistory: FilterPS's target alternates between the two, the other is the last frame ('Temporal').
+        ComPtr<ID3D11Texture2D> m_AoRaw, m_AoTemp, m_AoHistory;
+        ComPtr<ID3D11RenderTargetView> m_AoRawRtv, m_AoTempRtv, m_AoHistoryRtv;
+        ComPtr<ID3D11ShaderResourceView> m_AoRawSrv, m_AoTempSrv, m_AoHistorySrv;
+        bool m_AoHistoryFlip = false;
+        static constexpr int AO_DEPTH_LEVELS = 4; // half ... 1/16 of the render size
+        ComPtr<ID3D11Texture2D> m_AoDepthMips;
+        ComPtr<ID3D11ShaderResourceView> m_AoDepthMipsSrv; // all levels
+        ComPtr<ID3D11ShaderResourceView> m_AoDepthLevelSrv[AO_DEPTH_LEVELS];
+        ComPtr<ID3D11RenderTargetView> m_AoDepthLevelRtv[AO_DEPTH_LEVELS];
+        // Camera of the last AO frame for the reprojection ('Temporal').
+        bool m_AoPrevValid = false;
+        std::uint32_t m_AoPrevFlip = 0;
+        float m_AoPrevClipOfView[16] = {};
+        float m_AoPrevViewport[4] = {};
+        float m_AoPrevRows[9] = {};
+        float m_AoPrevPosition[3] = {};
+        bool m_ReflWorldFresh = false; // the world camera was read at the start of this queue run
+        // Fog of the main view's world draws ('FogFade'): -1 none seen, 0 table over z, 1 exp, 2 exp2, 3 linear over z.
+        int m_AoFogMode = -1;
+        float m_AoFogParams[4] = {}; // start, end, density, storm exponent
+        std::array<std::uint8_t, 256> m_AoFogTable = {}; // the game's table at that draw (visibility over z)
+        ComPtr<ID3D11Buffer> m_AoConstants;
+        ComPtr<ID3D11BlendState> m_AoMultiply;
+        ComPtr<ID3D11RasterizerState> m_AoRaster;
+        float m_ReflNear = 0.5f; // near plane of the view (R_View + 0x18), n of z = 1 - n / w
+        std::uint32_t m_AoFrame = 0;
+        std::uint64_t m_AoRuns = 0;
+        void DrawAmbientOcclusion();
+
+        // Settings menu in the game (menu.cpp, Dear ImGui), '[Menu]' in lfsp.ini: sliders on the live settings, saved back to lfsp.ini.
+        std::string m_LfspIni; // path of lfsp.ini
+        int m_MenuKey = VK_F8; // '[Menu] Key'
+        bool m_MenuOpen = false;
+        bool m_MenuKeyDown = false;
+        bool m_MenuReady = false; // ImGui set up on this device and window
+        bool m_MenuFailed = false;
+        std::string m_MenuStatus; // last save message
+        float m_ConfigCarReflCreaseDeg = 0.0f; // '[CarReflections] CreaseAngle' in degrees (the menu edits this, the cosine follows)
+        void MenuFrame(); // in PresentBackBuffer: toggle key, draw over the back buffer
+        void MenuShutdown();
+        bool MenuMessage( HWND window, UINT message, WPARAM wparam, LPARAM lparam ); // true = the menu took the message
+        void MenuSave();
         std::unordered_map<std::uint64_t, ComPtr<ID3D11BlendState>> m_ReflBlends;
         std::unordered_map<std::uint64_t, ComPtr<ID3D11DepthStencilState>> m_ReflDepthStates;
         std::unordered_map<std::uint64_t, ComPtr<ID3D11RasterizerState>> m_ReflRasters;
@@ -1624,7 +1764,8 @@ namespace dx11z
         // End gets back what Begin returned. 'room': a 3D room of the menus, drawn without reflections (BUGS.md 21).
         std::uint32_t BeginCarLodDraw(
             std::uint32_t mask,
-            bool room
+            bool room,
+            const void * object
         );
         void EndCarLodDraw(
             std::uint32_t previous

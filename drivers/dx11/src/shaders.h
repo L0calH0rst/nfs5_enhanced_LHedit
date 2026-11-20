@@ -327,7 +327,17 @@ float4 MainPS( PixelIn input ) : SV_Target
 
     // Shore textures fade out towards the water: the lower alpha range becomes transparent, the rest ramps up.
     if ( g_AlphaRef.y > 0.0 )
+    {
         tex0.a = saturate( ( tex0.a - g_AlphaRef.y ) / ( 1.0 - g_AlphaRef.y ) );
+        // B33 ('[Water] ShoreWaterLight'): the see-through part takes the light colour of the water, the opaque ground keeps
+        // its own; at dusk the shore is lit warm and bright, the water cool and dark, and the edge between them stood out.
+        if ( g_Test.w > 0.0 )
+        {
+            uint packed = (uint)( g_Test.z + 0.5 );
+            float3 water = float3( ( packed >> 16 ) & 255, ( packed >> 8 ) & 255, packed & 255 ) / 255.0;
+            diffuseBase.rgb = lerp( diffuseBase.rgb, water, g_Test.w * ( 1.0 - tex0.a ) );
+        }
+    }
 
     // '[Dx11] AlphaMipScale' (BUGS.md B21): alpha-tested textures lose coverage in the smaller mip levels, so thin
     // cut-out edges open up in the distance and close again up close. Scale alpha with the mip level of texture 0.
@@ -614,6 +624,13 @@ cbuffer ReflectConstants : register( b0 )
     float4 g_Edge; // x: edge fade radius (pixels at 1080 lines, 0 = off), y: 'ReflectionDebug' 3 or 4, z: frame, depth and stencil copies bound, w: strength looking along the water
     float4 g_Size; // xy: render size (the reflection target may be smaller), z: depth scale n of z = 1 - n / w
     float4 g_Light; // mirrored lights (9.14a): x boost, y streak step (pixels at 1080 lines, 0 = none), z: light target bound
+    float4 g_WaveU; // waves fixed on the water (9.14b): xyz a world axis on the water in view space, w the camera along it (mod 32 m)
+    float4 g_WaveV; // the second world axis on the water, w the camera along it (mod 32 m)
+    float4 g_Sun; // xyz sun direction in view space, w glint strength (0 = off)
+    float4 g_Wave; // x waves fixed on the water, y slope, z largest shift of the lookup (pixels at 1080 lines), w tile size (m)
+    float4 g_WaveK0; // wave vectors 1 and 2 in whole cycles per tile (main direction and spread from the CPU)
+    float4 g_WaveK1; // wave vectors 3 and 4
+    float4 g_WaveWind; // xy main direction on the water (the chop drifts with it), z relief height of the waves (m, 0 = flat)
 };
 
 Texture2D g_Reflection : register( t0 );
@@ -629,6 +646,68 @@ Texture2D<float> g_Depth : register( t5 );
 Texture2D g_Lights : register( t6 ); // mirrored additive lights (9.14a), the size of the reflection target
 uint StencilAt( int2 p ) { return g_Stencil.Load( int3( p, 0 ) ); }
 float DepthAt( int2 p ) { return g_Depth.Load( int3( p, 0 ) ); }
+
+// Value noise that repeats every 'cells' cells (x in tiles), smooth.
+float TileHash( float2 c, float cells )
+{
+    c = c - cells * floor( c / cells );
+    return frac( sin( dot( c, float2( 127.1, 311.7 ) ) ) * 43758.5453 );
+}
+float TileNoise( float2 x, float cells )
+{
+    float2 g = x * cells;
+    float2 i = floor( g );
+    float2 f = g - i;
+    f = f * f * ( 3.0 - 2.0 * f );
+    return lerp( lerp( TileHash( i, cells ), TileHash( i + float2( 1.0, 0.0 ), cells ), f.x ),
+        lerp( TileHash( i + float2( 0.0, 1.0 ), cells ), TileHash( i + float2( 1.0, 1.0 ), cells ), f.x ), f.y );
+}
+// Slope of the noise (per tile) by central differences.
+float2 TileNoiseSlope( float2 x, float cells )
+{
+    float h = 0.25 / cells;
+    return float2( TileNoise( x + float2( h, 0.0 ), cells ) - TileNoise( x - float2( h, 0.0 ), cells ),
+        TileNoise( x + float2( 0.0, h ), cells ) - TileNoise( x - float2( 0.0, h ), cells ) ) / ( 2.0 * h );
+}
+
+// Slope of the water on a square tile (everything repeats per tile, so the CPU wraps the camera position without a jump).
+// Four long waves (wavelengths tile / 9.2, / 13.9, / 26.4, / 49; '[Water] ReflectionWaveSize' 3: tile 96 m, 10.5 ... 2 m, deep
+// water speed) and an irregular chop of two drifting noise layers (cells of 4 and 2 m), all scaled by slowly drifting
+// patches of calm and rough water (long waves and chop each their own), so it does not look even. Anything smaller than two pixels fades out (no flicker far away).
+float2 WaveSlope( float2 x, float t, float footprint, float tile )
+{
+    // Wave vectors about one main direction, like the wave areas of GTA V (the CPU rounds them to whole cycles per tile).
+    const float2 cycles[4] = { g_WaveK0.xy, g_WaveK0.zw, g_WaveK1.xy, g_WaveK1.zw };
+    const float share[4] = { 0.25, 0.2, 0.12, 0.08 };
+    float2 slope = float2( 0.0, 0.0 );
+    [unroll] for ( int i = 0; i < 4; ++i )
+    {
+        float2 k = cycles[i] * ( 6.2831853 / tile );
+        float kl = length( k );
+        float fade = saturate( 6.2831853 / ( kl * footprint * 2.0 ) - 1.0 );
+        slope += k / kl * share[i] * fade * cos( dot( k, x ) - sqrt( 9.81 * kl ) * t );
+    }
+    float2 u = x / tile;
+    // Patches for the long waves: two coarse layers (cells of 32 and 14 m at size 3), drifting slowly; nearly calm down to
+    // a tenth, rough up to twice.
+    float patch = TileNoise( u + float2( 0.0011, 0.0007 ) * t, 3.0 ) * 0.6 + TileNoise( u - float2( 0.0005, 0.0013 ) * t, 7.0 ) * 0.4;
+    slope *= lerp( 0.1, 2.0, smoothstep( 0.3, 0.7, patch ) );
+    // Chop: noise height of about a quarter of its cell, so its slope is about 0.4.
+    const float chop_cells[2] = { 24.0, 48.0 };
+    // The chop drifts with the wind (main direction), the second layer a little faster and to the side.
+    float2 wind = g_WaveWind.xy;
+    float2 side = float2( -wind.y, wind.x );
+    const float2 chop_drift[2] = { wind * 0.0035 + side * 0.0008, wind * 0.0050 - side * 0.0012 };
+    [unroll] for ( int c = 0; c < 2; ++c )
+    {
+        float cell = tile / chop_cells[c];
+        float fade = saturate( cell / ( footprint * 2.0 ) - 1.0 );
+        // Gusts: patches of their own for the chop (cells of 19 and 8 m at size 3), so it does not follow the long waves.
+        float gust = TileNoise( u + float2( -0.0019, 0.0009 ) * t, 5.0 ) * 0.5 + TileNoise( u + float2( 0.0008, 0.0021 ) * t, 12.0 ) * 0.5;
+        slope += TileNoiseSlope( u + chop_drift[c] * t, chop_cells[c] ) * ( 0.27 / chop_cells[c] ) * fade * lerp( 0.0, 2.2, smoothstep( 0.3, 0.75, gust ) );
+    }
+    return slope;
+}
 
 // The sky is far away: its reflection only depends on the direction. The view ray of the pixel, mirrored at the
 // water plane, projected back onto the screen; above the top edge the top row of the sky copy is used.
@@ -690,6 +769,32 @@ float4 MainVS( uint id : SV_VertexID ) : SV_Position
     return float4( corner.x * 2.0 - 1.0, 1.0 - corner.y * 2.0, 0.0, 1.0 );
 }
 
+
+// Height of the long waves for the relief ('[Water] ReflectionWaveHeight'): the same four waves as WaveSlope, amplitude of
+// each as its share over its wave number, normalised to -1 ... 1; waves shorter than two steps of the march fade out.
+// grad: the slope of that normalised height (per metre).
+float WaveHeight( float2 x, float t, float step, float tile, out float2 grad )
+{
+    const float2 cycles[4] = { g_WaveK0.xy, g_WaveK0.zw, g_WaveK1.xy, g_WaveK1.zw };
+    const float share[4] = { 0.25, 0.2, 0.12, 0.08 };
+    float height = 0.0;
+    float total = 0.0;
+    grad = float2( 0.0, 0.0 );
+    [unroll] for ( int i = 0; i < 4; ++i )
+    {
+        float2 k = cycles[i] * ( 6.2831853 / tile );
+        float kl = length( k );
+        float amplitude = share[i] / kl;
+        total += amplitude;
+        amplitude *= saturate( 6.2831853 / ( kl * step * 2.0 ) - 1.0 );
+        float phase = dot( k, x ) - sqrt( 9.81 * kl ) * t;
+        height += amplitude * sin( phase );
+        grad += amplitude * k * cos( phase );
+    }
+    grad /= total;
+    return height / total;
+}
+
 float4 MainPS( float4 position : SV_Position ) : SV_Target
 {
     float2 size = g_Size.xy;
@@ -723,10 +828,117 @@ float4 MainPS( float4 position : SV_Position ) : SV_Target
             return float4( 1.0, 0.0, 0.0, hole );
     }
 
-    // Small waves: the lookup swings a little sideways and up and down, slowly moving.
+    // The view ray of the pixel and where it meets the water plane (depth w of the water point).
     float t = g_Sky.y;
-    float2 wave = float2( sin( p.y * 0.09 / scale + t * 0.8 ) + 0.5 * sin( p.y * 0.23 / scale + p.x * 0.01 / scale - t * 1.1 ),
-        0.6 * sin( p.x * 0.05 / scale + p.y * 0.04 / scale + t * 0.6 ) ) * g_Sky.z * scale;
+    float2 game = p * ( 2.0 * g_Viewport.zw ) / size;
+    float3 ray_w = mul( float4( ( game.x - g_Viewport.z ) / g_Viewport.x, ( game.y - g_Viewport.w ) / g_Viewport.y, 1.0, 0.0 ), g_ViewOfClip ).xyz;
+    float3 ray = normalize( ray_w );
+    float down = -dot( ray_w, g_Plane.xyz );
+    float water_w = down > 1e-5 ? g_Plane.w / down : 1e9;
+    float3 normal = g_Plane.xyz;
+    // Shore weight, averaged over the water pixels around (three rings up to 24 pixels at 1080 lines): the weight jumps where
+    // the water geometry meets a shore texture, and that edge stood out in the strength of the reflection and the waves.
+    float weight = 1.0;
+    if ( g_Fresnel.y > 0.5 )
+    {
+        weight = g_Weight.Load( int3( position.xy, 0 ) );
+        if ( g_Edge.z > 0.5 )
+        {
+            float sum = weight;
+            float count = 1.0;
+            [unroll] for ( int ring = 1; ring <= 3; ++ring )
+            {
+                [unroll] for ( int k = 0; k < 8; ++k )
+                {
+                    float angle = ( k + ( ring & 1 ) * 0.5 ) * 0.7853982;
+                    int2 q = clamp( int2( p + float2( cos( angle ), sin( angle ) ) * ring * 8.0 * scale ), int2( 0, 0 ), int2( size ) - 1 );
+                    if ( ( StencilAt( q ) & 1 ) != 0 )
+                    {
+                        sum += g_Weight.Load( int3( q, 0 ) );
+                        count += 1.0;
+                    }
+                }
+            }
+            weight = sum / count;
+        }
+    }
+    float2 wave;
+    if ( g_Wave.x > 0.5 && down > 1e-5 )
+    {
+        // Waves fixed on the water ('[Water] ReflectionWorldWaves', 9.14b): the slope at the world point bends the normal; the
+        // bent reflection, mirrored back at the flat plane, is the camera ray whose pixel of the mirrored scene shows there.
+        float tile = max( g_Wave.w, 1.0 );
+        float len = length( ray_w );
+        float2 world_at = float2( g_WaveU.w, g_WaveV.w );                              // world point of the ray at s = 0
+        float2 world_dir = float2( dot( ray_w, g_WaveU.xyz ), dot( ray_w, g_WaveV.xyz ) ); // its change per s
+        // Patches of calm and rough long waves at the flat water point (they change over 50 m, one lookup is enough).
+        float2 u_flat = ( world_at + world_dir * water_w ) / tile;
+        float patch = TileNoise( u_flat + float2( 0.0011, 0.0007 ) * t, 3.0 ) * 0.6 + TileNoise( u_flat - float2( 0.0005, 0.0013 ) * t, 7.0 ) * 0.4;
+        float patch_factor = lerp( 0.1, 2.0, smoothstep( 0.3, 0.7, patch ) );
+        // Relief ('[Water] ReflectionWaveHeight', 9.14b): the view ray marched over the wave heights (half the height x the
+        // patches, so at most the height above and below the plane); the first crest it meets is what the pixel shows. Crests
+        // hide the troughs behind them, far waves crowd together: the flat water seems to rise. Calm at the shore.
+        float relief = g_WaveWind.z * weight;
+        float s_hit = water_w;
+        float lift = 0.0; // height of the hit point above the plane (m)
+        float2 relief_grad = float2( 0.0, 0.0 );
+        if ( relief > 0.01 )
+        {
+            float scale_h = 0.5 * relief * patch_factor;
+            float s0 = max( ( g_Plane.w - relief ) / down, 0.02 * water_w );
+            float s1 = ( g_Plane.w + relief ) / down;
+            float step = ( s1 - s0 ) * len / 12.0;
+            float2 grad;
+            float prev_s = s0;
+            float prev_diff = ( g_Plane.w - down * s0 ) - scale_h * WaveHeight( world_at + world_dir * s0, t, step, tile, grad );
+            s_hit = s1;
+            [loop] for ( int i = 1; i <= 12; ++i )
+            {
+                float s = s0 + ( s1 - s0 ) * ( i / 12.0 );
+                float diff = ( g_Plane.w - down * s ) - scale_h * WaveHeight( world_at + world_dir * s, t, step, tile, grad );
+                if ( diff <= 0.0 )
+                {
+                    s_hit = prev_s + ( s - prev_s ) * prev_diff / max( prev_diff - diff, 1e-5 );
+                    break;
+                }
+                prev_s = s;
+                prev_diff = diff;
+            }
+            lift = g_Plane.w - down * s_hit;
+            WaveHeight( world_at + world_dir * s_hit, t, step, tile, grad );
+            // Only a third of the tilt of the relief goes into the reflection: at full tilt (about 25 degrees at 1.5 m) the
+            // lookup moved up to 100 pixels and the water turned into abstract smears; the crests still hide the troughs.
+            relief_grad = grad * scale_h * 0.35;
+            water_w = s_hit;
+        }
+        float3 at = ray_w * s_hit;
+        float2 world = world_at + world_dir * s_hit;
+        // Metres per pixel, stretched along the view at a flat angle; only by the square root (fully stretched, all waves
+        // faded out when looking flat over wide water).
+        float footprint = s_hit * 2.0 * g_Viewport.w / ( abs( g_Viewport.y ) * size.y ) / max( sqrt( saturate( -dot( ray, g_Plane.xyz ) ) ), 0.2 );
+        // Towards the shore the waves calm down with the shore weight: the reflection there is weaker anyway, without this
+        // the edge of the water geometry stood out against the moving water next to it.
+        float2 slope = WaveSlope( world, t, footprint, tile ) * g_Wave.y * weight + relief_grad;
+        normal = normalize( g_Plane.xyz - slope.x * g_WaveU.xyz - slope.y * g_WaveV.xyz );
+        float3 bent = reflect( reflect( ray, normal ), g_Plane.xyz );
+        // Flat: only the direction counts (mirrored scene far away). Relief: the reflection leaves the crest at its height,
+        // so the mirror image lies 2 x lift lower; for the distance of the mirrored things take twice that of the water point.
+        float3 c = relief > 0.01 ? mul( float4( at - 2.0 * lift * g_Plane.xyz + bent * ( 2.0 * s_hit * len ), 1.0 ), g_ClipOfView ).xyz
+                                 : mul( float4( bent, 0.0 ), g_ClipOfView ).xyz;
+        wave = float2( 0.0, 0.0 );
+        if ( c.z > 1e-4 )
+        {
+            float2 game_bent = c.xy / c.z * g_Viewport.xy + g_Viewport.zw;
+            float limit = g_Wave.z * scale * ( relief > 0.01 ? 1.5 : 1.0 );
+            wave = clamp( game_bent * size / ( 2.0 * g_Viewport.zw ) - p, -limit, limit );
+        }
+    }
+    else
+    {
+        // Small waves on the screen: the lookup swings a little sideways and up and down, slowly moving.
+        wave = float2( sin( p.y * 0.09 / scale + t * 0.8 ) + 0.5 * sin( p.y * 0.23 / scale + p.x * 0.01 / scale - t * 1.1 ),
+            0.6 * sin( p.x * 0.05 / scale + p.y * 0.04 / scale + t * 0.6 ) ) * g_Sky.z * scale;
+    }
     float2 uv = ( p + wave ) / size;
 
     // Soft blur, five taps (the colour is premultiplied by the coverage, so it averages right).
@@ -746,6 +958,7 @@ float4 MainPS( float4 position : SV_Position ) : SV_Target
     }
     // Blended draws were laid over black, so the colour carries their coverage.
     float3 rgb = colour.a > 0.001 ? colour.rgb / colour.a : float3( 0.0, 0.0, 0.0 );
+    float scene_cover = saturate( colour.a ); // the mirrored scene in front of the sky: no sun glint there
     // Not covered by the mirrored scene (it was never drawn): the reflected sky fills the rest.
     bool sky_filled = false;
     if ( g_Sky.x > 0.5 )
@@ -771,19 +984,11 @@ float4 MainPS( float4 position : SV_Position ) : SV_Target
         return colour.a > 0.001 ? float4( saturate( rgb ), 1.0 ) : float4( 1.0, 0.0, 1.0, 1.0 );
     // Fresnel: water looked at from above mirrors little, at a flat angle a lot. Also hides that the sky
     // straight above (mirrored when looking steeply down) was never drawn.
-    float2 game = p * ( 2.0 * g_Viewport.zw ) / size;
-    float3 ray = normalize( mul( float4( ( game.x - g_Viewport.z ) / g_Viewport.x, ( game.y - g_Viewport.w ) / g_Viewport.y, 1.0, 0.0 ), g_ViewOfClip ).xyz );
-    float steep = saturate( -dot( ray, g_Plane.xyz ) );
+    float steep = saturate( -dot( ray, normal ) ); // with the bent normal of the waves (9.14b)
     float fresnel = lerp( g_Fresnel.x, 1.0, pow( 1.0 - steep, 3.0 ) );
     // Same far fade as the water itself: the depth w of the water point is where the ray meets the plane.
     if ( g_Fresnel.w > g_Fresnel.z && g_Fresnel.w > 0.0 )
-    {
-        float3 ray_w = mul( float4( ( game.x - g_Viewport.z ) / g_Viewport.x, ( game.y - g_Viewport.w ) / g_Viewport.y, 1.0, 0.0 ), g_ViewOfClip ).xyz;
-        float down = -dot( ray_w, g_Plane.xyz );
-        float water_w = down > 1e-5 ? g_Plane.w / down : 1e9;
         fresnel *= saturate( ( g_Fresnel.w - water_w ) / ( g_Fresnel.w - g_Fresnel.z ) );
-    }
-    float weight = g_Fresnel.y > 0.5 ? g_Weight.Load( int3( position.xy, 0 ) ) : 1.0;
     float3 mirrored = saturate( rgb ) * g_Tint.rgb;
     float alpha = saturate( colour.a ) * g_Tint.a * fresnel * weight;
     // Looking along the water it mirrors almost everything ('[Water] ReflectionGrazing'): far water takes the
@@ -804,6 +1009,16 @@ float4 MainPS( float4 position : SV_Position ) : SV_Target
         float added = saturate( max( lights.r, max( lights.g, lights.b ) ) );
         float3 total = mirrored * alpha + lights;
         alpha = max( alpha, added );
+        mirrored = saturate( total / max( alpha, 1e-4 ) );
+    }
+    // Sun glint ('[Water] ReflectionSunGlint', 9.14b): sharp highlight where the bent reflection points at the sun, only with
+    // the sun above the water and where the mirrored scene does not cover the sky.
+    if ( g_Sun.w > 0.0 && dot( g_Sun.xyz, g_Plane.xyz ) > 0.0 )
+    {
+        float glint = pow( saturate( dot( reflect( ray, normal ), g_Sun.xyz ) ), 500.0 ) * g_Sun.w * weight * ( 1.0 - scene_cover );
+        float3 sun_light = float3( 1.0, 0.96, 0.88 ) * glint;
+        float3 total = mirrored * alpha + sun_light;
+        alpha = max( alpha, saturate( glint ) );
         mirrored = saturate( total / max( alpha, 1e-4 ) );
     }
     // The hole shows ground, not the water: the water around it (frame before the composite) with the
@@ -927,6 +1142,8 @@ cbuffer CarReflectConstants : register( b0 )
     float4 g_CarFlow; // w5: xyz distance the drops of this car have crept (space of the part, m, wrapped), w speed of the car m/s
     float4 g_CarFlowDir; // xyz direction of travel in the space of the part, w brightness of the snow ('[Weather] CarSnowBright', w8)
     float4 g_CarFlowView; // xyz direction of travel in view space
+    float4 g_Highlight; // 9.15b: x boost of bright reflections ('[CarReflections] HighlightBoost', 0 = off), y brightness from which
+    float4 g_Coat; // 9.15b clearcoat: x 1 = on, y strength of the base coat, z its extra blur levels, w how much it takes the paint colour
 };
 
 // Weather on the car: a hash per cell of the position in the space of the part (w3; stable on the car, not mirrored like
@@ -986,6 +1203,7 @@ float DropLayer( float2 q, float aaCell, float density, float slide, float down,
 Texture2D g_Scene : register( t0 );
 Texture2D g_Texture : register( t1 );
 Texture2D g_Chain : register( t2 ); // shared blur chain: level 0 half the frame, each further level half as large and softer
+Texture2D g_SkyImage : register( t3 ); // sky image of the water reflection, previous frame (9.15a, g_SkyColour.w = 2)
 SamplerState g_SceneSampler : register( s0 );
 SamplerState g_TextureSampler : register( s1 );
 
@@ -1043,7 +1261,8 @@ float4 MainPS( PixelIn input ) : SV_Target
     float3 dp2 = ddy( input.m_View );
 
     // Cut out parts (grilles) keep their holes; the game blends the whole body, glass is what is not opaque.
-    float alpha = g_Texture.Sample( g_TextureSampler, input.m_Uv.xy ).a * input.m_Uv.z;
+    float4 paint = g_Texture.Sample( g_TextureSampler, input.m_Uv.xy );
+    float alpha = paint.a * input.m_Uv.z;
     if ( g_Forward.w >= 0.0 )
         clip( alpha - g_Forward.w );
     if ( g_Glass.x >= 0.0 && g_Glass.y == 0.0 )
@@ -1055,6 +1274,8 @@ float4 MainPS( PixelIn input ) : SV_Target
         n = -n;
     float facing = saturate( -dot( n, v ) );
     float3 r = reflect( v, n );
+    float3 sky_seen = g_SkyColour.rgb; // what the sky above the frame looks like, and how much of it this direction takes
+    float sky_amount = 0.0;
 
     // Upwards or downwards in the world: the ground is near and dark, the frame shows it sharp and too strong.
     bool has_up = dot( g_Up.xyz, g_Up.xyz ) > 0.5;
@@ -1088,8 +1309,22 @@ float4 MainPS( PixelIn input ) : SV_Target
     float strength = g_Params.x;
     if ( has_up )
     {
-        float sky = outside * saturate( upward * 4.0 + 0.5 ) * g_SkyColour.w;
-        colour = lerp( colour, g_SkyColour.rgb, sky );
+        float sky = outside * saturate( upward * 4.0 + 0.5 ) * saturate( g_SkyColour.w );
+        float3 sky_colour = g_SkyColour.rgb;
+        // '[CarReflections] Sky' (9.15a): the sky itself, sky colour and clouds. Above the frame its top row (the direction
+        // is pulled onto the edge like the frame lookup), softened by five taps.
+        if ( g_SkyColour.w > 1.5 )
+        {
+            float2 sky_uv = float2( saturate( p.x * 0.5 + 0.5 ), clamp( p.y * 0.5 + 0.5, 0.02, 0.98 ) );
+            sky_colour = g_SkyImage.SampleLevel( g_SceneSampler, sky_uv, 0 ).rgb * 0.4 +
+                ( g_SkyImage.SampleLevel( g_SceneSampler, sky_uv + float2( 0.02, 0.0 ), 0 ).rgb +
+                  g_SkyImage.SampleLevel( g_SceneSampler, sky_uv - float2( 0.02, 0.0 ), 0 ).rgb +
+                  g_SkyImage.SampleLevel( g_SceneSampler, sky_uv + float2( 0.0, 0.015 ), 0 ).rgb +
+                  g_SkyImage.SampleLevel( g_SceneSampler, sky_uv + float2( 0.0, 0.03 ), 0 ).rgb ) * 0.15;
+        }
+        colour = lerp( colour, sky_colour, sky );
+        sky_seen = sky_colour;
+        sky_amount = sky;
         strength *= lerp( g_Up.w, 1.0, saturate( upward * 4.0 + 1.0 ) );
     }
 
@@ -1101,7 +1336,36 @@ float4 MainPS( PixelIn input ) : SV_Target
         return float4( colour, 1.0 );
     if ( g_Params.w == 3.0 )
         return float4( fresnel.xxx, 1.0 );
+
+    // Highlights (9.15b, '[CarReflections] HighlightBoost'/'HighlightThreshold'): what is brighter than the threshold (lamps,
+    // bright sky, the sun) is boosted and covers more of the paint; the dark ground stays as it was.
+    float luma = dot( colour, float3( 0.2126, 0.7152, 0.0722 ) );
+    float highlight = max( luma - g_Highlight.y, 0.0 ) * g_Highlight.x;
+    colour += highlight * colour;
+
     float a = saturate( strength * fresnel );
+    // Clearcoat (9.15b, '[CarReflections] ClearCoat'): car paint is a coloured base under a clear lacquer. The lacquer mirrors
+    // sharp like glass (4 % head on, all of it at a flat angle, Schlick); the base mirrors soft and in the colour of the paint
+    // (taken from the hue of the texture), with what the lacquer lets through. Both laid over the paint in one pass.
+    if ( g_Coat.x > 0.5 )
+    {
+        float lacquer = 0.04 + 0.96 * pow( 1.0 - facing, 5.0 );
+        float base_level = level + g_Coat.z;
+        float3 base_colour;
+        if ( g_Shape.z > 0.5 )
+            base_colour = g_Chain.SampleLevel( g_SceneSampler, p * 0.5 + 0.5, clamp( base_level - 1.0, 0.0, g_Shape.w ) ).rgb;
+        else
+            base_colour = g_Scene.SampleLevel( g_SceneSampler, p * 0.5 + 0.5, max( base_level - g_Shape.y, 0.0 ) ).rgb;
+        base_colour = lerp( base_colour, sky_seen, sky_amount );
+        float hue_scale = max( max( paint.r, paint.g ), max( paint.b, 0.05 ) );
+        base_colour *= lerp( float3( 1.0, 1.0, 1.0 ), paint.rgb / hue_scale, g_Coat.w );
+        float lacquer_part = saturate( strength * lacquer );
+        float base_part = saturate( g_Coat.y * ( strength / max( g_Params.x, 1e-4 ) ) ) * ( 1.0 - lacquer_part );
+        float coat_a = saturate( lacquer_part + base_part );
+        colour = ( colour * lacquer_part + base_colour * base_part ) / max( coat_a, 1e-4 );
+        a = coat_a;
+    }
+    a = saturate( a + saturate( highlight ) * strength );
 
     // Rain drops (LFSP CarDrops, w11 = the look of w6 plus a LOD filter and safe maths): the wet paint a little glossier and
     // at most about 5 % darker; up close single clear beads with the bent reflection and a faint glint, further away only
@@ -1392,6 +1656,471 @@ float4 MainPS( float4 position : SV_Position ) : SV_Target
     g_Source.GetDimensions( size.x, size.y );
     // Pixel centre x + 0.5 of the half target lies on the corner 2x + 1 of the full source.
     return g_Source.SampleLevel( g_Sampler, position.xy * 2.0 / size, 0 );
+}
+)hlsl";
+
+    // Ambient occlusion ('[AmbientOcclusion]', after the look of MXAO type 2 the user tuned in ReShade; own code, nothing taken
+    // from it). Horizon based occlusion with a visibility bitmask (Therrien et al. 2023): per slice 32 sectors of the hemisphere
+    // around the normal, each sample covers the sectors between its front and its back face (objects get a thickness), cosine
+    // weighted. Depth z = 1 - n / w of the game (single sampled copy of PackStencil), view space as REFLECT. Fade over the depth
+    // the way ReShade linearises it (far plane F), so 'FadeDepth' means the same as there. Passes, fullscreen triangle of
+    // REFLECT's MainVS: DepthHalfPS / DepthMipPS the pyramid of the linear depth ('DepthMips' 1), MainPS raw occlusion
+    // (checkerboard per frame with 'ShadingRate' 1), FilterPS first edge aware regression filter and the accumulation over the
+    // frames ('Temporal' 1), ApplyPS second filter and the factor for the frame (multiplicative blend, so MSAA edges stay).
+    // 'Method' 1 (GT-VBAO, Salm 2024; GTAO, Jimenez et al. 2016): the sectors are equal shares of the cosine weighted solid
+    // angle of the slice (with the |sin| of the slices about the view direction, which 'Method' 0 leaves out: there the road
+    // seen at a flat angle came out too dark and faces towards the camera too bright), the back face of a sample lies along
+    // its own view ray.
+    inline constexpr char AO[] = R"hlsl(
+cbuffer AoConstants : register( b0 )
+{
+    row_major float4x4 g_ViewOfClip;
+    float4 g_Viewport; // fx, fy, cx, cy of the game
+    float4 g_Size; // render width, height, near plane n of z = 1 - n / w, frame number
+    float4 g_Params; // x radius ('SampleRadius'), y amount, z fade depth, w far plane F of the ReShade depth
+    float4 g_Quality; // x slices, y samples per side, z shading rate (0 all, 1 checkerboard), w debug (1 = show the raw occlusion)
+    float4 g_Filter; // x filter passes (0, 1, 2), y 1 = radius grows with the distance (share of the width), 0 = radius in metres,
+                     // z share of the history ('Temporal', 0 = off), w levels of the depth pyramid ('DepthMips', 0 = off)
+    float4 g_Method; // x 'Method' (0 as MXAO, 1 exact), y 'Thickness' scale, z 1 = the last frame can be reprojected, w 'AngleBias' (radians)
+    float4 g_Apply; // x 'MultiBounce', y unused, z fog mode (-1 none, 0 table over z, 1 exp, 2 exp2, 3 linear over z), w fog exponent
+    float4 g_Fog; // fog start, end, density (game render states), w unused
+    row_major float4x4 g_PrevClipOfView; // view of this frame -> clip (x, y, w, 1) of the last frame
+    float4 g_PrevViewport; // fx, fy, cx, cy of the last frame
+    float4 g_FogTable[64]; // visibility through the fog over z of the game table (index z x 255), four per register
+};
+
+Texture2D<float> g_Depth : register( t0 );
+Texture2D<float2> g_Ao : register( t1 ); // x occlusion (1 = open), y depth as ReShade sees it, negative where the normal is unsure
+Texture2D g_Frame : register( t2 ); // the resolved frame (ApplyPS)
+Texture2D<float> g_DepthMips : register( t3 ); // linear depth w, level 0 = half size (MainPS)
+Texture2D<float2> g_History : register( t4 ); // FilterPS's result of the last frame (FilterPS)
+Texture2D<float> g_DepthSource : register( t5 ); // one level of the pyramid (DepthMipPS)
+
+static const float PI = 3.14159265;
+
+// acos by polynomial (Abramowitz & Stegun 4.4.45, error below 1e-4 rad, far under the 1/32 of a sector). The native acos is
+// several times slower and runs twice per sample. The argument has to be within -1 ... 1.
+float2 FastAcos( float2 x )
+{
+    float2 a = abs( x );
+    float2 r = ( ( -0.0187293 * a + 0.0742610 ) * a - 0.2121144 ) * a + 1.5707288;
+    r *= sqrt( 1.0 - a );
+    return x >= 0.0 ? r : PI - r;
+}
+
+float FastAcos( float x )
+{
+    return FastAcos( x.xx ).x;
+}
+
+float2 GameOf( float2 pixel )
+{
+    return pixel * ( 2.0 * g_Viewport.zw ) / g_Size.xy;
+}
+
+float3 RayAt( float2 pixel )
+{
+    float2 game = GameOf( pixel );
+    return mul( float4( ( game.x - g_Viewport.z ) / g_Viewport.x, ( game.y - g_Viewport.w ) / g_Viewport.y, 1.0, 0.0 ), g_ViewOfClip ).xyz;
+}
+
+float DepthW( float z )
+{
+    return g_Size.z / max( 1.0 - z, 1e-6 );
+}
+
+float3 ViewAt( int2 pixel )
+{
+    float z = g_Depth.Load( int3( clamp( pixel, int2( 0, 0 ), int2( g_Size.xy ) - 1 ), 0 ) );
+    return RayAt( pixel + 0.5 ) * DepthW( z );
+}
+
+// Depth the way ReShade linearises it (RESHADE_DEPTH_LINEARIZATION_FAR_PLANE), for the fade; and back to w.
+float ReshadeDepth( float z )
+{
+    return z / ( g_Params.w - z * ( g_Params.w - 1.0 ) );
+}
+
+float WOfReshade( float d )
+{
+    float z = d * g_Params.w / ( 1.0 + d * ( g_Params.w - 1.0 ) );
+    return DepthW( z );
+}
+
+float FadeOf( float d )
+{
+    float fade = saturate( 1.0 - d * d );
+    float x = d / max( g_Params.z, 1e-4 );
+    return fade * saturate( exp2( -x * x ) );
+}
+
+// Share seen through the fog of the game at depth z, as the scene shader computes it (vertex table over z, exp / exp2 over w,
+// linear over z, storm exponent). 1 without fog or with 'FogFade' 0.
+float FogVisibility( float z )
+{
+    float mode = g_Apply.z;
+    if ( mode < -0.5 )
+        return 1.0;
+    float fog;
+    if ( mode < 0.5 )
+    {
+        uint k = uint( clamp( round( z * 255.0 ), 0.0, 255.0 ) );
+        float4 four = g_FogTable[k >> 2];
+        uint part = k & 3u;
+        fog = part == 0u ? four.x : ( part == 1u ? four.y : ( part == 2u ? four.z : four.w ) );
+    }
+    else if ( mode < 1.5 )
+        fog = exp( -g_Fog.z * DepthW( z ) );
+    else if ( mode < 2.5 )
+        fog = exp( -( g_Fog.z * DepthW( z ) ) * ( g_Fog.z * DepthW( z ) ) );
+    else
+        fog = ( g_Fog.y - z ) / max( g_Fog.y - g_Fog.x, 1e-6 );
+    fog = saturate( fog );
+    if ( g_Apply.w > 1.0 )
+        fog = pow( fog, g_Apply.w );
+    return fog;
+}
+
+// Normal from the four neighbours: each of the four corner normals weighted by how little the depth jumps on its two sides.
+// 'step' = distance of the neighbours in pixels.
+float3 NormalAt( int2 pixel, float3 centre, out float sure, int step )
+{
+    float3 l = ViewAt( pixel + int2( -step, 0 ) ) - centre;
+    float3 r = ViewAt( pixel + int2( step, 0 ) ) - centre;
+    float3 t = ViewAt( pixel + int2( 0, -step ) ) - centre;
+    float3 b = ViewAt( pixel + int2( 0, step ) ) - centre;
+    float scale = max( length( centre ), 1e-3 );
+    float4 jump = abs( float4( dot( l, centre ), dot( r, centre ), dot( t, centre ), dot( b, centre ) ) ) / ( scale * scale );
+    float4 weight = 1.0 / ( 1e-4 + ( jump.xzyw + jump.zywx ) * ( jump.xzyw + jump.zywx ) * 1e3 );
+    sure = saturate( dot( weight, 1.0 ) * 1e-4 );
+    float3 n = cross( t, l ) * weight.x * rsqrt( max( dot( cross( t, l ), cross( t, l ) ), 1e-20 ) ) +
+               cross( r, t ) * weight.y * rsqrt( max( dot( cross( r, t ), cross( r, t ) ), 1e-20 ) ) +
+               cross( b, r ) * weight.z * rsqrt( max( dot( cross( b, r ), cross( b, r ) ), 1e-20 ) ) +
+               cross( l, b ) * weight.w * rsqrt( max( dot( cross( l, b ), cross( l, b ) ), 1e-20 ) );
+    n *= rsqrt( max( dot( n, n ), 1e-20 ) );
+    // Towards the camera, whatever the handedness of the view space.
+    return dot( n, -centre ) < 0.0 ? -n : n;
+}
+
+// Depth pyramid ('DepthMips' 1, after XeGTAO): w of 2 x 2 pixels, the nearest of them and those within 5 % behind it averaged
+// (a thin object in front stays, the background behind its edge does not pull it back).
+float Reduce( float4 w )
+{
+    float nearest = min( min( w.x, w.y ), min( w.z, w.w ) );
+    float4 weight = saturate( 1.0 - ( w - nearest ) / ( nearest * 0.05 + 1e-3 ) );
+    return dot( weight, w ) / max( dot( weight, 1.0 ), 1e-6 );
+}
+
+float DepthHalfPS( float4 position : SV_Position ) : SV_Target
+{
+    int2 q = int2( position.xy ) * 2;
+    int2 last = int2( g_Size.xy ) - 1;
+    float4 z = float4( g_Depth.Load( int3( min( q, last ), 0 ) ), g_Depth.Load( int3( min( q + int2( 1, 0 ), last ), 0 ) ),
+                       g_Depth.Load( int3( min( q + int2( 0, 1 ), last ), 0 ) ), g_Depth.Load( int3( min( q + int2( 1, 1 ), last ), 0 ) ) );
+    return Reduce( g_Size.z / max( 1.0 - z, 1e-6 ) );
+}
+
+float DepthMipPS( float4 position : SV_Position ) : SV_Target
+{
+    int2 q = int2( position.xy ) * 2;
+    return Reduce( float4( g_DepthSource.Load( int3( q, 0 ) ), g_DepthSource.Load( int3( q + int2( 1, 0 ), 0 ) ),
+                           g_DepthSource.Load( int3( q + int2( 0, 1 ), 0 ) ), g_DepthSource.Load( int3( q + int2( 1, 1 ), 0 ) ) ) );
+}
+
+// GTAO slice integral of cos(t - g) |sin t| from 0 to t (t signed from the view direction, g the angle of the projected
+// normal): rises monotonically over the hemisphere g - pi/2 ... g + pi/2, from there to there it is cos g + g sin g.
+float2 SliceCdf( float2 t, float g )
+{
+    return sign( t ) * 0.25 * ( cos( g ) - cos( 2.0 * t - g ) + 2.0 * t * sin( g ) );
+}
+
+float2 MainPS( float4 position : SV_Position ) : SV_Target
+{
+    int2 pixel = int2( position.xy );
+    // 'ShadingRate' 1: half the pixels each frame in a checkerboard, the others keep the last value.
+    if ( g_Quality.z > 0.5 && ( ( uint( pixel.x + pixel.y ) & 1u ) != ( uint( g_Size.w ) & 1u ) ) )
+        discard;
+
+    float z = g_Depth.Load( int3( pixel, 0 ) );
+    float d = ReshadeDepth( z );
+    float fade = z >= 0.99999 ? 0.0 : FadeOf( d ) * FogVisibility( z );
+    if ( fade < 0.001 )
+        return float2( 1.0, d );
+
+    float w_centre = DepthW( z );
+    float3 ray_centre = RayAt( pixel + 0.5 );
+    float3 p = ray_centre * w_centre;
+    float3 p_exact = p;
+    // The ray is linear in the pixel: one step in x or y adds these (instead of a matrix per sample).
+    float3 ray_dx = g_ViewOfClip[0].xyz * ( 2.0 * g_Viewport.z / ( g_Size.x * g_Viewport.x ) );
+    float3 ray_dy = g_ViewOfClip[1].xyz * ( 2.0 * g_Viewport.w / ( g_Size.y * g_Viewport.y ) );
+    // B35: the depth is 24 bit; on sloped faces further away it falls into small steps (a step in w is w^2 / n x 2^-24, at
+    // 300 units several centimetres). The normal of the direct neighbours followed the steps and the near samples counted
+    // every step edge as occlusion: thin dark dashes along the face. The normal also from neighbours two pixels away (across
+    // the steps), and the samples are taken from a point lifted along the normal by three steps.
+    float sure;
+    float sure_wide;
+    float3 n1 = NormalAt( pixel, p, sure, 1 );
+    float3 n2 = NormalAt( pixel, p, sure_wide, 2 );
+    float3 n = normalize( n1 + n2 );
+    if ( dot( n, -p ) < 0.0 )
+        n = -n;
+    sure = min( sure, sure_wide );
+    float quantum = w_centre * w_centre / max( g_Size.z, 1e-6 ) * exp2( -24.0 );
+    float3 lift = n * ( 3.0 * quantum );
+    p *= 0.996;
+    float3 v = normalize( -p );
+    bool exact = g_Method.x > 0.5;
+
+    // Radius: a share of the width on the screen ('IncreaseRadiusWithDistance' 1, then it grows in the world with the distance)
+    // or metres in the world. Its size in the world at this depth gives the thickness of the objects.
+    // The pixel size follows the depth along the view axis (as MXAO's p.z), not the distance along the ray: with the ray
+    // length the radius shrank towards the screen edges (wide field of view) although the plane at that depth is flat.
+    float metres_per_pixel = w_centre * ( 2.0 * g_Viewport.z / g_Size.x ) / abs( g_Viewport.x );
+    // As MXAO: screen radius 0.03 x 'SampleRadius' of the width, or 'SampleRadius' / 2 metres in the world.
+    float radius_pixels = g_Filter.y > 0.5 ? g_Params.x * 0.03 * g_Size.x : g_Params.x * 0.5 / max( metres_per_pixel, 1e-6 );
+    radius_pixels = min( radius_pixels, g_Size.x * 0.25 );
+    float radius_world = radius_pixels * metres_per_pixel;
+    float thickness = log( 1.0 + radius_world ) / 3.0 * g_Method.y;
+
+    // Interleaved 4 x 4 jitter. The slice angle and the sample offsets get two different permutations of the 16 values (MXAO
+    // uses one value for both): the 4 x 4 block of the filter then holds 16 different pairs of angle and offset spread over
+    // the plane, not 16 pairs on the diagonal where a small angle always came with a near offset (less noise after the filter).
+    // With 'Temporal' both move on each frame (R2 sequence), so the accumulation sees new directions and offsets.
+    uint index = ( uint( pixel.x ) & 3u ) + ( uint( pixel.y ) & 3u ) * 4u;
+    float jitter = ( float( ( index * 11u ) % 16u ) + 0.5 ) / 16.0;
+    float jitter_offset = ( float( reversebits( index ) >> 28 ) + 0.5 ) / 16.0;
+    if ( g_Filter.z > 0.0 )
+    {
+        float frame = float( uint( g_Size.w ) & 255u );
+        jitter = frac( jitter + frame * 0.7548777 );
+        jitter_offset = frac( jitter_offset + frame * 0.5698403 );
+    }
+
+    int slices = int( g_Quality.x );
+    int samples = int( g_Quality.y );
+    int levels = int( g_Filter.w );
+    float visibility = 0.0;
+    float weight_sum = 0.0;
+    [loop] for ( int slice = 0; slice < slices; ++slice )
+    {
+        float angle = ( slice + jitter ) * PI / slices;
+        float2 dir = float2( cos( angle ), sin( angle ) );
+        // The slice plane through the view direction and this screen direction, from the ray one pixel further at the same depth.
+        float3 ray_next = ray_centre + ray_dx * dir.x + ray_dy * dir.y;
+        float3 axis = ray_next * ( length( p_exact ) * rsqrt( max( dot( ray_next, ray_next ), 1e-12 ) ) ) - p_exact;
+        axis -= v * dot( axis, v );
+        axis *= rsqrt( max( dot( axis, axis ), 1e-20 ) );
+        float3 plane_normal = cross( axis, v );
+        float3 projected = n - plane_normal * dot( n, plane_normal );
+        float projected_length = length( projected );
+        if ( projected_length < 1e-4 )
+            continue;
+        projected /= projected_length;
+        float normal_angle = FastAcos( clamp( dot( projected, v ), -1.0, 1.0 ) ) *( dot( projected, axis ) < 0.0 ? -1.0 : 1.0 );
+        // 'Method' 1: the hemisphere of the slice as a share of its weighted solid angle (total cos g + g sin g).
+        float2 hemisphere = float2( normal_angle - 0.5 * PI, normal_angle + 0.5 * PI );
+        float2 cdf_ends = SliceCdf( hemisphere, normal_angle );
+        float slice_total = max( cdf_ends.y - cdf_ends.x, 1e-6 );
+
+        uint open = 0xFFFFFFFFu;
+        [unroll] for ( int side = 0; side < 2; ++side )
+        {
+            float sign_side = side == 0 ? 1.0 : -1.0;
+            [loop] for ( int i = 0; i < samples; ++i )
+            {
+                float s = ( i + jitter_offset ) / samples;
+                float2 offset = dir * sign_side * max( s * s * radius_pixels, 1.0 + i );
+                float2 at = position.xy + offset;
+                if ( any( at < 0.0 ) || any( at >= g_Size.xy ) )
+                    break;
+                int2 tap = int2( at );
+                float2 step_pixels = float2( tap - pixel );
+                float3 ray_sample = ray_centre + ray_dx * step_pixels.x + ray_dy * step_pixels.y;
+                // 'DepthMips': far samples from the pyramid (level from log2 of the distance, as XeGTAO's offset 3.3).
+                int level = levels > 0 ? clamp( int( log2( length( offset ) ) - 3.3 ), 0, levels ) : 0;
+                float w_sample;
+                if ( level > 0 )
+                    w_sample = g_DepthMips.Load( int3( min( tap >> level, ( int2( g_Size.xy ) >> level ) - 1 ), level - 1 ) );
+                else
+                    w_sample = DepthW( g_Depth.Load( int3( tap, 0 ) ) );
+                float3 delta = ray_sample * w_sample - ( p + lift );
+                // Back face: 'Method' 0 behind the centre along its view ray, 'Method' 1 behind the sample along its own.
+                float3 back = exact ? delta + ray_sample * ( thickness * rsqrt( max( dot( ray_sample, ray_sample ), 1e-12 ) ) )
+                                    : delta - v * thickness;
+                // Angles from the view direction towards the axis side, front face and back face of the sample.
+                float2 cosines = float2( dot( delta, v ), dot( back, v ) ) * rsqrt( max( float2( dot( delta, delta ), dot( back, back ) ), 1e-12 ) );
+                float2 horizon = FastAcos( clamp( cosines, -1.0, 1.0 ) );
+                horizon *= sign_side;
+                // B35 ('AngleBias', as HBAO's angle bias): the roads are flat triangles a few degrees apart. With the radius
+                // over several of them each triangle saw its neighbours slightly above its own plane and got its own grey value,
+                // with a hard step at every edge. The horizon is moved towards the face by the bias: rises below it occlude
+                // nothing, steeper ones (cars, walls, kerbs) lose only that angle.
+                horizon += sign_side * g_Method.w;
+                float2 sector;
+                if ( exact )
+                {
+                    float2 t = clamp( horizon, hemisphere.x, hemisphere.y );
+                    sector = saturate( ( SliceCdf( t, normal_angle ) - cdf_ends.x ) / slice_total );
+                }
+                else
+                {
+                    // Into 0 ... 1 over the hemisphere around the normal, cosine weighted (smoothstep).
+                    sector = saturate( ( horizon - normal_angle ) / PI + 0.5 );
+                    sector = sector * sector * ( 3.0 - 2.0 * sector );
+                }
+                float2 range = float2( min( sector.x, sector.y ), max( sector.x, sector.y ) );
+                uint first = uint( range.x * 32.0 );
+                uint count = uint( range.y * 32.0 ) - first;
+                uint bits = count >= 32u ? 0xFFFFFFFFu : ( ( ( 1u << count ) - 1u ) << first );
+                open &= ~bits;
+            }
+        }
+        float slice_weight = exact ? projected_length * slice_total : projected_length;
+        visibility += countbits( open ) / 32.0 * slice_weight;
+        weight_sum += slice_weight;
+    }
+    float ao = weight_sum > 0.0 ? saturate( visibility / weight_sum ) : 1.0;
+
+    // 'Amount': up to 1 the share of the occlusion, above that a power.
+    ao = lerp( 1.0, ao, saturate( g_Params.y ) );
+    if ( g_Params.y > 1.0 )
+        ao = lerp( ao, ao * ao, saturate( g_Params.y - 1.0 ) );
+    ao = lerp( 1.0, ao, fade );
+    // Unsure normal (edge): depth negative, the filter takes more of the neighbours there.
+    return float2( ao, sure < 0.5 ? -d : d );
+}
+
+// Edge aware regression: occlusion as a linear function of depth over a 4 x 4 block (shifted the other way in the second pass).
+// B35: in the first pass with the checkerboard ('ShadingRate' 1) only the half computed this frame: the other half keeps the
+// occlusion and depth of the last frame, not reprojected, and dragged streaks along while moving. The variance has a floor
+// relative to the depth (1 % of it): on flat ground far away the depth hardly changes within the block, the slope blew the
+// noise up into wavy bands along the depth lines. The result stays within the taps used (no bright halos from extrapolation).
+// 'depth' is the depth of this frame at the pixel (for a skipped pixel of the checkerboard the stored one is the last frame's).
+float FilterAt( int2 pixel, float flip, float depth_here, out float lowest, out float highest )
+{
+    float4 moments = 0.0; // depth, depth^2, occlusion, occlusion x depth
+    float count = 0.0;
+    lowest = 1.0;
+    highest = 0.0;
+    bool fresh_only = flip < 0.5 && g_Quality.z > 0.5;
+    uint parity = uint( g_Size.w ) & 1u;
+    int2 start = flip > 0.5 ? int2( -2, -2 ) : int2( -1, -1 );
+    [unroll] for ( int y = 0; y < 4; ++y )
+    {
+        [unroll] for ( int x = 0; x < 4; ++x )
+        {
+            int2 q = clamp( pixel + start + int2( x, y ), int2( 0, 0 ), int2( g_Size.xy ) - 1 );
+            float w = ( !fresh_only || ( ( uint( q.x + q.y ) & 1u ) == parity ) ) ? 1.0 : 0.0;
+            float2 tap = g_Ao.Load( int3( q, 0 ) );
+            float depth = abs( tap.y );
+            moments += w * float4( depth, depth * depth, tap.x, tap.x * depth );
+            count += w;
+            if ( w > 0.0 )
+            {
+                lowest = min( lowest, tap.x );
+                highest = max( highest, tap.x );
+            }
+        }
+    }
+    moments /= max( count, 1.0 );
+    float variance = moments.y - moments.x * moments.x;
+    float floor_variance = max( moments.x * moments.x * 1e-4, depth_here < 0.0 ? exp2( -12.0 ) : exp2( -30.0 ) );
+    float slope = ( moments.w - moments.x * moments.z ) / max( variance, floor_variance );
+    return clamp( slope * abs( depth_here ) + moments.z - slope * moments.x, lowest, highest );
+}
+
+// 'Temporal': the result of the last frame at the place this pixel had there (world camera of both frames, depth of this one),
+// bilinear over the taps whose depth matches (1.5 %), clamped to the range of this frame's taps around it, mixed in.
+float Accumulate( int2 pixel, float z, float current, float lowest, float highest )
+{
+    if ( g_Method.z < 0.5 || z >= 0.99999 )
+        return current;
+    float3 p = RayAt( pixel + 0.5 ) * DepthW( z );
+    float4 q = mul( float4( p, 1.0 ), g_PrevClipOfView );
+    if ( q.z <= g_Size.z * 0.5 )
+        return current;
+    float2 game = float2( q.x / q.z * g_PrevViewport.x + g_PrevViewport.z, q.y / q.z * g_PrevViewport.y + g_PrevViewport.w );
+    float2 at = game * g_Size.xy / ( 2.0 * g_PrevViewport.zw ) - 0.5;
+    int2 base = int2( floor( at ) );
+    float2 f = at - base;
+    float sum = 0.0;
+    float weight = 0.0;
+    [unroll] for ( int i = 0; i < 4; ++i )
+    {
+        int2 o = int2( i & 1, i >> 1 );
+        int2 t = base + o;
+        if ( any( t < 0 ) || any( t >= int2( g_Size.xy ) ) )
+            continue;
+        float2 tap = g_History.Load( int3( t, 0 ) );
+        float bilinear = ( o.x ? f.x : 1.0 - f.x ) * ( o.y ? f.y : 1.0 - f.y );
+        float w_tap = WOfReshade( abs( tap.y ) );
+        float match = abs( w_tap - q.z ) < 0.015 * q.z + 0.02 ? 1.0 : 0.0;
+        sum += bilinear * match * tap.x;
+        weight += bilinear * match;
+    }
+    if ( weight < 0.3 )
+        return current;
+    float history = clamp( sum / weight, lowest - 0.05, highest + 0.05 );
+    return lerp( current, history, g_Filter.z * saturate( weight ) );
+}
+
+float2 FilterPS( float4 position : SV_Position ) : SV_Target
+{
+    int2 pixel = int2( position.xy );
+    float2 centre = g_Ao.Load( int3( pixel, 0 ) );
+    // Depth of this frame (a skipped pixel of the checkerboard still holds the last frame's); the sign (unsure normal) stays.
+    float z = g_Depth.Load( int3( pixel, 0 ) );
+    float depth = ReshadeDepth( z ) * ( centre.y < 0.0 ? -1.0 : 1.0 );
+    float lowest = centre.x;
+    float highest = centre.x;
+    float ao = centre.x;
+    // With 'Temporal' the filter also gives the range for the history; with the checkerboard its result is needed in any case.
+    if ( g_Filter.x > 0.5 || g_Filter.z > 0.0 )
+    {
+        float filtered = FilterAt( pixel, 0.0, depth, lowest, highest );
+        if ( g_Filter.x > 0.5 || g_Quality.z > 0.5 )
+            ao = filtered;
+    }
+    if ( g_Filter.z > 0.0 )
+        ao = Accumulate( pixel, z, ao, lowest, highest );
+    return float2( ao, depth );
+}
+
+// 'MultiBounce' (Jimenez et al. 2016): light the near surroundings throw back, from the occlusion and the albedo (here the
+// colour of the frame as a stand in): bright surfaces lose less, colours stay.
+float3 MultiBounce( float v, float3 albedo )
+{
+    float3 a = 2.0404 * albedo - 0.3324;
+    float3 b = -4.7951 * albedo + 0.6417;
+    float3 c = 2.7552 * albedo + 0.6903;
+    return max( v, ( ( v * a + b ) * v + c ) * v );
+}
+
+// The factor for the frame: the colour taken into a soft HDR range (c^2 / (1.1 - c^2)), darkened there, mapped back. So bright
+// parts lose little, dark corners get darker. Written as factor = new / old and blended multiplicatively over the MSAA frame.
+float4 ApplyPS( float4 position : SV_Position ) : SV_Target
+{
+    int2 pixel = int2( position.xy );
+    float ao;
+    if ( g_Filter.x > 1.5 )
+    {
+        float lowest;
+        float highest;
+        ao = FilterAt( pixel, 1.0, g_Ao.Load( int3( pixel, 0 ) ).y, lowest, highest );
+    }
+    else
+        ao = g_Ao.Load( int3( pixel, 0 ) ).x;
+    if ( g_Quality.w > 0.5 )
+        return float4( ao.xxx, 1.0 );
+    float3 colour = saturate( g_Frame.Load( int3( pixel, 0 ) ).rgb );
+    float3 hdr = colour * colour;
+    float3 occlusion = g_Apply.x > 0.5 ? MultiBounce( ao, hdr ) : ao.xxx;
+    hdr = hdr / ( 1.1 - hdr );
+    hdr *= occlusion;
+    float3 result = sqrt( 1.1 * hdr / ( hdr + 1.0 ) );
+    float3 factor = colour > 1e-3 ? saturate( result / colour ) : occlusion;
+    return float4( factor, 1.0 );
 }
 )hlsl";
 
