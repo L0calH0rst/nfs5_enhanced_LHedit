@@ -1960,7 +1960,9 @@ namespace dx11z
             m_ConfigCarReflBlurChain = std::clamp( std::atoi( car_value( "BlurChain", "0" ).c_str() ), 0, 1 );
             // '[CarReflections] Sky' (9.15a): above the frame the sky image of the water reflection (previous frame) instead of the fog colour.
             m_ConfigCarReflSky = std::clamp( std::atoi( car_value( "Sky", "0" ).c_str() ), 0, 1 );
-            Log( "Config car reflections: Sky %d (sky image of the water reflection, needs '[Water] ReflectionSky')", m_ConfigCarReflSky );
+            m_ConfigCarReflSkyHold = std::clamp( static_cast<float>(std::atof( car_value( "SkyHold", "-1" ).c_str() )), -1.0f, 3600.0f );
+            Log( "Config car reflections: Sky %d (sky image of the water reflection, needs '[Water] ReflectionSky'), SkyHold %.1f s",
+                m_ConfigCarReflSky, m_ConfigCarReflSkyHold );
             // 9.15b: highlights, crease angle of the normals, clearcoat; all off by default.
             m_ConfigCarReflHighlightBoost = std::clamp( static_cast<float>(std::atof( car_value( "HighlightBoost", "0" ).c_str() )), 0.0f, 16.0f );
             m_ConfigCarReflHighlightThreshold = std::clamp( static_cast<float>(std::atof( car_value( "HighlightThreshold", "0.75" ).c_str() )), 0.0f, 1.0f );
@@ -1976,6 +1978,11 @@ namespace dx11z
             Log( "Config car reflections 9.15b: HighlightBoost %.2f, HighlightThreshold %.2f, CreaseAngle cos %.3f, ClearCoat %d, BaseCoat %.2f, BaseCoatBlur %.1f, BaseCoatTint %.2f",
                 m_ConfigCarReflHighlightBoost, m_ConfigCarReflHighlightThreshold, m_ConfigCarReflCreaseCos, m_ConfigCarReflClearCoat, m_ConfigCarReflBaseCoat,
                 m_ConfigCarReflBaseBlur, m_ConfigCarReflBaseTint );
+            // 9.15e: normals in the space of the part with one orientation per batch; off by default.
+            m_ConfigCarReflObjectNormals = std::clamp( std::atoi( car_value( "ObjectNormals", "0" ).c_str() ), 0, 1 );
+            m_ConfigCarReflSeamFix = std::clamp( std::atoi( car_value( "SeamFix", "0" ).c_str() ), 0, 1 );
+            Log( "Config car reflections 9.15e: ObjectNormals %d, SeamFix %d (needs ObjectNormals)", m_ConfigCarReflObjectNormals,
+                m_ConfigCarReflSeamFix );
             // Ambient occlusion ('[AmbientOcclusion]'): the keys of MXAO, defaults the values the user tuned in ReShade.
             {
                 const auto ao_value = [&]( const char * key, const char * fallback ) -> std::string
@@ -2413,6 +2420,7 @@ namespace dx11z
         m_ReflShoreDebug.Reset();
         m_ReflSky.Reset();
         m_ReflSkyView.Reset();
+        m_SkyImageFlip = 0xFFFFFFFFu; // B36: no held sky image without its texture
         m_ReflWeightRtv.Reset();
         m_ReflWeightSrv.Reset();
         m_ReflWeight.Reset();
@@ -2625,6 +2633,12 @@ namespace dx11z
         }
 
         ++m_FlipCount;
+        // B36: a sky image held without water ('SkyHold' -1) belongs to its race; the menus end it.
+        if (*reinterpret_cast<const std::int32_t *>(0x0065B928) != 0)
+        {
+            m_SkyImageFlip = 0xFFFFFFFFu;
+            m_CarSkyBlend = 0.0f;
+        }
         m_CopyOrderDraws = 0;
         m_HeadMesh = false;
         m_HeadFrameValid = false;
@@ -2792,6 +2806,10 @@ namespace dx11z
                 hit.m_FogColour = static_cast<std::uint32_t>(render[rs::FOGCOLOR]) & 0xFFFFFFu;
                 hit.m_SkyEdge = static_cast<std::uint8_t>(m_SkyEdgeState);
                 hit.m_Vertices = static_cast<std::uint32_t>(m_BatchVertices.size());
+                hit.m_CarMask = m_CarLodMask;
+                hit.m_CarPart = m_CarPart;
+                hit.m_AlphaMin = m_Bound[0] != nullptr ? m_Bound[0]->m_AlphaMin : 255;
+                hit.m_Translucent = m_Bound[0] != nullptr && m_Bound[0]->m_Translucent ? 1 : 0;
                 m_ProbeHits.push_back( hit );
             }
             break; // one hit per draw is enough
@@ -2826,6 +2844,15 @@ namespace dx11z
                     hit.m_Hash, hit.m_Rhw > 0.0f ? 1.0f / hit.m_Rhw : 0.0f, hit.m_Sky ? "SKY " : "", hit.m_Water ? "water " : "",
                     hit.m_Shore ? "shore " : "", hit.m_Blend, hit.m_Source, hit.m_Destination, hit.m_DepthWrite, hit.m_AlphaMid, hit.m_Z,
                     hit.m_ZEnable, hit.m_ZFunc, hit.m_Diffuse, hit.m_Fog, hit.m_FogFactor, hit.m_FogColour, hit.m_Vertices, hit.m_SkyEdge );
+                // B36: car draws, what the reflections made of them. The paint is cut where texel alpha x vertex alpha is
+                // under the glass reference (0.95 for blended paint).
+                if (hit.m_CarMask != 0)
+                    Log( "    car pass %02X part %d/%d, texture alpha min %u%s: %s, glass ref %.2f", hit.m_CarMask,
+                        hit.m_CarPart >= 0 ? hit.m_CarPart >> 8 : -1, hit.m_CarPart >= 0 ? hit.m_CarPart & 0xFF : -1, hit.m_AlphaMin,
+                        hit.m_Translucent ? " translucent" : "", hit.m_CarOutcome != nullptr ? hit.m_CarOutcome : "not looked at",
+                        hit.m_CarGlassRef );
+                if (hit.m_CarMask != 0 && hit.m_CarDetail[0] != 0)
+                    Log( "      %s", hit.m_CarDetail );
             }
         }
         m_ProbeHits.clear();
@@ -5460,11 +5487,14 @@ namespace dx11z
         }
         if (m_ProfileCarCopies > 0 || m_ProfileCarBatches > 0)
         {
-            Log( "Profile:   car reflections per frame: %.1f frame copies, CPU copy %.0f us, CPU batches %.0f us (%.1f batches, %.0f vertices), GPU copy %.3f ms (resolve and mips), GPU blur chain %.3f ms, GPU reflect draws %.3f ms",
-                static_cast<double>(m_ProfileCarCopies) / frames, static_cast<double>(m_ProfileCarCopyTicks) * us, static_cast<double>(m_ProfileCarBatchTicks) * us,
+            // 'CPU batches' as before = prepare (CarReflBatch) + submit (CarReflDrawPending), now also apart.
+            Log( "Profile:   car reflections per frame: %.1f frame copies, CPU copy %.0f us, CPU batches %.0f us (prepare %.0f, submit %.0f; %.1f batches, %.0f vertices), GPU copy %.3f ms (resolve and mips), GPU blur chain %.3f ms, GPU reflect draws %.3f ms",
+                static_cast<double>(m_ProfileCarCopies) / frames, static_cast<double>(m_ProfileCarCopyTicks) * us,
+                static_cast<double>(m_ProfileCarBatchTicks + m_ProfileCarDrawTicks) * us, static_cast<double>(m_ProfileCarBatchTicks) * us,
+                static_cast<double>(m_ProfileCarDrawTicks) * us,
                 static_cast<double>(m_ProfileCarBatches) / frames, static_cast<double>(m_ProfileCarVertices) / frames, m_ProfileMs[9] / gpu_frames,
                 m_ProfileMs[11] / gpu_frames, m_ProfileMs[10] / gpu_frames );
-            m_ProfileCarCopyTicks = m_ProfileCarBatchTicks = 0;
+            m_ProfileCarCopyTicks = m_ProfileCarBatchTicks = m_ProfileCarDrawTicks = 0;
             m_ProfileCarBatches = m_ProfileCarVertices = m_ProfileCarCopies = 0;
         }
         m_ProfileMs = {};
@@ -5613,7 +5643,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9zd, AO exact weighting, depth pyramid, temporal, fog): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9zh, 9.15e matte palette kept, prepare/submit profile): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -6245,6 +6275,8 @@ namespace dx11z
 
         m_MeasureSuspect = false;
 
+        const std::size_t probe_first = m_ProbeHits.size();
+        m_ProbeFirst = probe_first;
         if (m_ProbeOn)
         {
             ProbeBatch();
@@ -6500,7 +6532,15 @@ namespace dx11z
         // Car reflections (PLAN.md 9.12b): body parts of R3DCarLOD::Draw once more, with the reflection.
         if (car_reflection)
         {
+            m_CarReflOutcome = "left out (no reason noted)";
+            m_CarReflGlassRefLast = 0.0f;
             CarReflBatch();
+            // B36: what became of the draw under the probe.
+            if (m_ProbeHits.size() > probe_first)
+            {
+                m_ProbeHits[probe_first].m_CarOutcome = m_CarReflOutcome;
+                m_ProbeHits[probe_first].m_CarGlassRef = m_CarReflGlassRefLast;
+            }
         }
 
         m_BatchVertices.clear();
@@ -8925,7 +8965,10 @@ namespace dx11z
         const auto & render = m_D3D.m_Render;
 
         if (m_BatchPrimitive != Primitive::TRIANGLES || render[rs::ZENABLE] == 0 || m_BatchIndices.size() < 3)
+        {
+            m_CarReflOutcome = "no triangles or no depth test";
             return;
+        }
 
         const Texture * texture = m_Bound[0];
         const std::uint32_t hash = texture != nullptr ? texture->m_Hash : 0;
@@ -8947,11 +8990,15 @@ namespace dx11z
 
         // Body passes only (0x50, in the car 0x10 and 0x40), no wheels (0x20) and no interior (0x30).
         if ((mask & 0x20) != 0 || (mask & 0x50) == 0)
+        {
+            m_CarReflOutcome = "pass is no body pass";
             return;
+        }
 
         if (std::find( m_ConfigCarReflSkip.begin(), m_ConfigCarReflSkip.end(), hash ) != m_ConfigCarReflSkip.end())
         {
             ++stats.m_Skipped;
+            m_CarReflOutcome = "SkipTextures";
             return;
         }
         // B34: glass parts reflect as a whole as glass (own strength, no paint look); 'GlassStrength' 0 = none at all.
@@ -8969,6 +9016,7 @@ namespace dx11z
             if (m_ConfigCarReflGlassStrength <= 0.0f)
             {
                 ++stats.m_Skipped;
+                m_CarReflOutcome = "glass part, GlassStrength 0";
                 return;
             }
         }
@@ -8984,6 +9032,7 @@ namespace dx11z
                 Log( "Car reflections: texture %08X %dx%d part %d/%d left out, %.0f%% half transparent (SkipAlphaMid %.2f, B34)", hash,
                     texture->m_Width, texture->m_Height, m_CarPart >> 8, m_CarPart & 0xFF, texture->m_AlphaMid * 100.0f, m_ConfigCarReflSkipAlphaMid );
             }
+            m_CarReflOutcome = "SkipAlphaMid (grille)";
             return;
         }
 
@@ -9148,6 +9197,7 @@ namespace dx11z
         {
             log_matte( 0 );
             ++stats.m_Matte;
+            m_CarReflOutcome = "matte part (MatteParts)";
             return;
         }
 
@@ -9165,8 +9215,23 @@ namespace dx11z
             {
                 return std::array<int, 3>{ static_cast<int>(c >> 16 & 0xFF), static_cast<int>(c >> 8 & 0xFF), static_cast<int>(c & 0xFF) };
             };
-            std::vector<std::array<int, 3>> palette;
-            if (!colours.empty())
+            // 9.15e: kept per texture while the covered cells (and the grey setting) stay the same.
+            std::uint64_t signature = 14695981039346656037ull ^ colours.size();
+            for (const std::uint64_t row : cells)
+            {
+                signature ^= row;
+                signature *= 1099511628211ull;
+            }
+            CarReflPalette & kept_palette = m_CarReflPalettes[hash];
+            std::vector<std::array<int, 3>> & palette = kept_palette.m_Colours;
+            const bool palette_fresh = kept_palette.m_Signature == signature && kept_palette.m_Grey == m_ConfigCarReflMatteGrey;
+            if (!palette_fresh)
+            {
+                kept_palette.m_Signature = signature;
+                kept_palette.m_Grey = m_ConfigCarReflMatteGrey;
+                palette.clear();
+            }
+            if (!palette_fresh && !colours.empty())
             {
                 std::map<std::uint32_t, std::array<std::uint32_t, 4>> bins; // count, sums of r, g, b
                 std::uint32_t covered = 0;
@@ -9258,34 +9323,43 @@ namespace dx11z
             }
 
             m_CarReflIndices.clear();
-            std::vector<std::uint8_t> decision( triangles, 0 );
+            // 9.15e: with a decision kept, the triangles are judged again only for the one comparison after a page change
+            // (damage, logged once); otherwise the kept decision is used as it is.
+            const bool judge = kept_before == nullptr || (kept_before->m_Hash != hash && !kept_before->m_Logged);
+            static thread_local std::vector<std::uint8_t> decision;
+            decision.assign( kept_before == nullptr ? triangles : 0, 0 );
             std::size_t changed = 0;
             for (std::size_t i = 0; i + 2 < m_BatchIndices.size(); i += 3)
             {
                 const auto c = corners( i );
                 if (c[0] >= count || c[1] >= count || c[2] >= count)
                     continue;
-                const TlVertex & a = m_BatchVertices[c[0]];
-                const TlVertex & b = m_BatchVertices[c[1]];
-                const TlVertex & d = m_BatchVertices[c[2]];
-                const float u = (a.m_U0 + b.m_U0 + d.m_U0) / 3.0f;
-                const float v = (a.m_V0 + b.m_V0 + d.m_V0) / 3.0f;
-                bool keep = (cells[static_cast<std::size_t>(cell( v ))] >> cell( u ) & 1) != 0;
-                if (!keep && !palette.empty())
+                bool keep = false;
+                if (judge)
                 {
-                    // The centre and halfway to each corner, most of them like the paint.
-                    int votes = like_paint( u, v ) ? 1 : 0;
-                    for (const TlVertex * corner : { &a, &b, &d })
-                        votes += like_paint( (u + corner->m_U0) * 0.5f, (v + corner->m_V0) * 0.5f ) ? 1 : 0;
-                    keep = votes >= 3;
+                    const TlVertex & a = m_BatchVertices[c[0]];
+                    const TlVertex & b = m_BatchVertices[c[1]];
+                    const TlVertex & d = m_BatchVertices[c[2]];
+                    const float u = (a.m_U0 + b.m_U0 + d.m_U0) / 3.0f;
+                    const float v = (a.m_V0 + b.m_V0 + d.m_V0) / 3.0f;
+                    keep = (cells[static_cast<std::size_t>(cell( v ))] >> cell( u ) & 1) != 0;
+                    if (!keep && !palette.empty())
+                    {
+                        // The centre and halfway to each corner, most of them like the paint.
+                        int votes = like_paint( u, v ) ? 1 : 0;
+                        for (const TlVertex * corner : { &a, &b, &d })
+                            votes += like_paint( (u + corner->m_U0) * 0.5f, (v + corner->m_V0) * 0.5f ) ? 1 : 0;
+                        keep = votes >= 3;
+                    }
                 }
                 if (kept_before != nullptr)
                 {
                     const bool before = kept_before->m_Keep[i / 3] != 0;
-                    changed += before != keep ? 1 : 0;
+                    changed += judge && before != keep ? 1 : 0;
                     keep = before;
                 }
-                decision[i / 3] = keep ? 1 : 0;
+                else
+                    decision[i / 3] = keep ? 1 : 0;
                 if (keep)
                     m_CarReflIndices.insert( m_CarReflIndices.end(), { c[0], c[1], c[2] } );
             }
@@ -9297,13 +9371,17 @@ namespace dx11z
                         m_CarReflMatteKeep.clear();
                     m_CarReflMatteKeep[geometry] = { hash, false, std::move( decision ) };
                 }
-                else if (changed != 0 && kept_before->m_Hash != hash && !kept_before->m_Logged && m_CarReflLines < 300)
+                else if (judge)
                 {
-                    // Once per part and car: the new page (damage) would have reflected other triangles.
+                    // Compared once after the page changed (9.15e: also when nothing changed, so it is not judged again).
                     kept_before->m_Logged = true;
-                    ++m_CarReflLines;
-                    Log( "Car reflections: matte part %d/%d texture %08X (was %08X): %zu of %zu triangles kept as decided first (B28)",
-                        m_CarPart >> 8, m_CarPart & 0xFF, hash, kept_before->m_Hash, changed, triangles );
+                    if (changed != 0 && m_CarReflLines < 300)
+                    {
+                        // Once per part and car: the new page (damage) would have reflected other triangles.
+                        ++m_CarReflLines;
+                        Log( "Car reflections: matte part %d/%d texture %08X (was %08X): %zu of %zu triangles kept as decided first (B28)",
+                            m_CarPart >> 8, m_CarPart & 0xFF, hash, kept_before->m_Hash, changed, triangles );
+                    }
                 }
             }
             const std::size_t kept = m_CarReflIndices.size() / 3;
@@ -9312,6 +9390,7 @@ namespace dx11z
             if (kept == 0)
             {
                 ++stats.m_Matte;
+                m_CarReflOutcome = "matte part, no paint triangles";
                 return;
             }
         }
@@ -9321,18 +9400,23 @@ namespace dx11z
         if (blended && !(source == 5 && destination == 6))
         {
             ++stats.m_Blended;
+            m_CarReflOutcome = "other blend";
             return;
         }
 
         if (!m_CarReflCamera)
         {
             ++m_CarReflNoCamera;
+            m_CarReflOutcome = "no camera";
             return;
         }
 
         if (!m_CarReflSourceValid || !m_CarReflVs || !m_CarReflPs || !m_CarReflLayout || !m_CarReflConstants ||
             !m_CarReflVertexBuffer || !m_CarReflIndexBuffer || count > CAR_REFL_VERTICES || m_BatchIndices.size() > CAR_REFL_INDICES)
+        {
+            m_CarReflOutcome = "not ready or too big";
             return;
+        }
 
         // Small and far parts: a reflection a few pixels wide is not seen ('[CarReflections] MinSize', in pixels of 1440 lines).
         if (m_ConfigCarReflMinSize > 0.0f)
@@ -9348,6 +9432,7 @@ namespace dx11z
             if (std::max( high_x - low_x, high_y - low_y ) * 1440.0f / static_cast<float>(std::max( m_Height, 1 )) < m_ConfigCarReflMinSize)
             {
                 ++stats.m_Skipped;
+                m_CarReflOutcome = "MinSize";
                 return;
             }
         }
@@ -9380,6 +9465,9 @@ namespace dx11z
         // Weather on the car (w3): view -> space of the part, the inverse of object x view (row vectors: view = object x R + t).
         // Drops and snow hash this position, the UV of the car textures are mirrored left and right.
         double object_of_view[9] = {};
+        // 9.15e: R (rows of object x view) and its inverse as it is, the mirror of w4 not taken out.
+        double object_rows[9] = {};
+        double object_raw[9] = {};
         bool object_valid = false;
         {
             const double r[9] = { model_view[0], model_view[1], model_view[2], model_view[4], model_view[5], model_view[6],
@@ -9398,6 +9486,8 @@ namespace dx11z
                 object_of_view[7] = (r[1] * r[6] - r[0] * r[7]) * inv;
                 object_of_view[8] = (r[0] * r[4] - r[1] * r[3]) * inv;
                 object_valid = true;
+                std::memcpy( object_rows, r, sizeof( object_rows ) );
+                std::memcpy( object_raw, object_of_view, sizeof( object_raw ) );
                 // w4: a negative determinant is a mirrored draw (one half of the body drawn twice, flipped left/right): the
                 // same object x on both sides. With y up and z along the car kept, the flipped axis is x.
                 if (det < 0.0)
@@ -9450,14 +9540,34 @@ namespace dx11z
             const TlVertex & q = m_BatchVertices[b];
             return std::memcmp( &p.m_X, &q.m_X, 4 ) == 0 && std::memcmp( &p.m_Y, &q.m_Y, 4 ) == 0 && std::memcmp( &p.m_Rhw, &q.m_Rhw, 4 ) == 0;
         };
+        // 9.15e: texture, part, pass and sizes alone were not enough. Two meshes with the same counts (left and right half
+        // modelled apart, the same part of two cars) shared one entry and threw each other out every frame (17 % rebuilt
+        // in the garage, 29 % in a race). A fingerprint of the index list and the texture coordinates tells them apart.
+        std::uint64_t shape = 14695981039346656037ull;
+        {
+            const auto mix = [&shape]( std::uint32_t value )
+            {
+                shape ^= value;
+                shape *= 1099511628211ull;
+            };
+            for (const std::uint16_t index : m_BatchIndices)
+                mix( index );
+            for (const TlVertex & v : m_BatchVertices)
+            {
+                mix( static_cast<std::uint32_t>(std::lround( v.m_U0 * 4096.0f )) );
+                mix( static_cast<std::uint32_t>(std::lround( v.m_V0 * 4096.0f )) );
+            }
+        }
         const std::uint64_t weld_key = cells_key ^ (static_cast<std::uint64_t>(count) * 0xC2B2AE3D27D4EB4Full) ^
-            (static_cast<std::uint64_t>(blended ? 1 : 0) << 63);
-        const CarReflWeld * weld_entry = nullptr;
+            (static_cast<std::uint64_t>(blended ? 1 : 0) << 63) ^ (shape * 0x9E3779B97F4A7C15ull);
+        CarReflWeld * weld_entry = nullptr;
+        bool weld_known = false;
         {
             const auto found = m_CarReflWeldCache.find( weld_key );
             if (found != m_CarReflWeldCache.end() && found->second.m_Group.size() == count)
             {
-                const CarReflWeld & entry = found->second;
+                weld_known = true;
+                CarReflWeld & entry = found->second;
                 bool still = true;
                 for (int k = 0; still && k < entry.m_SameCount; ++k)
                     still = same_point( entry.m_Same[2 * k], entry.m_Same[2 * k + 1] );
@@ -9470,10 +9580,12 @@ namespace dx11z
         if (weld_entry != nullptr)
         {
             ++m_CarReflWeldHits;
+            weld_entry->m_LastUse = m_FlipCount;
         }
         else
         {
             ++m_CarReflWeldMisses;
+            ++(weld_known ? m_CarReflWeldFailed : m_CarReflWeldNew);
             // The keys once, then sorted with the index: the same groups as comparing the vertices over and over.
             struct WeldKey
             {
@@ -9494,9 +9606,29 @@ namespace dx11z
             {
                 return std::lexicographical_compare( a.m_Key, a.m_Key + 3, b.m_Key, b.m_Key + 3 );
             } );
-            if (m_CarReflWeldCache.size() >= 1024)
-                m_CarReflWeldCache.clear();
+            // Full: first the entries not used for 60 frames (variants of cars far behind, clipped shapes of an earlier
+            // view); only when that does not free a quarter, all of it as before.
+            if (m_CarReflWeldCache.size() >= 4096)
+            {
+                for (auto it = m_CarReflWeldCache.begin(); it != m_CarReflWeldCache.end();)
+                {
+                    if (m_FlipCount - it->second.m_LastUse > 60 && it->first != weld_key)
+                    {
+                        it = m_CarReflWeldCache.erase( it );
+                        ++m_CarReflWeldEvicted;
+                    }
+                    else
+                        ++it;
+                }
+                if (m_CarReflWeldCache.size() >= 3072)
+                {
+                    m_CarReflWeldCache.clear();
+                    ++m_CarReflWeldClears;
+                }
+            }
             CarReflWeld & entry = m_CarReflWeldCache[weld_key];
+            entry.m_LastUse = m_FlipCount;
+            entry.m_ObjNormal.clear(); // 9.15e: new groups, the kept normals no longer fit
             entry.m_Group.resize( count );
             std::uint32_t groups = 0;
             for (std::size_t k = 0; k < count; ++k)
@@ -9541,62 +9673,179 @@ namespace dx11z
             }
             weld_entry = &entry;
         }
-        const std::vector<std::uint32_t> & group_of = weld_entry->m_Group;
-        const std::uint32_t groups = weld_entry->m_Groups;
+        CarReflWeld & weld = *weld_entry;
+        const std::vector<std::uint32_t> & group_of = weld.m_Group;
+        const std::uint32_t groups = weld.m_Groups;
 
-        // Area weighted face normals, each turned towards the camera, summed per point.
-        m_CarReflNormal.assign( static_cast<std::size_t>(groups) + 1, { 0.0, 0.0, 0.0 } );
-        for (std::size_t i = 0; i + 2 < m_BatchIndices.size(); i += 3)
+        // 9.15e '[CarReflections] ObjectNormals': a part is rigid in its own space, so its normals are built once there and
+        // only turned into view space each frame (REFLEXION-WETTER.md C9-C12). Raw object space = (view - t) x R^-1 with the
+        // mirror of w4 kept, so both mirrored halves of a body share the cached normals and R^-T turns them outwards again.
+        const bool object_normals = m_ConfigCarReflObjectNormals != 0 && object_valid;
+        const int seam_fix = object_normals && m_ConfigCarReflSeamFix != 0 ? 1 : 0;
+        const auto raw_object = [&]( std::size_t i, double out[3] )
+        {
+            const auto & view = m_CarReflView[i];
+            const double d[3] = { view[0] - model_view[12], view[1] - model_view[13], view[2] - model_view[14] };
+            for (int j = 0; j < 3; ++j)
+                out[j] = d[0] * object_raw[j] + d[1] * object_raw[3 + j] + d[2] * object_raw[6 + j];
+        };
+        float extent = 0.0f;
+        bool cached = false;
+        if (object_normals)
+        {
+            float low_x = 1e30f, high_x = -1e30f, low_y = 1e30f, high_y = -1e30f;
+            for (const TlVertex & v : m_BatchVertices)
+            {
+                low_x = std::min( low_x, v.m_X );
+                high_x = std::max( high_x, v.m_X );
+                low_y = std::min( low_y, v.m_Y );
+                high_y = std::max( high_y, v.m_Y );
+            }
+            extent = std::max( high_x - low_x, high_y - low_y );
+            // Built far away (few pixels, rounded screen positions) and now drawn much larger: build anew.
+            cached = weld.m_ObjNormal.size() == count && weld.m_ObjCrease == m_ConfigCarReflCreaseCos && weld.m_ObjSeam == seam_fix &&
+                extent <= weld.m_ObjExtent * 2.0f + 1.0f;
+            for (int k = 0; cached && k < weld.m_ObjCheckCount; ++k)
+            {
+                const std::uint32_t index = weld.m_ObjCheckIndex[static_cast<std::size_t>(k)];
+                if (!valid( m_BatchVertices[index] ))
+                {
+                    cached = false;
+                    break;
+                }
+                double p[3];
+                raw_object( index, p );
+                const auto & kept = weld.m_ObjCheck[static_cast<std::size_t>(k)];
+                for (int j = 0; j < 3; ++j)
+                    cached = cached && std::abs( p[j] - kept[static_cast<std::size_t>(j)] ) < 0.005;
+            }
+        }
+
+        // Orientation of the faces (9.15e, C10). Before: each face turned towards the camera, so the back faces the GPU culls
+        // counted as front faces and bent the corners on the outline towards the camera (and jumped when a face turned).
+        // Now one sign for the whole batch: the faces the GPU draws (screen winding against CULLMODE) face the camera, the
+        // index order then gives every other face the same way round. A sign wrong as a whole does no harm (the shader turns
+        // the normal to the camera per pixel); what counts is that all faces of a point agree.
+        int orient = 0; // 0 = each face to the camera (as before), +1 / -1 = fixed sign for the batch
+        if (object_normals && !cached)
+        {
+            const std::uint32_t cull_mode = render[rs::CULLMODE] & 3;
+            std::int64_t vote = 0;
+            std::uint64_t visible = 0;
+            double centre[3] = {};
+            std::size_t centre_count = 0;
+            for (std::size_t i = 0; i < count; ++i)
+                if (valid( m_BatchVertices[i] ))
+                {
+                    for (int j = 0; j < 3; ++j)
+                        centre[j] += m_CarReflView[i][static_cast<std::size_t>(j)];
+                    ++centre_count;
+                }
+            for (double & x : centre)
+                x /= static_cast<double>(std::max<std::size_t>( centre_count, 1 ));
+            double outward = 0.0;
+            for (std::size_t i = 0; i + 2 < m_BatchIndices.size(); i += 3)
+            {
+                const std::uint16_t ia = m_BatchIndices[i], ib = m_BatchIndices[i + 1], ic = m_BatchIndices[i + 2];
+                if (ia >= count || ib >= count || ic >= count || !valid( m_BatchVertices[ia] ) || !valid( m_BatchVertices[ib] ) ||
+                    !valid( m_BatchVertices[ic] ))
+                    continue;
+                const auto & a = m_CarReflView[ia];
+                const auto & b = m_CarReflView[ib];
+                const auto & c = m_CarReflView[ic];
+                const double u[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+                const double v[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
+                const double cross[3] = { u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0] };
+                const double facing = cross[0] * a[0] + cross[1] * a[1] + cross[2] * a[2];
+                // Centre of the part as a fallback without culling: faces point away from it.
+                const double mid[3] = { (a[0] + b[0] + c[0]) / 3.0 - centre[0], (a[1] + b[1] + c[1]) / 3.0 - centre[1],
+                                        (a[2] + b[2] + c[2]) / 3.0 - centre[2] };
+                outward += cross[0] * mid[0] + cross[1] * mid[1] + cross[2] * mid[2];
+                if (cull_mode != 2 && cull_mode != 3)
+                    continue;
+                const TlVertex & pa = m_BatchVertices[ia];
+                const TlVertex & pb = m_BatchVertices[ib];
+                const TlVertex & pc = m_BatchVertices[ic];
+                // Screen y points down: area > 0 is clockwise on screen. CULL_CW (2) drops those, CULL_CCW (3) the others.
+                const double area = (static_cast<double>(pb.m_X) - pa.m_X) * (static_cast<double>(pc.m_Y) - pa.m_Y) -
+                    (static_cast<double>(pc.m_X) - pa.m_X) * (static_cast<double>(pb.m_Y) - pa.m_Y);
+                if (std::abs( area ) < 1e-6 || facing == 0.0)
+                    continue;
+                if ((cull_mode == 2 ? area < 0.0 : area > 0.0))
+                {
+                    ++visible;
+                    vote += facing < 0.0 ? 1 : -1;
+                }
+            }
+            if (visible > 0)
+            {
+                const std::uint64_t against = (visible - static_cast<std::uint64_t>(vote < 0 ? -vote : vote)) / 2;
+                m_CarReflOrientVisible += visible;
+                m_CarReflOrientAgainst += against;
+                // Mixed winding (more than a tenth against the rest): turned per face as before, and not kept.
+                if (against * 10 > visible)
+                    ++m_CarReflOrientMixed;
+                else
+                {
+                    orient = vote >= 0 ? 1 : -1;
+                    ++m_CarReflOrientCull;
+                }
+            }
+            else
+            {
+                orient = outward >= 0.0 ? 1 : -1;
+                ++m_CarReflOrientCentre;
+            }
+        }
+
+        const auto face_of = [&]( std::size_t i, double cross[3] ) -> bool
         {
             const std::uint16_t ia = m_BatchIndices[i], ib = m_BatchIndices[i + 1], ic = m_BatchIndices[i + 2];
             if (ia >= count || ib >= count || ic >= count || !valid( m_BatchVertices[ia] ) || !valid( m_BatchVertices[ib] ) ||
                 !valid( m_BatchVertices[ic] ))
-                continue;
+                return false;
             const auto & a = m_CarReflView[ia];
             const auto & b = m_CarReflView[ib];
             const auto & c = m_CarReflView[ic];
             const double u[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
             const double v[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
-            double cross[3] = { u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0] };
-            if (cross[0] * a[0] + cross[1] * a[1] + cross[2] * a[2] > 0.0)
-                for (double & x : cross)
-                    x = -x;
-            for (const std::uint16_t corner : { ia, ib, ic })
-            {
-                auto & sum = m_CarReflNormal[group_of[corner]];
+            cross[0] = u[1] * v[2] - u[2] * v[1];
+            cross[1] = u[2] * v[0] - u[0] * v[2];
+            cross[2] = u[0] * v[1] - u[1] * v[0];
+            const bool turn = orient == 0 ? cross[0] * a[0] + cross[1] * a[1] + cross[2] * a[2] > 0.0 : orient < 0;
+            if (turn)
                 for (int j = 0; j < 3; ++j)
-                    sum[static_cast<std::size_t>(j)] += cross[j];
+                    cross[j] = -cross[j];
+            return true;
+        };
+
+        // Area weighted face normals, summed per point (not needed when the part's normals are kept).
+        if (!cached)
+        {
+            m_CarReflNormal.assign( static_cast<std::size_t>(groups) + 1, { 0.0, 0.0, 0.0 } );
+            for (std::size_t i = 0; i + 2 < m_BatchIndices.size(); i += 3)
+            {
+                double cross[3];
+                if (!face_of( i, cross ))
+                    continue;
+                for (int k = 0; k < 3; ++k)
+                {
+                    auto & sum = m_CarReflNormal[group_of[m_BatchIndices[i + k]]];
+                    for (int j = 0; j < 3; ++j)
+                        sum[static_cast<std::size_t>(j)] += cross[j];
+                }
             }
         }
 
         // '[CarReflections] CreaseAngle' (9.15b): a corner takes only the faces at its point that lie within the angle of its own
         // faces (those using this very corner), so creases and sharp edges stay sharp instead of being rounded over.
-        const bool crease = m_ConfigCarReflCreaseCos >= -1.0f;
+        const bool crease = m_ConfigCarReflCreaseCos >= -1.0f && !cached;
         static thread_local std::vector<std::array<double, 3>> crease_own;
         static thread_local std::vector<std::array<double, 3>> crease_sum;
         static thread_local std::vector<std::uint32_t> group_start;
         static thread_local std::vector<std::uint32_t> group_list;
         if (crease)
         {
-            const auto face_of = [&]( std::size_t i, double cross[3] ) -> bool
-            {
-                const std::uint16_t ia = m_BatchIndices[i], ib = m_BatchIndices[i + 1], ic = m_BatchIndices[i + 2];
-                if (ia >= count || ib >= count || ic >= count || !valid( m_BatchVertices[ia] ) || !valid( m_BatchVertices[ib] ) ||
-                    !valid( m_BatchVertices[ic] ))
-                    return false;
-                const auto & a = m_CarReflView[ia];
-                const auto & b = m_CarReflView[ib];
-                const auto & c = m_CarReflView[ic];
-                const double u[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
-                const double v[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
-                cross[0] = u[1] * v[2] - u[2] * v[1];
-                cross[1] = u[2] * v[0] - u[0] * v[2];
-                cross[2] = u[0] * v[1] - u[1] * v[0];
-                if (cross[0] * a[0] + cross[1] * a[1] + cross[2] * a[2] > 0.0)
-                    for (int j = 0; j < 3; ++j)
-                        cross[j] = -cross[j];
-                return true;
-            };
             crease_own.assign( count, { 0.0, 0.0, 0.0 } );
             for (std::size_t i = 0; i + 2 < m_BatchIndices.size(); i += 3)
             {
@@ -9652,6 +9901,88 @@ namespace dx11z
             }
         }
 
+        // Normal of every corner in view space (zero = no face at this corner): from the part cache, or summed above and then
+        // kept in the space of the part (9.15e).
+        static thread_local std::vector<std::array<double, 3>> corner_normal;
+        corner_normal.resize( count );
+        const auto to_view = [&]( const std::array<float, 3> & n, std::array<double, 3> & out )
+        {
+            for (int k = 0; k < 3; ++k)
+                out[static_cast<std::size_t>(k)] = n[0] * object_raw[k * 3] + n[1] * object_raw[k * 3 + 1] + n[2] * object_raw[k * 3 + 2];
+            const double length = std::sqrt( out[0] * out[0] + out[1] * out[1] + out[2] * out[2] );
+            for (double & x : out)
+                x = length > 1e-20 ? x / length : 0.0;
+        };
+        if (cached)
+        {
+            for (std::size_t i = 0; i < count; ++i)
+                to_view( weld.m_ObjNormal[i], corner_normal[i] );
+            ++m_CarReflObjCached;
+        }
+        else
+        {
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                const auto & crease_corner = crease ? crease_sum[i] : m_CarReflNormal[group_of[i]];
+                const bool crease_found = crease && (crease_corner[0] != 0.0 || crease_corner[1] != 0.0 || crease_corner[2] != 0.0);
+                const auto & sum = crease_found ? crease_corner : m_CarReflNormal[group_of[i]];
+                const double length = std::sqrt( sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2] );
+                for (int j = 0; j < 3; ++j)
+                    corner_normal[i][static_cast<std::size_t>(j)] = length > 1e-20 ? sum[static_cast<std::size_t>(j)] / length : 0.0;
+            }
+            // Keep them: n_object = n_view x R^T (normals go with R^-T). With a fixed orientation only, the old way per face
+            // depends on the camera.
+            if (object_normals && orient != 0)
+            {
+                weld.m_ObjNormal.resize( count );
+                for (std::size_t i = 0; i < count; ++i)
+                {
+                    const auto & n = corner_normal[i];
+                    double o[3];
+                    for (int j = 0; j < 3; ++j)
+                        o[j] = n[0] * object_rows[j * 3] + n[1] * object_rows[j * 3 + 1] + n[2] * object_rows[j * 3 + 2];
+                    double length = std::sqrt( o[0] * o[0] + o[1] * o[1] + o[2] * o[2] );
+                    // SeamFix (C12): the body halves are drawn apart, mirrored about x = 0 of the part, and never welded there.
+                    // A corner on that plane gets the normal of the two halves together: no part across.
+                    if (seam_fix != 0 && length > 1e-20 && valid( m_BatchVertices[i] ))
+                    {
+                        double p[3];
+                        raw_object( i, p );
+                        if (std::abs( p[0] ) < 0.002 && std::abs( o[0] ) < 0.7 * length)
+                        {
+                            o[0] = 0.0;
+                            length = std::sqrt( o[1] * o[1] + o[2] * o[2] );
+                            ++m_CarReflSeamCorners;
+                        }
+                    }
+                    auto & kept = weld.m_ObjNormal[i];
+                    for (int j = 0; j < 3; ++j)
+                        kept[static_cast<std::size_t>(j)] = length > 1e-20 ? static_cast<float>(o[j] / length) : 0.0f;
+                    if (seam_fix != 0)
+                        to_view( kept, corner_normal[i] );
+                }
+                // Corners to check the shape by, spread over the part.
+                weld.m_ObjCheckCount = 0;
+                for (std::size_t k = 0; k < 8 && count > 0; ++k)
+                {
+                    for (std::size_t i = k * count / 8; i < (k + 1) * count / 8; ++i)
+                        if (valid( m_BatchVertices[i] ))
+                        {
+                            double p[3];
+                            raw_object( i, p );
+                            const std::size_t at = static_cast<std::size_t>(weld.m_ObjCheckCount++);
+                            weld.m_ObjCheckIndex[at] = static_cast<std::uint32_t>(i);
+                            weld.m_ObjCheck[at] = { static_cast<float>(p[0]), static_cast<float>(p[1]), static_cast<float>(p[2]) };
+                            break;
+                        }
+                }
+                weld.m_ObjCrease = m_ConfigCarReflCreaseCos;
+                weld.m_ObjSeam = seam_fix;
+                weld.m_ObjExtent = extent;
+                ++m_CarReflObjBuilt;
+            }
+        }
+
         m_CarReflVertices.resize( count );
         for (std::size_t i = 0; i < count; ++i)
         {
@@ -9662,16 +9993,14 @@ namespace dx11z
             out.m_Position[2] = v.m_Z;
             out.m_Position[3] = v.m_Rhw;
             const auto & view = m_CarReflView[i];
-            const auto & crease_corner = crease ? crease_sum[i] : m_CarReflNormal[group_of[i]];
-            const bool crease_found = crease && (crease_corner[0] != 0.0 || crease_corner[1] != 0.0 || crease_corner[2] != 0.0);
-            const auto & sum = crease_found ? crease_corner : m_CarReflNormal[group_of[i]];
-            const double length = std::sqrt( sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2] );
+            const auto & normal = corner_normal[i];
+            const bool has_normal = normal[0] != 0.0 || normal[1] != 0.0 || normal[2] != 0.0;
             const double view_length = std::sqrt( view[0] * view[0] + view[1] * view[1] + view[2] * view[2] );
             for (int j = 0; j < 3; ++j)
             {
                 out.m_View[j] = static_cast<float>(view[static_cast<std::size_t>(j)]);
                 // Without a face: facing the camera.
-                out.m_Normal[j] = static_cast<float>(length > 1e-20 ? sum[static_cast<std::size_t>(j)] / length
+                out.m_Normal[j] = static_cast<float>(has_normal ? normal[static_cast<std::size_t>(j)]
                     : (view_length > 0.0 ? -view[static_cast<std::size_t>(j)] / view_length : 0.0));
             }
             out.m_Uv[0] = v.m_U0;
@@ -9699,6 +10028,73 @@ namespace dx11z
         // B34: -2 marks a glass part, reflected as a whole with the glass settings (CarReflDrawPending).
         const float glass_ref = glass_part ? -2.0f : (blended && texture != nullptr ? 0.95f : -1.0f);
         const float up_f[3] = { static_cast<float>(up[0]), static_cast<float>(up[1]), static_cast<float>(up[2]) };
+        m_CarReflOutcome = glass_part ? "reflected as glass" : "reflected";
+        m_CarReflGlassRefLast = glass_ref;
+        // B36: at the probe, what the shader gets: normal, up of the car, the reflected direction, how much of it points up
+        // and where it looks the frame up (|p| > 1 = above/beside the frame, the sky colour there).
+        if (m_ProbeOn && m_ProbeX >= 0.0f && m_ProbeHits.size() > m_ProbeFirst)
+        {
+            for (std::size_t i = 0; i + 2 < indices.size(); i += 3)
+            {
+                const std::uint16_t ia = indices[i], ib = indices[i + 1], ic = indices[i + 2];
+                if (ia >= count || ib >= count || ic >= count)
+                    continue;
+                const CarReflVertex & a = m_CarReflVertices[ia];
+                const CarReflVertex & b = m_CarReflVertices[ib];
+                const CarReflVertex & c = m_CarReflVertices[ic];
+                const float d = (b.m_Position[1] - c.m_Position[1]) * (a.m_Position[0] - c.m_Position[0]) +
+                    (c.m_Position[0] - b.m_Position[0]) * (a.m_Position[1] - c.m_Position[1]);
+                if (std::fabs( d ) < 1e-6f)
+                    continue;
+                const float l1 = ((b.m_Position[1] - c.m_Position[1]) * (m_ProbeX - c.m_Position[0]) +
+                    (c.m_Position[0] - b.m_Position[0]) * (m_ProbeY - c.m_Position[1])) / d;
+                const float l2 = ((c.m_Position[1] - a.m_Position[1]) * (m_ProbeX - c.m_Position[0]) +
+                    (a.m_Position[0] - c.m_Position[0]) * (m_ProbeY - c.m_Position[1])) / d;
+                const float l3 = 1.0f - l1 - l2;
+                if (l1 < 0.0f || l2 < 0.0f || l3 < 0.0f)
+                    continue;
+                double n[3], v[3];
+                for (int j = 0; j < 3; ++j)
+                {
+                    n[j] = l1 * a.m_Normal[j] + l2 * b.m_Normal[j] + l3 * c.m_Normal[j];
+                    v[j] = l1 * a.m_View[j] + l2 * b.m_View[j] + l3 * c.m_View[j];
+                }
+                const auto unit = []( double * x )
+                {
+                    const double l = std::sqrt( x[0] * x[0] + x[1] * x[1] + x[2] * x[2] );
+                    if (l > 1e-12)
+                        for (int j = 0; j < 3; ++j)
+                            x[j] /= l;
+                };
+                unit( n );
+                unit( v );
+                if (n[0] * v[0] + n[1] * v[1] + n[2] * v[2] > 0.0)
+                    for (double & x : n)
+                        x = -x;
+                const double nv = n[0] * v[0] + n[1] * v[1] + n[2] * v[2];
+                double r[3];
+                for (int j = 0; j < 3; ++j)
+                    r[j] = v[j] - 2.0 * nv * n[j];
+                const double upward = r[0] * up_f[0] + r[1] * up_f[1] + r[2] * up_f[2];
+                const double normal_up = n[0] * up_f[0] + n[1] * up_f[1] + n[2] * up_f[2];
+                const float * m = m_CarReflClipOfView.data();
+                double cl[3];
+                for (int j = 0; j < 3; ++j)
+                    cl[j] = r[0] * m[j] + r[1] * m[4 + j] + r[2] * m[8 + j];
+                const float * vp = m_CarReflViewport.data();
+                double px = 99.0, py = 99.0;
+                if (std::fabs( cl[2] ) > 1e-9)
+                {
+                    px = (cl[0] / cl[2] * vp[0] + vp[2]) / std::max( vp[2], 1.0f ) - 1.0;
+                    py = (cl[1] / cl[2] * vp[1] + vp[3]) / std::max( vp[3], 1.0f ) - 1.0;
+                }
+                std::snprintf( m_ProbeHits[m_ProbeFirst].m_CarDetail, sizeof( m_ProbeHits[m_ProbeFirst].m_CarDetail ),
+                    "normal %+.2f %+.2f %+.2f, up %+.2f %+.2f %+.2f (normal.up %+.2f), facing %.2f, reflected %+.2f %+.2f %+.2f "
+                    "(upward %+.2f, behind camera %d), frame lookup %+.2f %+.2f", n[0], n[1], n[2], up_f[0], up_f[1], up_f[2],
+                    normal_up, -nv, r[0], r[1], r[2], upward, cl[2] <= 0.0 ? 1 : 0, px, py );
+                break;
+            }
+        }
         CarReflPending * pending = nullptr;
         for (std::size_t k = 0; k < m_CarReflPendingCount && pending == nullptr; ++k)
         {
@@ -9751,7 +10147,7 @@ namespace dx11z
     {
         if (m_CarReflPendingCount == 0)
             return;
-        const PerfScope car_batch_scope( m_ConfigProfile > 0, m_ProfileCarBatchTicks, m_ProfileDepth2 );
+        const PerfScope car_batch_scope( m_ConfigProfile > 0, m_ProfileCarDrawTicks, m_ProfileDepth2 );
         for (std::size_t k = 0; k < m_CarReflPendingCount; ++k)
         {
             CarReflPending & pending = m_CarReflPending[k];
@@ -9782,6 +10178,42 @@ namespace dx11z
     {
         return m_ConfigCarReflSky != 0 && m_ReflSkyView && m_ReflViewIsMain && m_SkyImageFlip != 0xFFFFFFFFu &&
             m_FlipCount - m_SkyImageFlip <= 2;
+    }
+
+
+    // B36: the sky image exists only while water is on screen. With it the paint shows sky and bright highlights
+    // ('HighlightBoost'), without it the plain fog colour: the red 996 turned matt from one frame to the next when a little
+    // water at the edge of the screen went out of view. The last image stays for 'SkyHold' seconds, then it fades out over
+    // 0.75 s (and in again the same way).
+    float Driver::CarSkyImageBlend()
+    {
+        if (m_ConfigCarReflSky == 0 || !m_ReflSkyView || !m_ReflViewIsMain || m_SkyImageFlip == 0xFFFFFFFFu)
+            return 0.0f;
+        if (m_CarSkyBlendFlip != m_FlipCount)
+        {
+            const double now = std::chrono::duration<double>( std::chrono::steady_clock::now().time_since_epoch() ).count();
+            const double dt = m_CarSkyBlendFlip == 0xFFFFFFFFu ? 0.0 : std::clamp( now - m_CarSkyBlendTime, 0.0, 0.25 );
+            m_CarSkyBlendFlip = m_FlipCount;
+            m_CarSkyBlendTime = now;
+            const bool fresh = CarSkyImageUsable();
+            if (fresh)
+                m_CarSkyLastFresh = now;
+            if (m_ConfigCarReflSkyHold == 0.0f)
+                m_CarSkyBlend = fresh ? 1.0f : 0.0f;
+            else
+            {
+                const float target = fresh || m_ConfigCarReflSkyHold < 0.0f || now - m_CarSkyLastFresh <= m_ConfigCarReflSkyHold ? 1.0f : 0.0f;
+                const float step = static_cast<float>(dt / 0.75);
+                m_CarSkyBlend = target > m_CarSkyBlend ? std::min( target, m_CarSkyBlend + step ) : std::max( target, m_CarSkyBlend - step );
+            }
+            if ((fresh ? 1 : 0) != m_CarSkyFreshLogged && m_CarSkyLogLines < 200)
+            {
+                ++m_CarSkyLogLines;
+                m_CarSkyFreshLogged = fresh ? 1 : 0;
+                Log( "Car reflections: sky image %s (flip %u, share %.2f, B36)", fresh ? "back" : "gone, held", m_FlipCount, m_CarSkyBlend );
+            }
+        }
+        return m_CarSkyBlend;
     }
 
 
@@ -9826,7 +10258,8 @@ namespace dx11z
 
         const float * viewport = m_CarReflViewport.data();
         const float * view_of_clip = m_CarReflViewOfClip.data();
-        const bool sky_image = CarSkyImageUsable();
+        const float sky_blend = CarSkyImageBlend();
+        const bool sky_image = sky_blend > 0.0f;
 
         // Layout of 'CarReflectConstants' in shaders::CAR_REFLECT.
         if (SUCCEEDED( m_Context->Map( m_CarReflConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
@@ -9867,7 +10300,7 @@ namespace dx11z
             constants[56] = fog[0];
             constants[57] = fog[1];
             constants[58] = fog[2];
-            constants[59] = sky_image ? 2.0f : 1.0f; // 2: the sky image at t3 (9.15a)
+            constants[59] = sky_image ? 1.0f + sky_blend : 1.0f; // above 1: share of the sky image at t3 (9.15a, B36)
             constants[60] = m_ConfigCarReflFresnel;
             constants[61] = m_CarReflLevelOffset;
             const bool chain = m_ConfigCarReflBlurChain > 0 && m_BlurChainValid && m_BlurChainView;
@@ -10114,6 +10547,20 @@ namespace dx11z
         Log( "  collected: %llu reflected batches in %llu draws; corner groups kept %llu, built anew %llu (%zu parts kept)",
             static_cast<unsigned long long>(m_CarReflPendingParts), static_cast<unsigned long long>(m_CarReflPendingDraws),
             static_cast<unsigned long long>(m_CarReflWeldHits), static_cast<unsigned long long>(m_CarReflWeldMisses), m_CarReflWeldCache.size() );
+        if (m_ConfigCarReflObjectNormals != 0)
+            Log( "  object normals (9.15e): %llu batches from the part cache, %llu built; oriented by culling %llu, by the centre %llu, "
+                "mixed winding %llu (turned per face); drawn faces against the sign %llu of %llu; seam corners %llu",
+                static_cast<unsigned long long>(m_CarReflObjCached), static_cast<unsigned long long>(m_CarReflObjBuilt),
+                static_cast<unsigned long long>(m_CarReflOrientCull), static_cast<unsigned long long>(m_CarReflOrientCentre),
+                static_cast<unsigned long long>(m_CarReflOrientMixed), static_cast<unsigned long long>(m_CarReflOrientAgainst),
+                static_cast<unsigned long long>(m_CarReflOrientVisible), static_cast<unsigned long long>(m_CarReflSeamCorners) );
+        Log( "  corner groups built anew because: no entry %llu, test corners failed %llu; old entries dropped %llu, cache emptied %llu times",
+            static_cast<unsigned long long>(m_CarReflWeldNew), static_cast<unsigned long long>(m_CarReflWeldFailed),
+            static_cast<unsigned long long>(m_CarReflWeldEvicted), static_cast<unsigned long long>(m_CarReflWeldClears) );
+        m_CarReflWeldNew = m_CarReflWeldFailed = m_CarReflWeldClears = m_CarReflWeldEvicted = 0;
+        m_CarReflObjCached = m_CarReflObjBuilt = 0;
+        m_CarReflOrientCull = m_CarReflOrientCentre = m_CarReflOrientMixed = 0;
+        m_CarReflOrientVisible = m_CarReflOrientAgainst = m_CarReflSeamCorners = 0;
         m_CarReflPendingParts = 0;
         m_CarReflPendingDraws = 0;
         m_CarReflWeldHits = 0;
@@ -12238,6 +12685,7 @@ namespace dx11z
             m_ReflSkyRtv.Reset();
             m_ReflSkyView.Reset();
             m_ReflSky.Reset();
+            m_SkyImageFlip = 0xFFFFFFFFu; // B36: the new texture holds no sky yet
             D3D11_TEXTURE2D_DESC desc = {};
             desc.Width = width;
             desc.Height = height;

@@ -1132,7 +1132,7 @@ cbuffer CarReflectConstants : register( b0 )
     float4 g_Forward; // xyz: view direction of the camera in its space, w: alpha reference of the texture (< 0: no test)
     float4 g_Glass; // x: alpha below which a blended pixel is glass (< 0: not blended), y: 1 = reflect glass too
     float4 g_Up; // xyz: up of the car in view space (0: unknown), w: strength of reflections below the horizon
-    float4 g_SkyColour; // rgb: sky where the frame has nothing (the fog colour), w: 1 = use it
+    float4 g_SkyColour; // rgb: sky where the frame has nothing (the fog colour), w: 1 = use it, 1 ... 2 share of the sky image
     float4 g_Shape; // x: exponent of the Fresnel term (5 = Schlick, smaller = softer change), y: mip levels the frame copy is smaller by,
                     // z: 1 = blur from the shared chain (9.16a, '[CarReflections] BlurChain'), w: its top level
     float4 g_CarWeather; // weather on the car (LFSP LfspWeatherCar, PLAN.md 15.3): x snow 0..1, y light of the snow, z rain drops 0..1, w time s
@@ -1313,14 +1313,16 @@ float4 MainPS( PixelIn input ) : SV_Target
         float3 sky_colour = g_SkyColour.rgb;
         // '[CarReflections] Sky' (9.15a): the sky itself, sky colour and clouds. Above the frame its top row (the direction
         // is pulled onto the edge like the frame lookup), softened by five taps.
-        if ( g_SkyColour.w > 1.5 )
+        if ( g_SkyColour.w > 1.001 )
         {
             float2 sky_uv = float2( saturate( p.x * 0.5 + 0.5 ), clamp( p.y * 0.5 + 0.5, 0.02, 0.98 ) );
-            sky_colour = g_SkyImage.SampleLevel( g_SceneSampler, sky_uv, 0 ).rgb * 0.4 +
+            float3 sky_image = g_SkyImage.SampleLevel( g_SceneSampler, sky_uv, 0 ).rgb * 0.4 +
                 ( g_SkyImage.SampleLevel( g_SceneSampler, sky_uv + float2( 0.02, 0.0 ), 0 ).rgb +
                   g_SkyImage.SampleLevel( g_SceneSampler, sky_uv - float2( 0.02, 0.0 ), 0 ).rgb +
                   g_SkyImage.SampleLevel( g_SceneSampler, sky_uv + float2( 0.0, 0.015 ), 0 ).rgb +
                   g_SkyImage.SampleLevel( g_SceneSampler, sky_uv + float2( 0.0, 0.03 ), 0 ).rgb ) * 0.15;
+            // B36: fades between the sky image and the fog colour (water off screen, 'SkyHold').
+            sky_colour = lerp( sky_colour, sky_image, saturate( g_SkyColour.w - 1.0 ) );
         }
         colour = lerp( colour, sky_colour, sky );
         sky_seen = sky_colour;

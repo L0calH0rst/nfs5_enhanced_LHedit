@@ -265,6 +265,9 @@ namespace dx11z
             if (ImGui::SliderFloat( "Kantenwinkel (Grad)", &m_ConfigCarReflCreaseDeg, 0.0f, 90.0f, "%.0f" ))
                 m_ConfigCarReflCreaseCos = m_ConfigCarReflCreaseDeg > 0.0f ? std::cos( m_ConfigCarReflCreaseDeg * 0.01745329f ) : -2.0f;
             Hint( "0 = alle Flächen eines Punkts gemittelt; kleiner = mehr scharfe Kanten" );
+            Toggle( "Normalen im Teilraum (9.15e)", m_ConfigCarReflObjectNormals );
+            Hint( "feste Ausrichtung je Teil, einmal gerechnet und behalten; ruhiger und schneller" );
+            Toggle( "Mittelnaht glätten", m_ConfigCarReflSeamFix );
             ImGui::Separator();
             Toggle( "Klarlack (zwei Schichten)", m_ConfigCarReflClearCoat );
             ImGui::SliderFloat( "Grundlack Stärke", &m_ConfigCarReflBaseCoat, 0.0f, 1.0f, "%.2f" );

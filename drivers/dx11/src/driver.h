@@ -570,6 +570,7 @@ namespace dx11z
         void FpsFlip();
         // Car reflections ([CarReflections] Reflections): CPU time of the frame copy and of the batches (normals, cells, upload), per report.
         std::int64_t m_ProfileCarCopyTicks = 0, m_ProfileCarBatchTicks = 0;
+        std::int64_t m_ProfileCarDrawTicks = 0; // CarReflDrawPending: buffers, constants and draws of the collected reflections
         std::uint64_t m_ProfileCarBatches = 0, m_ProfileCarVertices = 0, m_ProfileCarCopies = 0;
         int m_ProfileDepth2 = 0, m_ProfileDepth3 = 0;
         int m_ConfigCarReflInterval = 1; // [CarReflections] UpdateInterval: the frame copy is renewed every N frames
@@ -727,6 +728,15 @@ namespace dx11z
         float m_ConfigCarReflGlassStrength = 0.5f;
         float m_ConfigCarReflGlassF0 = 0.12f;
         std::set<std::uint32_t> m_CarReflPaletteLogged;
+        // 9.15e: paint colours of a texture, kept until the cells glossy parts cover change (they were counted over all 4096
+        // cells with a map and a text for the log on every matte part draw, every frame).
+        struct CarReflPalette
+        {
+            std::uint64_t m_Signature = 0;
+            int m_Grey = -1;
+            std::vector<std::array<int, 3>> m_Colours;
+        };
+        std::unordered_map<std::uint32_t, CarReflPalette> m_CarReflPalettes;
         const void * m_CarLodObject = nullptr; // R3DCarLOD of the call being drawn
         int m_CarPart = -1; // part << 8 | variant being drawn
         std::vector<std::uint16_t> m_CarReflIndices;
@@ -750,11 +760,24 @@ namespace dx11z
         float m_ConfigCarReflHighlightThreshold = 0.75f; // 9.15b '[CarReflections] HighlightThreshold'
         float m_ConfigCarReflCreaseCos = -2.0f; // 9.15b cos of '[CarReflections] CreaseAngle' (< -1 = off, all faces of a point)
         int m_ConfigCarReflClearCoat = 0; // 9.15b '[CarReflections] ClearCoat'
+        int m_ConfigCarReflObjectNormals = 0; // 9.15e '[CarReflections] ObjectNormals': fixed orientation, normals kept per part
+        int m_ConfigCarReflSeamFix = 0; // 9.15e '[CarReflections] SeamFix': corners on the middle plane x = 0 get no sideways normal
         float m_ConfigCarReflBaseCoat = 0.2f; // 9.15b '[CarReflections] BaseCoat': strength of the soft coloured base reflection
         float m_ConfigCarReflBaseBlur = 2.5f; // 9.15b '[CarReflections] BaseCoatBlur': its extra blur levels
         float m_ConfigCarReflBaseTint = 0.7f; // 9.15b '[CarReflections] BaseCoatTint': how much it takes the paint colour
         int m_ConfigCarReflSky = 0; // '[CarReflections] Sky' (9.15a): sky image of the water reflection above the frame instead of the fog colour
         std::uint32_t m_SkyImageFlip = 0xFFFFFFFFu; // flip in which the sky image was last drawn (main view)
+        // '[CarReflections] SkyHold' (B36): seconds the last sky image stays in use after the water left the screen, then it
+        // fades to the fog colour (and back in) instead of switching in one frame; 0 = switch at once as before, -1 (default)
+        // = keep the last image until the next race (menu) or a new one.
+        float m_ConfigCarReflSkyHold = -1.0f;
+        float m_CarSkyBlend = 0.0f; // share of the sky image against the fog colour, once per flip
+        std::uint32_t m_CarSkyBlendFlip = 0xFFFFFFFFu;
+        double m_CarSkyBlendTime = 0.0;
+        double m_CarSkyLastFresh = -1e9;
+        int m_CarSkyFreshLogged = -1;
+        int m_CarSkyLogLines = 0;
+        float CarSkyImageBlend();
         bool CarSkyImageUsable() const;
         ComPtr<ID3D11Texture2D> m_BlurDown;
         ComPtr<ID3D11Texture2D> m_BlurChain;
@@ -798,9 +821,28 @@ namespace dx11z
             std::array<std::uint32_t, 16> m_Same = {}; // pairs a, b of corners of one group
             std::array<std::uint32_t, 16> m_Apart = {}; // pairs a, b of corners of different groups
             int m_SameCount = 0, m_ApartCount = 0;
+            // 9.15e: the normal of each corner in the space of the part (raw, mirror not taken out), kept while the part
+            // keeps its shape; empty = not built. Checked on a few corners (raw object position), the crease and seam
+            // settings and the size on screen it was built at (rebuilt when the part is drawn more than twice as large).
+            std::vector<std::array<float, 3>> m_ObjNormal;
+            std::array<std::array<float, 3>, 8> m_ObjCheck = {};
+            std::array<std::uint32_t, 8> m_ObjCheckIndex = {};
+            int m_ObjCheckCount = 0;
+            float m_ObjCrease = -3.0f;
+            int m_ObjSeam = -1;
+            float m_ObjExtent = 0.0f;
+            std::uint32_t m_LastUse = 0; // m_FlipCount when last used (old entries go first when the cache is full)
         };
         std::unordered_map<std::uint64_t, CarReflWeld> m_CarReflWeldCache;
         std::uint64_t m_CarReflWeldHits = 0, m_CarReflWeldMisses = 0;
+        // Why the groups were built anew: no entry yet, an entry whose test corners no longer fit, whole cache emptied (full).
+        std::uint64_t m_CarReflWeldNew = 0, m_CarReflWeldFailed = 0, m_CarReflWeldClears = 0, m_CarReflWeldEvicted = 0;
+        // 9.15e counters for the report: normals taken from / built into the part cache, how batches were oriented
+        // (by the faces the GPU draws, by the centre of the part, mixed winding = turned per face as before), drawn
+        // triangles against the batch's sign, corners on the middle seam set straight.
+        std::uint64_t m_CarReflObjCached = 0, m_CarReflObjBuilt = 0;
+        std::uint64_t m_CarReflOrientCull = 0, m_CarReflOrientCentre = 0, m_CarReflOrientMixed = 0;
+        std::uint64_t m_CarReflOrientVisible = 0, m_CarReflOrientAgainst = 0, m_CarReflSeamCorners = 0;
         // Reflection draws of one R3DCarLOD::Draw collected per state and drawn at its end (9.13c).
         struct CarReflPending
         {
@@ -1256,8 +1298,18 @@ namespace dx11z
             std::uint8_t m_Sky = 0, m_ZEnable = 0, m_ZFunc = 0, m_Fog = 0, m_FogFactor = 0, m_SkyEdge = 0;
             float m_Z = 0.0f;
             std::uint32_t m_Diffuse = 0, m_FogColour = 0, m_Vertices = 0;
+            // B36: car pass of the draw (0 = none), part, lowest alpha of the texture, what the car reflections made of it.
+            std::uint32_t m_CarMask = 0;
+            int m_CarPart = -1;
+            std::uint8_t m_AlphaMin = 255, m_Translucent = 0;
+            const char * m_CarOutcome = nullptr;
+            float m_CarGlassRef = 0.0f;
+            char m_CarDetail[256] = {}; // B36: normal, up, reflected direction and frame lookup at the probe
         };
         std::vector<ProbeHit> m_ProbeHits;
+        const char * m_CarReflOutcome = nullptr; // B36: why CarReflBatch kept or left out the batch (for the probe)
+        float m_CarReflGlassRefLast = 0.0f;
+        std::size_t m_ProbeFirst = 0; // index of the probe hit of the batch being flushed
         std::uint64_t m_ProbeLogTick = 0;
         float m_ProbeShown = 0.0f;
         int m_ProbeCursorX = 0; // back buffer pixels
