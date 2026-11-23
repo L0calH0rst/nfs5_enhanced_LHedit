@@ -38,7 +38,7 @@ For new features, the additional "Love for Speed Porsche" lfsp.asi is used. This
 | Pop-up flash & high beam glow | Pop-up headlights flash with the high beam key; the lens flare of your own headlights grows with the high beam (`HeadlightsFlashPopUps`, `HeadlightsHighGlow`). |
 | Signals & third brake light | Rear turn signals blink in sync with the front ones, the third brake light only lights when braking, damaged lamps cast no glow (`SignalsInSync`, `ThirdBrakeLightBrakingOnly`). |
 | Skid marks (B22) | Skid marks are drawn slightly towards the camera so they no longer vanish under the road surface (`SkidDepthBias`). |
-| Car reflections (experimental) | A reflection pass over the car body with Fresnel, blur and matte parts (cloth tops, tyres), off by default (`[CarReflections]` in `lfsp.ini`). |
+| Car reflections (experimental) | A reflection pass over the car body with Fresnel, blur and matte parts (cloth tops, tyres), on by default (`[CarReflections]` in `lfsp.ini`). |
 | Damage gauge lines (B18) | Lines are widened to the game's 640x480 pixel size, so the colour gradient of the HUD damage gauge is a solid bar at high resolutions. |
 
 ### Widescreen & Culling Enhancements
@@ -172,9 +172,9 @@ The LHedit settings are in `lfsp.ini` of LFSP, every setting is explained in the
 | `[Traffic]` | Amount, models, Porsches, paint and overtaking of traffic. |
 | `[Cars]` | Car limit of a race. |
 | `[Damage]` | Exhaust smoke on engine damage. |
-| `[CarReflections]` | Experimental reflection pass over the car body (off by default). |
+| `[CarReflections]` | Experimental reflection pass over the car body (on by default). |
 | `[Weather]` | Weather menu, rain and snow strength, cover under bridges, windshield drops. |
-| `[SimTrace]`, `[Debug]`, `[Coverage]` | Measuring tools for reverse engineering (field access trace, forced police, weather and state logs, function coverage); all off by default. |
+| `[Debug]` | Measuring tools (forced police, weather and state logs); all off by default. |
 
  A `[Lights]` key missing there is still read from `[Dx11]` of `nfs5_enhanced.ini`.
 
