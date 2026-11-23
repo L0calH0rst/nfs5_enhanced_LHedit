@@ -30,7 +30,7 @@ jobs:
           $log = Get-Content CHANGELOG.md -Raw
           $m = [regex]::Match($log, "(?s)## $([regex]::Escape($v)) \([^)]*\)\s*(.*?)(?=\n## )")
           $notes = $m.Groups[1].Value.Trim()
-          $notes += "`n`n---`n`n### Installation`n1. ``nfs5_enhanced.asi``, ``nfs5_enhanced.ini``, ``lfsp.asi``, ``lfsp.ini`` and ``SDL3.dll`` next to ``Porsche.exe``.`n2. ``Drivers/dx11z.dll`` into the game's ``Drivers`` folder.`n3. Optional for HD textures: ``nfsp_texpool.asi`` and ``nfsp_texpool.ini`` next to ``Porsche.exe`` (larger in-race texture pool).`n4. Needs the USA release with the official **v3.5** patch and [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) as ``dinput.dll``."
+          $notes += "`n`n---`n`n### Installation`n1. ``nfs5_enhanced.asi``, ``nfs5_enhanced.ini``, ``lfsp.asi``, ``lfsp.ini`` and ``SDL3.dll`` next to ``Porsche.exe``.`n2. ``Drivers/dx11z.dll`` into the game's ``Drivers`` folder.`n3. Optional, separate download ``nfsp_texpool_v$v.zip``: ``nfsp_texpool.asi`` and ``nfsp_texpool.ini`` next to ``Porsche.exe``. Recommended for HD textures (larger memory pools) and on PCs with 4 GB RAM or more (corrects the memory query of the game).`n4. Needs the USA release with the official **v3.5** patch and [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) as ``dinput.dll``."
           Set-Content -Path release_notes.md -Value $notes -Encoding utf8
           $global:LASTEXITCODE = 0
         env:
@@ -51,18 +51,26 @@ jobs:
           Copy-Item build/Release/SDL3.dll $pkg/
           Copy-Item config/nfs5_enhanced.ini $pkg/
           Copy-Item build/lfsp/Release/lfsp.asi, config/lfsp.ini $pkg/
-          Copy-Item build/texpool/Release/nfsp_texpool.asi, config/nfsp_texpool.ini $pkg/
           Copy-Item build/drivers/dx11/Release/dx11z.dll "$pkg/Drivers/"
           Copy-Item README.md, CHANGELOG.md, LICENSE $pkg/
           Copy-Item external/SDL3/LICENSE.txt "$pkg/SDL3-LICENSE.txt"
           $zip = "nfs5_enhanced_LHedit_$($env:TAG).zip"
           Compress-Archive -Path "$pkg/*" -DestinationPath $zip
           "ZIP=$zip" | Out-File -Append $env:GITHUB_ENV
+          # nfsp_texpool is an optional download of its own.
+          $texpool = "pkg_texpool"
+          New-Item -ItemType Directory -Force $texpool | Out-Null
+          Copy-Item build/texpool/Release/nfsp_texpool.asi, config/nfsp_texpool.ini, LICENSE "$texpool/"
+          $texpool_zip = "nfsp_texpool_$($env:TAG).zip"
+          Compress-Archive -Path "$texpool/*" -DestinationPath $texpool_zip
+          "TEXPOOL_ZIP=$texpool_zip" | Out-File -Append $env:GITHUB_ENV
 
       - uses: actions/upload-artifact@v5
         with:
           name: nfs5_enhanced_LHedit_${{ env.TAG }}
-          path: ${{ env.ZIP }}
+          path: |
+            ${{ env.ZIP }}
+            ${{ env.TEXPOOL_ZIP }}
 
       # Also runs when the release exists: notes and the package are replaced.
       - name: Publish release
@@ -73,4 +81,6 @@ jobs:
           name: nfs5_enhanced LHedit ${{ env.VERSION }}
           body_path: release_notes.md
           make_latest: true
-          files: ${{ env.ZIP }}
+          files: |
+            ${{ env.ZIP }}
+            ${{ env.TEXPOOL_ZIP }}

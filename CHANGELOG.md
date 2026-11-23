@@ -16,6 +16,8 @@ LHedit build on top of upstream 1.4.0.
 - The action camera stops at track walls (`ActionWallCheck`).
 - The in-game settings menu is removed, it broke the Windows screenshot shortcut. All settings stay in the INI files.
 - The INI files are in English, grouped and explained. Old measuring code and settings are removed.
+- `nfsp_texpool` is now a separate, optional download (`nfsp_texpool_v1.4.0-LH.1.zip`). Recommended for HD textures and
+  on PCs with 4 GB RAM or more.
 
 ## 1.4.0 (2026-11-23)
 
