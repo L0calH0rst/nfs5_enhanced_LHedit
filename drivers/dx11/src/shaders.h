@@ -1121,6 +1121,40 @@ PackOut MainPS( float4 position : SV_Position )
     // Car reflections (PLAN.md 9.12b, doc/LICHT.md 12): the body of a car drawn once more, the frame in the reflected
     // direction over it. Position and normal per vertex in the camera space of the game come from the driver (normals
     // averaged over the triangles of the draw), the direction is projected to the screen as a point at infinity.
+    // B36: the horizon band of the sky drawn into a panorama: x = direction around the horizon, y = height of the direction.
+    inline constexpr char CAR_SKY_PANO[] = R"hlsl(
+Texture2D g_Band : register( t0 );
+SamplerState g_BandSampler : register( s0 );
+
+struct VertexIn
+{
+    float2 m_Position : POSITION;
+    float2 m_Uv : TEXCOORD0;
+    float4 m_Colour : COLOR0;
+};
+
+struct PixelIn
+{
+    float4 m_Position : SV_Position;
+    float2 m_Uv : TEXCOORD0;
+    float4 m_Colour : COLOR0;
+};
+
+PixelIn MainVS( VertexIn input )
+{
+    PixelIn output;
+    output.m_Position = float4( input.m_Position, 0.0, 1.0 );
+    output.m_Uv = input.m_Uv;
+    output.m_Colour = input.m_Colour;
+    return output;
+}
+
+float4 MainPS( PixelIn input ) : SV_Target
+{
+    return g_Band.Sample( g_BandSampler, input.m_Uv ) * input.m_Colour;
+}
+)hlsl";
+
     inline constexpr char CAR_REFLECT[] = R"hlsl(
 cbuffer CarReflectConstants : register( b0 )
 {
@@ -1144,6 +1178,9 @@ cbuffer CarReflectConstants : register( b0 )
     float4 g_CarFlowView; // xyz direction of travel in view space
     float4 g_Highlight; // 9.15b: x boost of bright reflections ('[CarReflections] HighlightBoost', 0 = off), y brightness from which
     float4 g_Coat; // 9.15b clearcoat: x 1 = on, y strength of the base coat, z its extra blur levels, w how much it takes the paint colour
+    float4 g_EnvX; // B36 sky by direction: view -> world x, w 1 = t3 is the sky panorama
+    float4 g_EnvY; // view -> world y (height)
+    float4 g_EnvZ; // view -> world z
 };
 
 // Weather on the car: a hash per cell of the position in the space of the part (w3; stable on the car, not mirrored like
@@ -1206,6 +1243,7 @@ Texture2D g_Chain : register( t2 ); // shared blur chain: level 0 half the frame
 Texture2D g_SkyImage : register( t3 ); // sky image of the water reflection, previous frame (9.15a, g_SkyColour.w = 2)
 SamplerState g_SceneSampler : register( s0 );
 SamplerState g_TextureSampler : register( s1 );
+SamplerState g_EnvSampler : register( s2 ); // B36: the sky panorama, wraps around the horizon
 
 struct VertexIn
 {
@@ -1265,8 +1303,20 @@ float4 MainPS( PixelIn input ) : SV_Target
     float alpha = paint.a * input.m_Uv.z;
     if ( g_Forward.w >= 0.0 )
         clip( alpha - g_Forward.w );
+    // B34: g_Glass.z above 0 = the car's glass texture on a body part (windows of most cars): its see-through texels reflect
+    // as glass (g_Glass.z strength, g_Glass.w share head on), its opaque frame not at all. On any other texture the half
+    // transparent texels stay cut: there they are only the soft rims of door handles, lamps and decals.
+    bool glass_pixel = false;
     if ( g_Glass.x >= 0.0 && g_Glass.y == 0.0 )
-        clip( alpha - g_Glass.x );
+    {
+        if ( g_Glass.z > 0.0 )
+        {
+            clip( g_Glass.x - alpha );
+            glass_pixel = true;
+        }
+        else
+            clip( alpha - g_Glass.x );
+    }
 
     float3 v = normalize( input.m_View );
     float3 n = normalize( input.m_Normal );
@@ -1274,6 +1324,7 @@ float4 MainPS( PixelIn input ) : SV_Target
         n = -n;
     float facing = saturate( -dot( n, v ) );
     float3 r = reflect( v, n );
+    const float3 r_true = r; // B36: the real direction, before it is folded to the front for the frame lookup
     float3 sky_seen = g_SkyColour.rgb; // what the sky above the frame looks like, and how much of it this direction takes
     float sky_amount = 0.0;
 
@@ -1291,6 +1342,9 @@ float4 MainPS( PixelIn input ) : SV_Target
     float2 p = ( screen + g_Target.xy ) * g_Target.zw * 2.0 - 1.0;
     float edge = max( abs( p.x ), abs( p.y ) );
     float outside = saturate( ( edge - 1.0 ) / 0.3 );
+    // B36: with the sky by direction, what points behind the camera no longer needs the mirrored frame.
+    if ( g_EnvX.w > 0.5 )
+        outside = max( outside, saturate( -along * 5.0 ) );
     p /= max( 1.0, edge / 0.99 );
     // Towards and beyond the edge blurrier and then the mean of the frame, the last row of pixels would become streaks.
     // Levels of the full size frame; a smaller copy ('[CarReflections] SourceScale') starts g_Shape.y levels further down.
@@ -1306,14 +1360,21 @@ float4 MainPS( PixelIn input ) : SV_Target
 
     // Up out of the frame there is sky, not the stretched edge of the frame. Behind the camera the mirrored frame
     // stays: the plain fog colour there made the back of the car look as if it reflected nothing.
-    float strength = g_Params.x;
+    float strength = glass_pixel ? g_Glass.z : g_Params.x;
     if ( has_up )
     {
         float sky = outside * saturate( upward * 4.0 + 0.5 ) * saturate( g_SkyColour.w );
         float3 sky_colour = g_SkyColour.rgb;
         // '[CarReflections] Sky' (9.15a): the sky itself, sky colour and clouds. Above the frame its top row (the direction
         // is pulled onto the edge like the frame lookup), softened by five taps.
-        if ( g_SkyColour.w > 1.001 )
+        if ( g_EnvX.w > 0.5 )
+        {
+            // B36: the sky by its direction in the world, so it stays put when the camera moves.
+            float3 d = normalize( float3( dot( g_EnvX.xyz, r_true ), dot( g_EnvY.xyz, r_true ), dot( g_EnvZ.xyz, r_true ) ) );
+            float2 env_uv = float2( atan2( d.x, d.z ) / 6.2831853 + 0.5, 1.0 - saturate( ( d.y + 0.35 ) / 1.35 ) );
+            sky_colour = g_SkyImage.SampleLevel( g_EnvSampler, env_uv, 1.5 ).rgb;
+        }
+        else if ( g_SkyColour.w > 1.001 )
         {
             float2 sky_uv = float2( saturate( p.x * 0.5 + 0.5 ), clamp( p.y * 0.5 + 0.5, 0.02, 0.98 ) );
             float3 sky_image = g_SkyImage.SampleLevel( g_SceneSampler, sky_uv, 0 ).rgb * 0.4 +
@@ -1330,7 +1391,8 @@ float4 MainPS( PixelIn input ) : SV_Target
         strength *= lerp( g_Up.w, 1.0, saturate( upward * 4.0 + 1.0 ) );
     }
 
-    float fresnel = g_Params.y + ( 1.0 - g_Params.y ) * pow( 1.0 - facing, g_Shape.x );
+    float fresnel = glass_pixel ? g_Glass.w + ( 1.0 - g_Glass.w ) * pow( 1.0 - facing, 3.0 )
+                                : g_Params.y + ( 1.0 - g_Params.y ) * pow( 1.0 - facing, g_Shape.x );
 
     if ( g_Params.w == 1.0 )
         return float4( n * 0.5 + 0.5, 1.0 );
@@ -1343,13 +1405,16 @@ float4 MainPS( PixelIn input ) : SV_Target
     // bright sky, the sun) is boosted and covers more of the paint; the dark ground stays as it was.
     float luma = dot( colour, float3( 0.2126, 0.7152, 0.0722 ) );
     float highlight = max( luma - g_Highlight.y, 0.0 ) * g_Highlight.x;
+    // B34: on glass the sky has its own boost below; both together turned a bright sky into a fully covered, white window.
+    if ( g_Highlight.z > 0.0 )
+        highlight *= 1.0 - sky_amount;
     colour += highlight * colour;
 
     float a = saturate( strength * fresnel );
     // Clearcoat (9.15b, '[CarReflections] ClearCoat'): car paint is a coloured base under a clear lacquer. The lacquer mirrors
     // sharp like glass (4 % head on, all of it at a flat angle, Schlick); the base mirrors soft and in the colour of the paint
     // (taken from the hue of the texture), with what the lacquer lets through. Both laid over the paint in one pass.
-    if ( g_Coat.x > 0.5 )
+    if ( g_Coat.x > 0.5 && !glass_pixel )
     {
         float lacquer = 0.04 + 0.96 * pow( 1.0 - facing, 5.0 );
         float base_level = level + g_Coat.z;
@@ -1368,6 +1433,19 @@ float4 MainPS( PixelIn input ) : SV_Target
         a = coat_a;
     }
     a = saturate( a + saturate( highlight ) * strength );
+    // B34: g_Highlight.z = 'GlassSkyBoost' on glass. The real sky is far brighter than the inside of a car; in this 8 bit frame
+    // both are alike, and 12 % of a grey sky over a light interior changes nothing to see. The sky counts brighter; what does
+    // not fit into the colour goes into the cover, so the light still reaches the screen.
+    if ( g_Highlight.z > 0.0 )
+    {
+        colour *= lerp( 1.0, g_Highlight.z, sky_amount );
+        float peak = max( colour.r, max( colour.g, colour.b ) );
+        if ( peak > 1.0 )
+        {
+            colour /= peak;
+            a = saturate( a * peak );
+        }
+    }
 
     // Rain drops (LFSP CarDrops, w11 = the look of w6 plus a LOD filter and safe maths): the wet paint a little glossier and
     // at most about 5 % darker; up close single clear beads with the bent reflection and a faint glint, further away only
@@ -1661,11 +1739,10 @@ float4 MainPS( float4 position : SV_Position ) : SV_Target
 }
 )hlsl";
 
-    // Ambient occlusion ('[AmbientOcclusion]', after the look of MXAO type 2 the user tuned in ReShade; own code, nothing taken
-    // from it). Horizon based occlusion with a visibility bitmask (Therrien et al. 2023): per slice 32 sectors of the hemisphere
+    // Ambient occlusion ('[AmbientOcclusion]'). Horizon based occlusion with a visibility bitmask (Therrien et al. 2023): per slice 32 sectors of the hemisphere
     // around the normal, each sample covers the sectors between its front and its back face (objects get a thickness), cosine
-    // weighted. Depth z = 1 - n / w of the game (single sampled copy of PackStencil), view space as REFLECT. Fade over the depth
-    // the way ReShade linearises it (far plane F), so 'FadeDepth' means the same as there. Passes, fullscreen triangle of
+    // weighted. Depth z = 1 - n / w of the game (single sampled copy of PackStencil), view space as REFLECT. Fade over the normalised
+    // depth d = z / (F - z (F - 1)) (F = 1000; the driver turns 'FadeDistance' in metres into d). Passes, fullscreen triangle of
     // REFLECT's MainVS: DepthHalfPS / DepthMipPS the pyramid of the linear depth ('DepthMips' 1), MainPS raw occlusion
     // (checkerboard per frame with 'ShadingRate' 1), FilterPS first edge aware regression filter and the accumulation over the
     // frames ('Temporal' 1), ApplyPS second filter and the factor for the frame (multiplicative blend, so MSAA edges stay).
@@ -1679,20 +1756,20 @@ cbuffer AoConstants : register( b0 )
     row_major float4x4 g_ViewOfClip;
     float4 g_Viewport; // fx, fy, cx, cy of the game
     float4 g_Size; // render width, height, near plane n of z = 1 - n / w, frame number
-    float4 g_Params; // x radius ('SampleRadius'), y amount, z fade depth, w far plane F of the ReShade depth
+    float4 g_Params; // x radius ('SampleRadius'), y amount, z fade point on d, w far plane F of the normalised depth d
     float4 g_Quality; // x slices, y samples per side, z shading rate (0 all, 1 checkerboard), w debug (1 = show the raw occlusion)
     float4 g_Filter; // x filter passes (0, 1, 2), y 1 = radius grows with the distance (share of the width), 0 = radius in metres,
                      // z share of the history ('Temporal', 0 = off), w levels of the depth pyramid ('DepthMips', 0 = off)
-    float4 g_Method; // x 'Method' (0 as MXAO, 1 exact), y 'Thickness' scale, z 1 = the last frame can be reprojected, w 'AngleBias' (radians)
-    float4 g_Apply; // x 'MultiBounce', y unused, z fog mode (-1 none, 0 table over z, 1 exp, 2 exp2, 3 linear over z), w fog exponent
-    float4 g_Fog; // fog start, end, density (game render states), w unused
+    float4 g_Method; // x 'Method' (0 standard, 1 exact), y 'Thickness' scale, z 1 = the last frame can be reprojected, w 'AngleBias' (radians)
+    float4 g_Apply; // x 'MultiBounce', y 'Fill' (thicker near occluders, 'Method' 1), z fog mode (-1 none, 0 table over z, 1 exp, 2 exp2, 3 linear over z), w fog exponent
+    float4 g_Fog; // fog start, end, density (game render states), w 1 = MainPS at half size ('HalfRes'), UpsamplePS back
     row_major float4x4 g_PrevClipOfView; // view of this frame -> clip (x, y, w, 1) of the last frame
     float4 g_PrevViewport; // fx, fy, cx, cy of the last frame
     float4 g_FogTable[64]; // visibility through the fog over z of the game table (index z x 255), four per register
 };
 
 Texture2D<float> g_Depth : register( t0 );
-Texture2D<float2> g_Ao : register( t1 ); // x occlusion (1 = open), y depth as ReShade sees it, negative where the normal is unsure
+Texture2D<float2> g_Ao : register( t1 ); // x occlusion (1 = open), y normalised depth d, negative where the normal is unsure
 Texture2D g_Frame : register( t2 ); // the resolved frame (ApplyPS)
 Texture2D<float> g_DepthMips : register( t3 ); // linear depth w, level 0 = half size (MainPS)
 Texture2D<float2> g_History : register( t4 ); // FilterPS's result of the last frame (FilterPS)
@@ -1737,13 +1814,13 @@ float3 ViewAt( int2 pixel )
     return RayAt( pixel + 0.5 ) * DepthW( z );
 }
 
-// Depth the way ReShade linearises it (RESHADE_DEPTH_LINEARIZATION_FAR_PLANE), for the fade; and back to w.
-float ReshadeDepth( float z )
+// Normalised depth d = z / (F - z (F - 1)), for the fade and the depth tests of the filters; and back to w.
+float NormDepth( float z )
 {
     return z / ( g_Params.w - z * ( g_Params.w - 1.0 ) );
 }
 
-float WOfReshade( float d )
+float WOfNorm( float d )
 {
     float z = d * g_Params.w / ( 1.0 + d * ( g_Params.w - 1.0 ) );
     return DepthW( z );
@@ -1838,13 +1915,19 @@ float2 SliceCdf( float2 t, float g )
 
 float2 MainPS( float4 position : SV_Position ) : SV_Target
 {
-    int2 pixel = int2( position.xy );
-    // 'ShadingRate' 1: half the pixels each frame in a checkerboard, the others keep the last value.
-    if ( g_Quality.z > 0.5 && ( ( uint( pixel.x + pixel.y ) & 1u ) != ( uint( g_Size.w ) & 1u ) ) )
+    // 'HalfRes' (g_Fog.w 1): the target is half as wide and high, each of its pixels computes the full size pixel 2x, 2y (a
+    // quarter of the pixels). Radius, samples and normals stay in full size pixels, so the look keeps its scale; UpsamplePS
+    // brings it back. The jitter follows the half size pixel, so the 4 x 4 pattern keeps all 16 values.
+    int2 cell = int2( position.xy );
+    bool half_size = g_Fog.w > 0.5;
+    int2 pixel = half_size ? cell * 2 : cell;
+    float2 centre_at = float2( pixel ) + 0.5;
+    // 'ShadingRate' 1: half the pixels each frame in a checkerboard, the others keep the last value (not with 'HalfRes').
+    if ( !half_size && g_Quality.z > 0.5 && ( ( uint( pixel.x + pixel.y ) & 1u ) != ( uint( g_Size.w ) & 1u ) ) )
         discard;
 
     float z = g_Depth.Load( int3( pixel, 0 ) );
-    float d = ReshadeDepth( z );
+    float d = NormDepth( z );
     float fade = z >= 0.99999 ? 0.0 : FadeOf( d ) * FogVisibility( z );
     if ( fade < 0.001 )
         return float2( 1.0, d );
@@ -1876,20 +1959,20 @@ float2 MainPS( float4 position : SV_Position ) : SV_Target
 
     // Radius: a share of the width on the screen ('IncreaseRadiusWithDistance' 1, then it grows in the world with the distance)
     // or metres in the world. Its size in the world at this depth gives the thickness of the objects.
-    // The pixel size follows the depth along the view axis (as MXAO's p.z), not the distance along the ray: with the ray
+    // The pixel size follows the depth along the view axis, not the distance along the ray: with the ray
     // length the radius shrank towards the screen edges (wide field of view) although the plane at that depth is flat.
     float metres_per_pixel = w_centre * ( 2.0 * g_Viewport.z / g_Size.x ) / abs( g_Viewport.x );
-    // As MXAO: screen radius 0.03 x 'SampleRadius' of the width, or 'SampleRadius' / 2 metres in the world.
+    // Screen radius 0.03 x 'SampleRadius' of the width, or 'SampleRadius' / 2 metres in the world.
     float radius_pixels = g_Filter.y > 0.5 ? g_Params.x * 0.03 * g_Size.x : g_Params.x * 0.5 / max( metres_per_pixel, 1e-6 );
     radius_pixels = min( radius_pixels, g_Size.x * 0.25 );
     float radius_world = radius_pixels * metres_per_pixel;
     float thickness = log( 1.0 + radius_world ) / 3.0 * g_Method.y;
 
-    // Interleaved 4 x 4 jitter. The slice angle and the sample offsets get two different permutations of the 16 values (MXAO
-    // uses one value for both): the 4 x 4 block of the filter then holds 16 different pairs of angle and offset spread over
+    // Interleaved 4 x 4 jitter. The slice angle and the sample offsets get two different permutations of the 16 values (not
+    // one value for both): the 4 x 4 block of the filter then holds 16 different pairs of angle and offset spread over
     // the plane, not 16 pairs on the diagonal where a small angle always came with a near offset (less noise after the filter).
     // With 'Temporal' both move on each frame (R2 sequence), so the accumulation sees new directions and offsets.
-    uint index = ( uint( pixel.x ) & 3u ) + ( uint( pixel.y ) & 3u ) * 4u;
+    uint index = ( uint( cell.x ) & 3u ) + ( uint( cell.y ) & 3u ) * 4u;
     float jitter = ( float( ( index * 11u ) % 16u ) + 0.5 ) / 16.0;
     float jitter_offset = ( float( reversebits( index ) >> 28 ) + 0.5 ) / 16.0;
     if ( g_Filter.z > 0.0 )
@@ -1933,7 +2016,7 @@ float2 MainPS( float4 position : SV_Position ) : SV_Target
             {
                 float s = ( i + jitter_offset ) / samples;
                 float2 offset = dir * sign_side * max( s * s * radius_pixels, 1.0 + i );
-                float2 at = position.xy + offset;
+                float2 at = centre_at + offset;
                 if ( any( at < 0.0 ) || any( at >= g_Size.xy ) )
                     break;
                 int2 tap = int2( at );
@@ -1947,8 +2030,13 @@ float2 MainPS( float4 position : SV_Position ) : SV_Target
                 else
                     w_sample = DepthW( g_Depth.Load( int3( tap, 0 ) ) );
                 float3 delta = ray_sample * w_sample - ( p + lift );
+                // 'Fill' (B35, 'Method' 1): occluders near the centre count as thicker (up to 1 + 4 x Fill), so the light no
+                // longer slips flat under a car between its floor and the road; from half the radius on the normal thickness
+                // (an object far in front of the background gets no dark halo).
+                float near_fill = 1.0 + 4.0 * g_Apply.y * saturate( 1.0 - length( delta ) / max( 0.5 * radius_world, 1e-4 ) );
+                float sample_thickness = exact ? thickness * near_fill : thickness;
                 // Back face: 'Method' 0 behind the centre along its view ray, 'Method' 1 behind the sample along its own.
-                float3 back = exact ? delta + ray_sample * ( thickness * rsqrt( max( dot( ray_sample, ray_sample ), 1e-12 ) ) )
+                float3 back = exact ? delta + ray_sample * ( sample_thickness * rsqrt( max( dot( ray_sample, ray_sample ), 1e-12 ) ) )
                                     : delta - v * thickness;
                 // Angles from the view direction towards the axis side, front face and back face of the sample.
                 float2 cosines = float2( dot( delta, v ), dot( back, v ) ) * rsqrt( max( float2( dot( delta, delta ), dot( back, back ) ), 1e-12 ) );
@@ -1991,6 +2079,47 @@ float2 MainPS( float4 position : SV_Position ) : SV_Target
     ao = lerp( 1.0, ao, fade );
     // Unsure normal (edge): depth negative, the filter takes more of the neighbours there.
     return float2( ao, sure < 0.5 ? -d : d );
+}
+
+// 'HalfRes': the half size occlusion (g_Ao, texel k = full size pixel 2k) back to full size. Each full size pixel takes the
+// half size texels within two pixels (tent over the distance to 2k), weighted by how close their depth is to its own, so the
+// occlusion of the car does not bleed onto the road behind it and back. The depth written is this pixel's own; it is unsure
+// (negative) when the best matching texel was. Without any texel of about its depth, that best one alone.
+float2 UpsamplePS( float4 position : SV_Position ) : SV_Target
+{
+    int2 pixel = int2( position.xy );
+    float z = g_Depth.Load( int3( pixel, 0 ) );
+    float d = NormDepth( z );
+    if ( z >= 0.99999 )
+        return float2( 1.0, d );
+    int2 half_size = max( int2( g_Size.xy ) >> 1, int2( 1, 1 ) );
+    int2 base = pixel >> 1;
+    float tolerance = d * 0.02 + 1e-5;
+    float sum = 0.0;
+    float weight = 0.0;
+    float best_gap = 1e30;
+    float2 best = float2( 1.0, d );
+    [unroll] for ( int y = -1; y <= 1; ++y )
+    {
+        [unroll] for ( int x = -1; x <= 1; ++x )
+        {
+            int2 k = clamp( base + int2( x, y ), int2( 0, 0 ), half_size - 1 );
+            float2 tap = g_Ao.Load( int3( k, 0 ) );
+            float2 apart = abs( float2( k * 2 - pixel ) );
+            float spatial = saturate( 1.0 - apart.x * 0.5 ) * saturate( 1.0 - apart.y * 0.5 );
+            float gap = abs( abs( tap.y ) - d );
+            float w = spatial * saturate( 1.0 - gap / tolerance );
+            sum += tap.x * w;
+            weight += w;
+            if ( gap < best_gap )
+            {
+                best_gap = gap;
+                best = tap;
+            }
+        }
+    }
+    float ao = weight > 1e-4 ? sum / weight : best.x;
+    return float2( ao, best.y < 0.0 ? -d : d );
 }
 
 // Edge aware regression: occlusion as a linear function of depth over a 4 x 4 block (shifted the other way in the second pass).
@@ -2056,7 +2185,7 @@ float Accumulate( int2 pixel, float z, float current, float lowest, float highes
             continue;
         float2 tap = g_History.Load( int3( t, 0 ) );
         float bilinear = ( o.x ? f.x : 1.0 - f.x ) * ( o.y ? f.y : 1.0 - f.y );
-        float w_tap = WOfReshade( abs( tap.y ) );
+        float w_tap = WOfNorm( abs( tap.y ) );
         float match = abs( w_tap - q.z ) < 0.015 * q.z + 0.02 ? 1.0 : 0.0;
         sum += bilinear * match * tap.x;
         weight += bilinear * match;
@@ -2073,7 +2202,7 @@ float2 FilterPS( float4 position : SV_Position ) : SV_Target
     float2 centre = g_Ao.Load( int3( pixel, 0 ) );
     // Depth of this frame (a skipped pixel of the checkerboard still holds the last frame's); the sign (unsure normal) stays.
     float z = g_Depth.Load( int3( pixel, 0 ) );
-    float depth = ReshadeDepth( z ) * ( centre.y < 0.0 ? -1.0 : 1.0 );
+    float depth = NormDepth( z ) * ( centre.y < 0.0 ? -1.0 : 1.0 );
     float lowest = centre.x;
     float highest = centre.x;
     float ao = centre.x;
@@ -2297,9 +2426,6 @@ float4 FillPS( float4 position : SV_Position ) : SV_Target
     // Base under the sky: a pixel with only clear colour left is its own base, else the clear colour of its side.
     float3 base = frame.a > 0.98 ? frame.rgb : ClearOf( p.x, y < 0.5 * ( upper.w + lower.w ) );
     float3 colour = saturate( frame.rgb + ( fill - base ) * frame.a );
-    // 'SkyEdgeFill = 2': red = share of clear colour replaced (bright red = pure fill), green = soft seam, blue line = edge row.
-    if (g_Clear.w > 1.5)
-        return float4( frame.a, 0.6 * seam, abs( y - edge ) < 1.0 ? 1.0 : 0.0, 1.0 );
     return float4( lerp( colour, fill, seam ), 1.0 );
 }
 )hlsl";

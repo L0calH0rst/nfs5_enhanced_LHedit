@@ -8,6 +8,14 @@ LHedit build on top of upstream 1.4.0.
 - `GameplayRedirect` stays `0` in the shipped INI: LFSP reads the car `.tpg` files itself and would not see
   the replaced ones, and the HD textures of the replaced car textures are not checked yet.
 - The LHedit choices for the draw distance stay (`OcclusionEdge`, see 1.3.0-LH.2).
+- Car reflections: windows reflect now (a depth offset meant for headlight beams hid the reflection on them), the
+  interior stays matte, and the sky is looked up by its direction in the world, so bonnet and roof no longer change
+  colour with the camera (`SkyByDirection`).
+- Ambient occlusion: no more facet pattern on the road (`AngleBias`), fuller shadow under cars (`Fill`), three quality
+  levels (`Quality`), fade distance in metres (`FadeDistance`).
+- The action camera stops at track walls (`ActionWallCheck`).
+- The in-game settings menu is removed, it broke the Windows screenshot shortcut. All settings stay in the INI files.
+- The INI files are in English, grouped and explained. Old measuring code and settings are removed.
 
 ## 1.4.0 (2026-11-23)
 

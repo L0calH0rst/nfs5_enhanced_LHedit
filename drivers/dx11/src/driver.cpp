@@ -40,7 +40,6 @@ namespace dx11z
         };
 
         std::vector<GamePatch> g_GamePatches;
-        PVOID g_WatchVeh = nullptr;
 
         std::int64_t PerfNow()
         {
@@ -48,36 +47,6 @@ namespace dx11z
             ::QueryPerformanceCounter( &now );
             return now.QuadPart;
         }
-
-        // '[Dx11] Measure': the time of a scope added to a sum; nested scopes (a flush inside a flush) count once.
-        struct PerfScope
-        {
-            std::int64_t * m_Sum = nullptr;
-            int * m_Depth = nullptr;
-            std::int64_t m_Start = 0;
-
-            PerfScope( bool on, std::int64_t & sum, int & depth )
-            {
-                if (on && depth++ == 0)
-                {
-                    m_Sum = &sum;
-                    m_Start = PerfNow();
-                }
-                if (on)
-                    m_Depth = &depth;
-            }
-
-            ~PerfScope()
-            {
-                if (m_Sum != nullptr)
-                    *m_Sum += PerfNow() - m_Start;
-                if (m_Depth != nullptr)
-                    --*m_Depth;
-            }
-
-            PerfScope( const PerfScope & ) = delete;
-            PerfScope & operator=( const PerfScope & ) = delete;
-        };
 
         void RememberPatch(
             std::uintptr_t address
@@ -602,7 +571,7 @@ namespace dx11z
         m_Device->CreateBuffer( &desc, nullptr, m_ClearConstants.Put() );
         desc.ByteWidth = 368; // MirrorConstants of the scene shader, also the constants of the reflection composite (9.14b: 368)
         m_Device->CreateBuffer( &desc, nullptr, m_MirrorConstants.Put() );
-        desc.ByteWidth = 384; // CarReflectConstants (15.3: + weather on the car, w5: + flow of the drops, 9.15b: + highlight, clearcoat)
+        desc.ByteWidth = 432; // CarReflectConstants (15.3: + weather on the car, w5: + flow of the drops, 9.15b: + highlight, clearcoat, B36: + sky by direction)
         m_Device->CreateBuffer( &desc, nullptr, m_CarReflConstants.Put() );
         desc.ByteWidth = 1296; // AoConstants (shaders::AO; 9zd: + method, apply, fog, last camera, fog table)
         m_Device->CreateBuffer( &desc, nullptr, m_AoConstants.Put() );
@@ -795,6 +764,20 @@ namespace dx11z
             m_Device->CreateInputLayout( car_layout, static_cast<UINT>(std::size( car_layout )), vs->GetBufferPointer(), vs->GetBufferSize(),
                 m_CarReflLayout.Put() );
         }
+        // B36: the sky panorama of the car reflections.
+        if (build( shaders::CAR_SKY_PANO, sizeof( shaders::CAR_SKY_PANO ) - 1, "MainVS", "vs_4_0", vs ) &&
+            build( shaders::CAR_SKY_PANO, sizeof( shaders::CAR_SKY_PANO ) - 1, "MainPS", "ps_4_0", ps ))
+        {
+            m_Device->CreateVertexShader( vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, m_CarSkyPanoVs.Put() );
+            m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_CarSkyPanoPs.Put() );
+            const D3D11_INPUT_ELEMENT_DESC pano_layout[] =
+            {
+                { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                { "COLOR", 0, DXGI_FORMAT_B8G8R8A8_UNORM, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            };
+            m_Device->CreateInputLayout( pano_layout, 3, vs->GetBufferPointer(), vs->GetBufferSize(), m_CarSkyPanoLayout.Put() );
+        }
         // Own rain and snow (16.4 / 16.5).
         if (build( shaders::PRECIP, sizeof( shaders::PRECIP ) - 1, "PrecipVS", "vs_4_0", vs ) &&
             build( shaders::PRECIP, sizeof( shaders::PRECIP ) - 1, "PrecipPS", "ps_4_0", ps ))
@@ -822,6 +805,8 @@ namespace dx11z
             m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_AoDepthHalfPs.Put() );
         if (build( shaders::AO, sizeof( shaders::AO ) - 1, "DepthMipPS", "ps_5_0", ps ))
             m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_AoDepthMipPs.Put() );
+        if (build( shaders::AO, sizeof( shaders::AO ) - 1, "UpsamplePS", "ps_5_0", ps ))
+            m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_AoUpsamplePs.Put() );
         // '[Dx11] SkyEdgeFill' (B32).
         if (build( shaders::SKY_EDGE, sizeof( shaders::SKY_EDGE ) - 1, "ColumnPS", "ps_4_0", ps ))
             m_Device->CreatePixelShader( ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, m_SkyEdgeColumnPs.Put() );
@@ -998,10 +983,6 @@ namespace dx11z
     )
     {
         Driver & self = GetInstance();
-
-        // The settings menu takes mouse and keyboard while it is open.
-        if (self.MenuMessage( window, message, wparam, lparam ))
-            return 0;
 
         const WNDPROC original = self.m_OriginalWndProc;
         const LRESULT result = original != nullptr ? ::CallWindowProcA( original, window, message, wparam, lparam )
@@ -1649,7 +1630,6 @@ namespace dx11z
         m_ConfigMovieFill = ReadIniBool( "MovieFill", true, ini );
         m_MovieSharpness = static_cast<float>(std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Dx11", "MovieSharpness", 33, ini.c_str() )), 0, 100 )) / 100.0f;
         m_TraceLines = static_cast<int>(::GetPrivateProfileIntA( "Dx11", "Trace", 0, ini.c_str() ));
-        m_ConfigMeasure = std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Dx11", "Measure", 0, ini.c_str() )), 0, 2 );
         const int alpha_edge_mode = static_cast<int>(::GetPrivateProfileIntA( "Dx11", "AlphaEdgeFix", 0, ini.c_str() ));
         m_ConfigAlphaEdgeFix = alpha_edge_mode != 0 && alpha_edge_mode != 3; // 1 and 2: the two pass fix
         m_ConfigAlphaToCoverage = alpha_edge_mode == 3; // 3: alpha to coverage, one pass
@@ -1670,7 +1650,7 @@ namespace dx11z
         m_ConfigTestNoZBias = ::GetPrivateProfileIntA( "Dx11", "TestNoZBias", 0, ini.c_str() ) != 0;
         m_ConfigTestDraw = static_cast<int>(::GetPrivateProfileIntA( "Dx11", "TestDraw", 0, ini.c_str() ));
         Log( "Config TestNoZBias %d TestDraw %d", m_ConfigTestNoZBias ? 1 : 0, m_ConfigTestDraw );
-        m_ConfigSkyEdgeFill = std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Dx11", "SkyEdgeFill", 1, ini.c_str() )), 0, 2 );
+        m_ConfigSkyEdgeFill = std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Dx11", "SkyEdgeFill", 1, ini.c_str() )), 0, 1 );
         m_ConfigSkyEdgeBlend = static_cast<float>(std::clamp( static_cast<int>(::GetPrivateProfileIntA( "Dx11", "SkyEdgeBlend", 12, ini.c_str() )), 0, 64 ));
         Log( "Config SkyEdgeFill %d SkyEdgeBlend %.0f", m_ConfigSkyEdgeFill, m_ConfigSkyEdgeBlend );
         Log( "Config AlphaMipScale %.2f TestNoMips %d TestVertexAlpha %d", m_ConfigAlphaMipScale, m_ConfigTestNoMips ? 1 : 0,
@@ -1678,38 +1658,11 @@ namespace dx11z
         Log( "Config AlphaEdgeFix %d AlphaEdgeRef %d ForceTwoSided %d", m_ConfigAlphaToCoverage ? 3 : (m_ConfigAlphaEdgeFix ? 1 : 0), m_ConfigAlphaEdgeRef,
             m_ConfigForceTwoSided ? 1 : 0 );
 
-        if (m_ConfigMeasure > 0)
-        {
-            Log( "Config Measure %d", m_ConfigMeasure );
-            InstallLightHook();
-        }
 
         // The light switches belong to the LFSP mod: '[Lights]' in lfsp.ini next to the game (doc/LICHT.md 8.2a).
         // A key missing there is still read from '[Dx11]' of nfs5_enhanced.ini (installs before 9.11b).
         const std::string lights_ini = (slash != std::string::npos ? std::string( path, slash + 1 ) : std::string()) + "lfsp.ini";
         m_LfspIni = lights_ini;
-        // Settings menu key ('[Menu] Key'): F1 ... F12, one character, a hex virtual key ("0x77"); empty = no menu.
-        {
-            char key[32] = {};
-            ::GetPrivateProfileStringA( "Menu", "Key", "F8", key, sizeof( key ), lights_ini.c_str() );
-            std::string name = key;
-            while (!name.empty() && (name.back() == ' ' || name.back() == '\t'))
-                name.pop_back();
-            for (char & c : name)
-                c = static_cast<char>(std::toupper( static_cast<unsigned char>(c) ));
-            m_MenuKey = 0;
-            if (name.size() >= 2 && name[0] == 'F' && std::isdigit( static_cast<unsigned char>(name[1]) ))
-            {
-                const int number = std::atoi( name.c_str() + 1 );
-                if (number >= 1 && number <= 12)
-                    m_MenuKey = VK_F1 + number - 1;
-            }
-            else if (name.size() == 1)
-                m_MenuKey = static_cast<unsigned char>(name[0]);
-            else if (name.rfind( "0X", 0 ) == 0)
-                m_MenuKey = static_cast<int>(std::strtol( name.c_str() + 2, nullptr, 16 ));
-            Log( "Config menu key '%s' (0x%02X)", name.c_str(), m_MenuKey );
-        }
         const auto light_value = [&]( const char * key, const char * fallback ) -> std::string
         {
             char value[MAX_PATH] = {};
@@ -1792,7 +1745,7 @@ namespace dx11z
             "width %.2f spread %.2f", m_ConfigTailGlow, m_ConfigTailColour, m_ConfigTailStrength, m_ConfigTailLights, m_ConfigTailBrake,
             m_ConfigTailSignals, m_ConfigTailReverse, m_ConfigTailOffset, m_ConfigTailReach, m_ConfigTailWidth, m_ConfigTailSpread );
 
-        m_ConfigHeadlightsObjects = std::clamp( std::atoi( light_value( "HeadlightsObjects", "1" ).c_str() ), 0, 2 );
+        m_ConfigHeadlightsObjects = std::clamp( std::atoi( light_value( "HeadlightsObjects", "1" ).c_str() ), 0, 1 );
         Log( "Config HeadlightsObjects %d", m_ConfigHeadlightsObjects );
 
         // Water reflections, '[Water]' of lfsp.ini (doc/BUGS.md B15 §12).
@@ -1895,18 +1848,12 @@ namespace dx11z
         m_ConfigCarLightRadius = std::clamp( static_cast<float>(std::atof( light_value( "CarLightRadius", "250" ).c_str() )), 50.0f, 1000.0f );
         m_ConfigMaxCarLights = std::clamp( std::atoi( light_value( "MaxCarLights", "16" ).c_str() ), 1, MAX_CAR_LIGHTS );
         m_ConfigCoverageMid = std::clamp( static_cast<float>(std::atof( light_value( "AlphaCoverageMid", "0.12" ).c_str() )), 0.0f, 1.0f );
-        m_ConfigFpsLog = std::clamp( std::atoi( light_value( "FpsLog", "0" ).c_str() ), 0, 600 );
         m_ConfigEarlyZ = std::clamp( std::atoi( light_value( "EarlyZ", "2" ).c_str() ), 0, 2 );
         m_ConfigLightCulling = std::clamp( std::atoi( light_value( "LightCulling", "1" ).c_str() ), 0, 1 );
         m_ConfigNightGradeBlended = std::clamp( std::atoi( light_value( "NightGradeBlended", "1" ).c_str() ), 0, 1 );
-        m_ConfigProfile = std::clamp( std::atoi( light_value( "FrameProfile", "0" ).c_str() ), 0, 600 );
         Log( "Config lights from '%s' [Lights] (missing keys from [Dx11]): HeadlightsOpponents %d strength %.2f range %.2f, traffic range %.2f, "
             "CarLightRadius %.0f", lights_ini.c_str(), m_ConfigOpponents, m_ConfigOpponentsStrength, m_ConfigOpponentsRange, m_ConfigTrafficRange,
             m_ConfigCarLightRadius );
-
-        // Car reflections, '[CarReflections]' of lfsp.ini (PLAN.md 9, stage 1): measurement of the game's environment layer.
-        m_ConfigCarEnvMeasure = std::clamp( static_cast<int>(::GetPrivateProfileIntA( "CarReflections", "Measure", 0, lights_ini.c_str() )), 0, 1 );
-        Log( "Config car reflections: Measure %d", m_ConfigCarEnvMeasure );
 
         // Stage 2 (PLAN.md 9.12b): own reflection pass over the car bodies.
         {
@@ -1927,7 +1874,6 @@ namespace dx11z
             m_ConfigCarReflF0 = std::clamp( static_cast<float>(std::atof( car_value( "Reflectance", "0.15" ).c_str() )), 0.0f, 1.0f );
             m_ConfigCarReflBlur = std::clamp( static_cast<float>(std::atof( car_value( "Blur", "2.0" ).c_str() )), 0.0f, 8.0f );
             m_ConfigCarReflFresnel = std::clamp( static_cast<float>(std::atof( car_value( "Fresnel", "3.0" ).c_str() )), 1.0f, 8.0f );
-            m_ConfigCarReflGlass = std::clamp( std::atoi( car_value( "Glass", "0" ).c_str() ), 0, 1 );
             m_ConfigCarReflInterval = std::clamp( std::atoi( car_value( "UpdateInterval", "1" ).c_str() ), 1, 8 );
             m_ConfigCarReflMinSize = std::clamp( static_cast<float>(std::atof( car_value( "MinSize", "0" ).c_str() )), 0.0f, 400.0f );
             m_ConfigCarReflDebug = std::clamp( std::atoi( car_value( "Debug", "0" ).c_str() ), 0, 3 );
@@ -1936,7 +1882,7 @@ namespace dx11z
             m_ConfigCarReflMatteGrey = std::clamp( std::atoi( car_value( "MatteGrey", "0" ).c_str() ), 0, 1 );
             m_ConfigCarReflSkipAlphaMid = std::clamp( static_cast<float>(std::atof( car_value( "SkipAlphaMid", "0.3" ).c_str() )), 0.0f, 1.0f );
             {
-                const std::string glass = car_value( "GlassParts", "35,47,48" );
+                const std::string glass = car_value( "GlassParts", "35,47,48,50,54" );
                 m_ConfigCarReflGlassParts.clear();
                 for (std::size_t at = 0; at < glass.size();)
                 {
@@ -1951,8 +1897,23 @@ namespace dx11z
                 }
                 m_ConfigCarReflGlassStrength = std::clamp( static_cast<float>(std::atof( car_value( "GlassStrength", "0.5" ).c_str() )), 0.0f, 1.0f );
                 m_ConfigCarReflGlassF0 = std::clamp( static_cast<float>(std::atof( car_value( "GlassReflectance", "0.12" ).c_str() )), 0.0f, 1.0f );
-                Log( "Config car reflections: glass parts '%s' as glass (strength %.2f, reflectance %.2f), SkipAlphaMid %.2f", glass.c_str(),
-                    m_ConfigCarReflGlassStrength, m_ConfigCarReflGlassF0, m_ConfigCarReflSkipAlphaMid );
+                m_ConfigCarReflGlassSkyBoost = std::clamp( static_cast<float>(std::atof( car_value( "GlassSkyBoost", "2" ).c_str() )), 1.0f, 8.0f );
+                const std::string skip_parts = car_value( "SkipParts", "19,20,21,40" );
+                m_ConfigCarReflSkipParts.clear();
+                for (std::size_t at = 0; at < skip_parts.size();)
+                {
+                    const std::size_t end = std::min( skip_parts.find_first_of( ", ", at ), skip_parts.size() );
+                    if (end > at)
+                    {
+                        const int part = std::atoi( skip_parts.substr( at, end - at ).c_str() );
+                        if (part >= 0 && part < 256)
+                            m_ConfigCarReflSkipParts.push_back( part );
+                    }
+                    at = end + 1;
+                }
+                Log( "Config car reflections: glass parts '%s' as glass (strength %.2f, reflectance %.2f, sky boost %.1f), SkipAlphaMid %.2f, "
+                    "no reflection on parts '%s'", glass.c_str(), m_ConfigCarReflGlassStrength, m_ConfigCarReflGlassF0,
+                    m_ConfigCarReflGlassSkyBoost, m_ConfigCarReflSkipAlphaMid, skip_parts.c_str() );
             }
             // '[CarReflections] SourceScale' (9.13d): size of the frame copy, 1 = full, 0.5 = half (the blur level keeps the look).
             m_ConfigCarReflSourceScale = std::atof( car_value( "SourceScale", "1" ).c_str() ) < 0.75 ? 0.5f : 1.0f;
@@ -1963,6 +1924,8 @@ namespace dx11z
             m_ConfigCarReflSkyHold = std::clamp( static_cast<float>(std::atof( car_value( "SkyHold", "-1" ).c_str() )), -1.0f, 3600.0f );
             Log( "Config car reflections: Sky %d (sky image of the water reflection, needs '[Water] ReflectionSky'), SkyHold %.1f s",
                 m_ConfigCarReflSky, m_ConfigCarReflSkyHold );
+            m_ConfigCarReflSkyPanorama = std::clamp( std::atoi( car_value( "SkyByDirection", "1" ).c_str() ), 0, 1 );
+            Log( "Config car reflections: SkyByDirection %d (B36)", m_ConfigCarReflSkyPanorama );
             // 9.15b: highlights, crease angle of the normals, clearcoat; all off by default.
             m_ConfigCarReflHighlightBoost = std::clamp( static_cast<float>(std::atof( car_value( "HighlightBoost", "0" ).c_str() )), 0.0f, 16.0f );
             m_ConfigCarReflHighlightThreshold = std::clamp( static_cast<float>(std::atof( car_value( "HighlightThreshold", "0.75" ).c_str() )), 0.0f, 1.0f );
@@ -1983,7 +1946,7 @@ namespace dx11z
             m_ConfigCarReflSeamFix = std::clamp( std::atoi( car_value( "SeamFix", "0" ).c_str() ), 0, 1 );
             Log( "Config car reflections 9.15e: ObjectNormals %d, SeamFix %d (needs ObjectNormals)", m_ConfigCarReflObjectNormals,
                 m_ConfigCarReflSeamFix );
-            // Ambient occlusion ('[AmbientOcclusion]'): the keys of MXAO, defaults the values the user tuned in ReShade.
+            // Ambient occlusion ('[AmbientOcclusion]').
             {
                 const auto ao_value = [&]( const char * key, const char * fallback ) -> std::string
                 {
@@ -1992,8 +1955,8 @@ namespace dx11z
                     return value;
                 };
                 m_ConfigAo = std::clamp( std::atoi( ao_value( "Enable", "0" ).c_str() ), 0, 1 );
-                // 'Quality' 0 Niedrig, 1 Mittel, 2 Hoch. Without it the old 'SampleQuality' (0 Low ... 6 IDGAF) maps to the
-                // nearest remaining level: Low/Medium -> Niedrig, High -> Mittel, Very High and above -> Hoch.
+                // 'Quality' 0 low, 1 medium, 2 high. Without it the old 'SampleQuality' (0 ... 6) maps to the nearest
+                // remaining level: 0/1 -> low, 2 -> medium, 3 and above -> high.
                 {
                     const std::string quality = ao_value( "Quality", "" );
                     if (!quality.empty())
@@ -2008,23 +1971,41 @@ namespace dx11z
                 m_ConfigAoRadius = std::clamp( static_cast<float>(std::atof( ao_value( "SampleRadius", "1.893" ).c_str() )), 0.5f, 10.0f );
                 m_ConfigAoGrow = std::clamp( std::atoi( ao_value( "IncreaseRadiusWithDistance", "1" ).c_str() ), 0, 1 );
                 m_ConfigAoAmount = std::clamp( static_cast<float>(std::atof( ao_value( "Amount", "1.0" ).c_str() )), 0.0f, 2.0f );
-                m_ConfigAoFade = std::clamp( static_cast<float>(std::atof( ao_value( "FadeDepth", "0.333" ).c_str() )), 0.01f, 1.0f );
+                // 'FadeDistance' in metres. INIs before it have 'FadeDepth' (0 ... 1 on the normalised depth with far plane
+                // 'FadeFarPlane'); those keep working unchanged as long as 'FadeDistance' is missing.
+                {
+                    const std::string distance = ao_value( "FadeDistance", "" );
+                    const std::string old_fade = ao_value( "FadeDepth", "" );
+                    if (!distance.empty() || old_fade.empty())
+                        m_ConfigAoFadeDistance = std::clamp( static_cast<float>(std::atof( distance.empty() ? "250" : distance.c_str() )), 1.0f, 20000.0f );
+                    else
+                    {
+                        m_ConfigAoFadeDistance = -1.0f;
+                        m_ConfigAoFade = std::clamp( static_cast<float>(std::atof( old_fade.c_str() )), 0.01f, 1.0f );
+                        m_ConfigAoFarPlane = std::clamp( static_cast<float>(std::atof( ao_value( "FadeFarPlane", "1000" ).c_str() )), 10.0f, 100000.0f );
+                    }
+                }
                 m_ConfigAoFilter = std::clamp( std::atoi( ao_value( "FilterQuality", "2" ).c_str() ), 0, 2 );
                 m_ConfigAoDebug = std::clamp( std::atoi( ao_value( "Debug", "0" ).c_str() ), 0, 1 );
-                m_ConfigAoFarPlane = std::clamp( static_cast<float>(std::atof( ao_value( "FadeFarPlane", "1000" ).c_str() )), 10.0f, 100000.0f );
                 // 9zd: exact weighting, thickness, depth pyramid, accumulation over the frames, multi bounce, fog.
                 m_ConfigAoMethod = std::clamp( std::atoi( ao_value( "Method", "0" ).c_str() ), 0, 1 );
                 m_ConfigAoThickness = std::clamp( static_cast<float>(std::atof( ao_value( "Thickness", "1.0" ).c_str() )), 0.1f, 4.0f );
                 m_ConfigAoAngleBias = std::clamp( static_cast<float>(std::atof( ao_value( "AngleBias", "10" ).c_str() )), 0.0f, 30.0f );
+                m_ConfigAoFill = std::clamp( static_cast<float>(std::atof( ao_value( "Fill", "0.35" ).c_str() )), 0.0f, 1.0f );
                 m_ConfigAoDepthMips = std::clamp( std::atoi( ao_value( "DepthMips", "0" ).c_str() ), 0, 1 );
+                m_ConfigAoHalfRes = std::clamp( std::atoi( ao_value( "HalfRes", "0" ).c_str() ), 0, 1 );
                 m_ConfigAoTemporal = std::clamp( std::atoi( ao_value( "Temporal", "0" ).c_str() ), 0, 1 );
                 m_ConfigAoTemporalBlend = std::clamp( static_cast<float>(std::atof( ao_value( "TemporalBlend", "0.85" ).c_str() )), 0.0f, 0.97f );
                 m_ConfigAoMultiBounce = std::clamp( std::atoi( ao_value( "MultiBounce", "0" ).c_str() ), 0, 1 );
                 m_ConfigAoFogFade = std::clamp( std::atoi( ao_value( "FogFade", "0" ).c_str() ), 0, 1 );
-                Log( "Config ambient occlusion: Enable %d, Quality %d, ShadingRate %d, SampleRadius %.3f, IncreaseRadiusWithDistance %d, Amount %.2f, FadeDepth %.3f, FilterQuality %d, Debug %d, FadeFarPlane %.0f",
-                    m_ConfigAo, m_ConfigAoQuality, m_ConfigAoShadingRate, m_ConfigAoRadius, m_ConfigAoGrow, m_ConfigAoAmount, m_ConfigAoFade, m_ConfigAoFilter,
-                    m_ConfigAoDebug, m_ConfigAoFarPlane );
-                Log( "Config ambient occlusion: AngleBias %.1f", m_ConfigAoAngleBias );
+                Log( "Config ambient occlusion: Enable %d, Quality %d, ShadingRate %d, SampleRadius %.3f, IncreaseRadiusWithDistance %d, Amount %.2f, FadeDistance %.0f m%s, FilterQuality %d, Debug %d",
+                    m_ConfigAo, m_ConfigAoQuality, m_ConfigAoShadingRate, m_ConfigAoRadius, m_ConfigAoGrow, m_ConfigAoAmount,
+                    m_ConfigAoFadeDistance > 0.0f ? m_ConfigAoFadeDistance : 0.0f, m_ConfigAoFadeDistance > 0.0f ? "" : " (old FadeDepth/FadeFarPlane)",
+                    m_ConfigAoFilter, m_ConfigAoDebug );
+                if (m_ConfigAoFadeDistance <= 0.0f)
+                    Log( "Config ambient occlusion: old keys FadeDepth %.3f FadeFarPlane %.0f, please use FadeDistance (metres)", m_ConfigAoFade,
+                        m_ConfigAoFarPlane );
+                Log( "Config ambient occlusion: AngleBias %.1f, Fill %.2f, HalfRes %d", m_ConfigAoAngleBias, m_ConfigAoFill, m_ConfigAoHalfRes );
                 Log( "Config ambient occlusion (9zd): Method %d, Thickness %.2f, DepthMips %d, Temporal %d, TemporalBlend %.2f, MultiBounce %d, FogFade %d",
                     m_ConfigAoMethod, m_ConfigAoThickness, m_ConfigAoDepthMips, m_ConfigAoTemporal, m_ConfigAoTemporalBlend, m_ConfigAoMultiBounce,
                     m_ConfigAoFogFade );
@@ -2058,7 +2039,6 @@ namespace dx11z
                 }
                 at = end + 1;
             }
-            m_ConfigCarReflOnlyPart = std::clamp( std::atoi( car_value( "OnlyPart", "-1" ).c_str() ), -1, 255 );
             {
                 const std::string solid = car_value( "MatteSolid", "41" );
                 m_ConfigCarReflMatteSolid.clear();
@@ -2076,9 +2056,9 @@ namespace dx11z
                 Log( "Config car reflections: matte solid '%s', keep %d, grey %d", solid.c_str(), m_ConfigCarReflMatteKeep,
                     m_ConfigCarReflMatteGrey );
             }
-            Log( "Config car reflections: Reflections %d strength %.2f reflectance %.2f fresnel %.1f blur %.1f ground %.2f glass %d debug %d, skip '%s', "
-                "matte '%s', only part %d", m_ConfigCarRefl, m_ConfigCarReflStrength, m_ConfigCarReflF0, m_ConfigCarReflFresnel, m_ConfigCarReflBlur, m_ConfigCarReflGround,
-                m_ConfigCarReflGlass, m_ConfigCarReflDebug, skip.c_str(), matte.c_str(), m_ConfigCarReflOnlyPart );
+            Log( "Config car reflections: Reflections %d strength %.2f reflectance %.2f fresnel %.1f blur %.1f ground %.2f debug %d, skip '%s', "
+                "matte '%s'", m_ConfigCarRefl, m_ConfigCarReflStrength, m_ConfigCarReflF0, m_ConfigCarReflFresnel, m_ConfigCarReflBlur, m_ConfigCarReflGround,
+                m_ConfigCarReflDebug, skip.c_str(), matte.c_str() );
             Log( "Config car reflections: SourceScale %.1f, BlurChain %d", m_ConfigCarReflSourceScale, m_ConfigCarReflBlurChain );
             if (m_ConfigCarRefl > 0)
                 InstallCarReflHook();
@@ -2115,7 +2095,7 @@ namespace dx11z
             m_ConfigHeadlightsDay, m_ConfigDayStrength, m_ConfigDayColour, m_ConfigDayRange,
             m_ConfigHeadMapFile.empty() ? "game" : m_ConfigHeadMapFile.c_str() );
 
-        if (m_ConfigHeadlights > 0 || m_ConfigMeasure > 0)
+        if (m_ConfigHeadlights > 0)
         {
             InstallHeadlightHooks();
         }
@@ -2309,7 +2289,6 @@ namespace dx11z
 
     void Driver::ReleaseAll()
     {
-        MenuShutdown();
         if (m_Context)
         {
             m_Context->ClearState();
@@ -2413,7 +2392,10 @@ namespace dx11z
         m_AoApplyPs.Reset();
         m_AoDepthHalfPs.Reset();
         m_AoDepthMipPs.Reset();
-        m_ReflTimings = {};
+        m_AoUpsamplePs.Reset();
+        m_AoHalfRtv.Reset();
+        m_AoHalfSrv.Reset();
+        m_AoHalf.Reset();
         m_MirrorConstants.Reset();
         m_ReflBlends.clear();
         m_ReflNoColour.Reset();
@@ -2508,8 +2490,6 @@ namespace dx11z
                     color[3] = 1.0f;
                     std::memcpy( m_SkyEdgeClear, color, sizeof( color ) );
                     m_SkyEdgeState = 1;
-                    m_SkyEdgeLogging = m_ConfigSkyEdgeFill == 2 && ::GetTickCount64() >= m_SkyEdgeLogNext;
-                    m_SkyEdgeLogIndex = 0;
                 }
                 m_Context->ClearRenderTargetView( m_FrameView.Get(), color );
             }
@@ -2584,53 +2564,8 @@ namespace dx11z
     }
 
 
-    void Driver::PerfReport()
-    {
-        if (m_PerfFrames > 0)
-        {
-            LARGE_INTEGER frequency = {};
-            ::QueryPerformanceFrequency( &frequency );
-            const double ms = 1000.0 / static_cast<double>(std::max<LONGLONG>( frequency.QuadPart, 1 )) / static_cast<double>(m_PerfFrames);
-            const double frame = static_cast<double>(m_PerfFrameTicks) * ms;
-            const double flush = static_cast<double>(m_PerfFlushTicks) * ms;
-            const double refl = static_cast<double>(m_PerfReflTicks) * ms;
-            const double present = static_cast<double>(m_PerfPresentTicks) * ms;
-            Log( "Frame time: %.2f ms (%.0f fps, %llu frames), driver batches %.2f, water reflections %.2f (CPU), Present %.2f (waiting for "
-                "the GPU or VSync), game and rest %.2f", frame, frame > 0.0 ? 1000.0 / frame : 0.0, static_cast<unsigned long long>(m_PerfFrames),
-                flush, refl, present, frame - flush - refl - present );
-        }
-        m_PerfFrameTicks = m_PerfFlushTicks = m_PerfReflTicks = m_PerfPresentTicks = 0;
-        m_PerfFrames = 0;
-
-        // The textures with the most triangles since the last report.
-        std::vector<std::pair<std::uint32_t, std::uint64_t>> triangles( m_MeasureTexTriangles.begin(), m_MeasureTexTriangles.end() );
-        const std::size_t shown = std::min<std::size_t>( triangles.size(), 12 );
-        std::partial_sort( triangles.begin(), triangles.begin() + shown, triangles.end(),
-            []( const auto & a, const auto & b ) { return a.second > b.second; } );
-        const std::uint64_t flips = std::max<std::uint64_t>( m_FlipCount - m_PerfReportFlip, 1 );
-        for (std::size_t i = 0; i < shown; ++i)
-            Log( "Frame time:   texture %08X %.0f triangles per frame", triangles[i].first,
-                static_cast<double>(triangles[i].second) / static_cast<double>(flips) );
-        Log( "Frame time:   skid marks %.0f triangles per frame (not in the water reflections)",
-            static_cast<double>(m_MeasureSkidTriangles) / static_cast<double>(flips) );
-        m_MeasureTexTriangles.clear();
-        m_MeasureSkidTriangles = 0;
-        m_PerfReportFlip = m_FlipCount;
-    }
-
-
     void Driver::PageFlip()
     {
-        if (m_ConfigMeasure > 0)
-        {
-            const std::int64_t now = PerfNow();
-            if (m_PerfFrameStart != 0)
-            {
-                m_PerfFrameTicks += now - m_PerfFrameStart;
-                ++m_PerfFrames;
-            }
-            m_PerfFrameStart = now;
-        }
 
         ++m_FlipCount;
         // B36: a sky image held without water ('SkyHold' -1) belongs to its race; the menus end it.
@@ -2639,7 +2574,6 @@ namespace dx11z
             m_SkyImageFlip = 0xFFFFFFFFu;
             m_CarSkyBlend = 0.0f;
         }
-        m_CopyOrderDraws = 0;
         m_HeadMesh = false;
         m_HeadFrameValid = false;
         m_DayMesh = false;
@@ -2654,44 +2588,10 @@ namespace dx11z
         m_ReflSkyPhase = true;
         m_ReflSkyRun = false;
         LogLampTable();
-        if (m_ConfigCarEnvMeasure > 0)
-            CarEnvFlip();
         if (m_ConfigCarRefl > 0)
             CarReflReport();
         ProbeFlip();
-        ProfileFrameEnd();
-        FpsFlip();
 
-        if (m_ConfigMeasure > 0 && ::GetTickCount64() >= m_MeasureNextReport)
-        {
-            if (m_MeasureNextReport != 0)
-            {
-                PerfReport();
-                MeasureReport( "periodic" );
-            }
-
-            m_MeasureNextReport = ::GetTickCount64() + 10000;
-        }
-
-        // Scroll Lock records the next frame, reported at its flip. Not F11: the game maps F1-F12 to its own
-        // keys, F11 steps the scenery detail (doc/LICHT.md 6.13).
-        if (m_ConfigMeasure > 0)
-        {
-            CheckWatch();
-
-            if (m_MeasureSnapActive)
-            {
-                MeasureSnapReport();
-                m_MeasureSnapActive = false;
-                m_WatchDoneThisSnap = false;
-                m_HeadlightLogged = false;
-                m_HeadValidated = false;
-            }
-
-            const bool key = (::GetAsyncKeyState( VK_SCROLL ) & 0x8000) != 0;
-            m_MeasureSnapActive = key && !m_MeasureSnapKey;
-            m_MeasureSnapKey = key;
-        }
 
         if (m_Locked)
             UnlockWindow( nullptr );
@@ -3005,9 +2905,6 @@ namespace dx11z
             DrawProbe();
         }
 
-        // Settings menu ('[Menu] Key') over everything.
-        MenuFrame();
-
         // Nothing to show while minimized, a short wait keeps the paused game from spinning.
         if (::IsIconic( m_Window ))
         {
@@ -3019,7 +2916,6 @@ namespace dx11z
         BOOL fullscreen = FALSE;
         m_SwapChain->GetFullscreenState( &fullscreen, nullptr );
         const UINT flags = !m_ConfigVsync && m_AllowTearing && !fullscreen ? static_cast<UINT>(DXGI_PRESENT_ALLOW_TEARING) : 0u;
-        const PerfScope perf( m_ConfigMeasure > 0, m_PerfPresentTicks, m_PerfDepth );
         m_SwapChain->Present( m_ConfigVsync ? 1 : 0, flags );
     }
 
@@ -3643,19 +3539,7 @@ namespace dx11z
             texture->m_Bytes += formats::UploadPitch( texture->m_Format, w ) * rows;
         }
 
-        m_MeasureTextureBytes += texture->m_Bytes;
 
-        if (m_ConfigMeasure > 0)
-        {
-            const std::uint64_t key = (static_cast<std::uint64_t>(texture->m_Format & 0xFF) << 48) |
-                (static_cast<std::uint64_t>(width & 0xFFFF) << 32) | (static_cast<std::uint64_t>(height & 0xFFFF) << 16) |
-                static_cast<std::uint64_t>(texture->m_Levels & 0xFFFF);
-
-            if (m_MeasureAllocs[key]++ == 0)
-            {
-                Log( "M3T talloc %s %dx%d levels %d", FormatName( texture->m_Format ), width, height, texture->m_Levels );
-            }
-        }
 
         Texture * raw = texture.get();
         m_Textures.emplace( raw, std::move( texture ) );
@@ -3700,11 +3584,6 @@ namespace dx11z
             source += 8;
         }
 
-        if (m_ConfigMeasure > 0 && ++texture->m_Updates == 2)
-        {
-            ++m_MeasureDynamic;
-            Log( "M3T dynamic texture %s %dx%d levels %d", FormatName( texture->m_Format ), texture->m_Width, texture->m_Height, texture->m_Levels );
-        }
 
         std::vector<std::uint8_t> converted;
         int width = texture->m_Width;
@@ -3752,6 +3631,15 @@ namespace dx11z
                             for (std::size_t i = 0; i < 8; ++i)
                                 lowest = std::min<std::uint8_t>( lowest, std::min<std::uint8_t>( converted[block * 16 + i] & 0x0F, converted[block * 16 + i] >> 4 ) );
                         texture->m_AlphaMin = static_cast<std::uint8_t>(lowest * 17);
+                        std::size_t half = 0, clear = 0;
+                        for (std::size_t block = 0; block < blocks; ++block)
+                            for (std::size_t i = 0; i < 8; ++i)
+                                for (const int a : { converted[block * 16 + i] & 0x0F, converted[block * 16 + i] >> 4 })
+                                {
+                                    half += a >= 6 && a <= 10 ? 1u : 0u;
+                                    clear += a == 0 ? 1u : 0u;
+                                }
+                        texture->m_GlassPage = blocks > 0 && half * 100 >= blocks * 16 * 45 && clear * 100 < blocks * 16 * 2;
                     }
                 }
                 else
@@ -3773,6 +3661,14 @@ namespace dx11z
                     for (std::size_t i = 0; i < count; ++i)
                         lowest = std::min( lowest, texels[i] >> 24 );
                     texture->m_AlphaMin = static_cast<std::uint8_t>(lowest);
+                    std::size_t half = 0, clear = 0;
+                    for (std::size_t i = 0; i < count; ++i)
+                    {
+                        const std::uint32_t alpha = texels[i] >> 24;
+                        half += alpha >= 96 && alpha <= 176 ? 1u : 0u;
+                        clear += alpha == 0 ? 1u : 0u;
+                    }
+                    texture->m_GlassPage = count > 0 && half * 100 >= count * 45 && clear * 100 < count * 2;
                 }
             }
             m_Context->UpdateSubresource( texture->m_Texture.Get(), static_cast<UINT>( level ), nullptr, converted.data(), static_cast<UINT>( pitch ), 0 );
@@ -3805,8 +3701,6 @@ namespace dx11z
         }
 
         it->second->m_Magic = 0;
-        m_MeasureUv.erase( it->first );
-        m_MeasureTextureBytes -= std::min( m_MeasureTextureBytes, it->second->m_Bytes );
         m_Textures.erase( it );
         return 1;
     }
@@ -3816,10 +3710,6 @@ namespace dx11z
     {
         Flush();
 
-        if (m_ConfigMeasure > 0)
-        {
-            MeasureReport( "texture reset" );
-        }
         m_Bound.fill( nullptr );
 
         for (auto & entry : m_Textures)
@@ -3828,8 +3718,6 @@ namespace dx11z
         }
 
         m_Textures.clear();
-        m_MeasureUv.clear();
-        m_MeasureTextureBytes = 0;
 
         // dx7z counts resets in state 37 and unbinds stage 0.
         StoreState( 0x37, static_cast<std::uint32_t>(GetState( 0x37 ) + 1) );
@@ -5078,11 +4966,6 @@ namespace dx11z
             desc.MaxLOD = mip <= 1 || m_ConfigTestNoMips ? 0.0f : D3D11_FLOAT32_MAX;
             m_Device->CreateSamplerState( &desc, cached.Put() );
 
-            if (m_ConfigMeasure > 0 && m_MeasureSamplers[key]++ == 0)
-            {
-                Log( "M3T sampler mag %u min %u mip %u (game %u) bias %.2f aniso %u address %u/%u", s[tss::MAGFILTER], s[tss::MINFILTER], mip, game_mip,
-                    desc.MipLODBias, anisotropic ? desc.MaxAnisotropy : 0u, s[tss::ADDRESSU], s[tss::ADDRESSV] );
-            }
         }
 
         m_SamplerKeys[index] = key;
@@ -5185,17 +5068,6 @@ namespace dx11z
                 same = same && (region.m_Size == 0 || std::memcmp( last + region.m_Offset, source + region.m_Offset, region.m_Size ) == 0);
             if (same)
                 return;
-            if (m_ConfigProfile > 0)
-            {
-                std::size_t field = 31;
-                for (std::size_t chunk = 0; chunk < regions[0].m_Size / 16; ++chunk)
-                    if (std::memcmp( last + chunk * 16, source + chunk * 16, 16 ) != 0)
-                    {
-                        field = std::min<std::size_t>( chunk, 25 );
-                        break;
-                    }
-                ++m_ProfileUploadField[field];
-            }
         }
 
         D3D11_MAPPED_SUBRESOURCE mapped = {};
@@ -5215,8 +5087,6 @@ namespace dx11z
         }
         m_Context->Unmap( m_DrawConstants.Get(), 0 );
         m_ConstantsValid = true;
-        ++m_ProfileUploads;
-        m_ProfileUploadBytes += written;
     }
 
 
@@ -5287,231 +5157,8 @@ namespace dx11z
     }
 
 
-    // Frame profile: one timestamp query whenever the draw category changes, the stamps of a frame resolved a few frames later.
-    void Driver::ProfileMark(
-        int category
-    )
-    {
-        ++m_ProfileDraws[static_cast<std::size_t>(category)];
-        if (!m_Context || !m_Device)
-            return;
-
-        if (m_ProfileCurrent < 0)
-        {
-            for (std::size_t i = 0; i < m_ProfileSlots.size(); ++i)
-            {
-                ProfileSlot & slot = m_ProfileSlots[i];
-                if (slot.m_Pending)
-                    continue;
-                if (!slot.m_Disjoint)
-                {
-                    D3D11_QUERY_DESC desc = { D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
-                    bool made = SUCCEEDED( m_Device->CreateQuery( &desc, slot.m_Disjoint.Put() ) );
-                    desc.Query = D3D11_QUERY_TIMESTAMP;
-                    for (auto & stamp : slot.m_Stamps)
-                        made = made && SUCCEEDED( m_Device->CreateQuery( &desc, stamp.Put() ) );
-                    desc.Query = D3D11_QUERY_PIPELINE_STATISTICS;
-                    for (auto & stats : slot.m_Stats)
-                        made = made && SUCCEEDED( m_Device->CreateQuery( &desc, stats.Put() ) );
-                    if (!made)
-                    {
-                        slot = {};
-                        continue;
-                    }
-                }
-                slot.m_Count = 0;
-                m_Context->Begin( slot.m_Disjoint.Get() );
-                m_ProfileCurrent = static_cast<int>(i);
-                m_ProfileCategory = -1;
-                break;
-            }
-            if (m_ProfileCurrent < 0)
-                return;
-        }
-
-        ProfileSlot & slot = m_ProfileSlots[static_cast<std::size_t>(m_ProfileCurrent)];
-        if (category == m_ProfileCategory || slot.m_Count >= PROFILE_STAMPS)
-            return;
-        if (slot.m_Count > 0)
-            m_Context->End( slot.m_Stats[static_cast<std::size_t>(slot.m_Count - 1)].Get() );
-        m_Context->End( slot.m_Stamps[static_cast<std::size_t>(slot.m_Count)].Get() );
-        m_Context->Begin( slot.m_Stats[static_cast<std::size_t>(slot.m_Count)].Get() );
-        slot.m_Category[static_cast<std::size_t>(slot.m_Count)] = static_cast<std::uint8_t>(category);
-        ++slot.m_Count;
-        m_ProfileCategory = category;
-    }
-
-    void Driver::ProfileFrameEnd()
-    {
-        if (m_ConfigProfile <= 0 || !m_Context)
-            return;
-
-        if (m_ProfileCurrent >= 0)
-        {
-            ProfileSlot & slot = m_ProfileSlots[static_cast<std::size_t>(m_ProfileCurrent)];
-            if (slot.m_Count > 0)
-            {
-                m_Context->End( slot.m_Stats[static_cast<std::size_t>(slot.m_Count - 1)].Get() );
-                m_Context->End( slot.m_Stamps[static_cast<std::size_t>(slot.m_Count)].Get() );
-            }
-            m_Context->End( slot.m_Disjoint.Get() );
-            slot.m_Pending = slot.m_Count > 0;
-            m_ProfileCurrent = -1;
-            m_ProfileCategory = -1;
-        }
-        ++m_ProfileFlips;
-
-        // Finished frames, without waiting for the GPU.
-        for (ProfileSlot & slot : m_ProfileSlots)
-        {
-            if (!slot.m_Pending)
-                continue;
-            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint = {};
-            if (m_Context->GetData( slot.m_Disjoint.Get(), &disjoint, sizeof( disjoint ), D3D11_ASYNC_GETDATA_DONOTFLUSH ) != S_OK)
-                continue;
-            std::array<UINT64, PROFILE_STAMPS + 1> stamps = {};
-            bool ready = true;
-            for (int i = 0; i <= slot.m_Count && ready; ++i)
-                ready = m_Context->GetData( slot.m_Stamps[static_cast<std::size_t>(i)].Get(), &stamps[static_cast<std::size_t>(i)], sizeof( UINT64 ),
-                    D3D11_ASYNC_GETDATA_DONOTFLUSH ) == S_OK;
-            std::array<D3D11_QUERY_DATA_PIPELINE_STATISTICS, PROFILE_STAMPS + 1> statistics = {};
-            for (int i = 0; i < slot.m_Count && ready; ++i)
-                ready = m_Context->GetData( slot.m_Stats[static_cast<std::size_t>(i)].Get(), &statistics[static_cast<std::size_t>(i)],
-                    sizeof( D3D11_QUERY_DATA_PIPELINE_STATISTICS ), D3D11_ASYNC_GETDATA_DONOTFLUSH ) == S_OK;
-            if (!ready)
-                continue;
-            slot.m_Pending = false;
-            if (disjoint.Disjoint || disjoint.Frequency == 0)
-                continue;
-            for (int i = 0; i < slot.m_Count; ++i)
-            {
-                const std::size_t category = slot.m_Category[static_cast<std::size_t>(i)];
-                m_ProfilePs[category] += statistics[static_cast<std::size_t>(i)].PSInvocations;
-                m_ProfilePrimitives[category] += statistics[static_cast<std::size_t>(i)].CPrimitives;
-            }
-            for (int i = 0; i < slot.m_Count; ++i)
-                m_ProfileMs[slot.m_Category[static_cast<std::size_t>(i)]] +=
-                    static_cast<double>(stamps[static_cast<std::size_t>(i + 1)] - stamps[static_cast<std::size_t>(i)]) * 1000.0 / static_cast<double>(disjoint.Frequency);
-            ++m_ProfileGpuFrames;
-        }
-
-        const std::uint64_t now = ::GetTickCount64();
-        if (m_ProfileReportTick == 0)
-            m_ProfileReportTick = now + static_cast<std::uint64_t>(m_ConfigProfile) * 1000;
-        if (now < m_ProfileReportTick)
-            return;
-        const double window_ms = m_ProfileWindowStart != 0 ? static_cast<double>(now - m_ProfileWindowStart) : static_cast<double>(m_ConfigProfile) * 1000.0;
-        m_ProfileWindowStart = now;
-        m_ProfileReportTick = now + static_cast<std::uint64_t>(m_ConfigProfile) * 1000;
-        ProfileCollect( window_ms );
-    }
-
-    // Frames per second without queries or measuring: the interval between two flips on the CPU clock.
-    void Driver::FpsFlip()
-    {
-        if (m_ConfigFpsLog <= 0)
-            return;
-        LARGE_INTEGER now = {}, frequency = {};
-        ::QueryPerformanceCounter( &now );
-        ::QueryPerformanceFrequency( &frequency );
-        const double tick_ms = 1000.0 / static_cast<double>(std::max<LONGLONG>( frequency.QuadPart, 1 ));
-        if (m_FpsStart == 0)
-            m_FpsStart = m_FpsLast = now.QuadPart;
-        const double frame_ms = static_cast<double>(now.QuadPart - m_FpsLast) * tick_ms;
-        m_FpsLast = now.QuadPart;
-        ++m_FpsFrames;
-        m_FpsWorst = std::max( m_FpsWorst, frame_ms );
-        m_FpsSlow += frame_ms > 1000.0 / 60.0 ? 1 : 0;
-        const double window = static_cast<double>(now.QuadPart - m_FpsStart) * tick_ms;
-        if (window < static_cast<double>(m_ConfigFpsLog) * 1000.0)
-            return;
-        Log( "Fps: %.1f fps over %.1f s (%llu frames), frame time mean %.2f ms, worst %.2f ms, %llu frames slower than 60 fps", static_cast<double>(m_FpsFrames) * 1000.0 / window,
-            window / 1000.0, static_cast<unsigned long long>(m_FpsFrames), window / static_cast<double>(std::max<std::uint64_t>( m_FpsFrames, 1 )), m_FpsWorst,
-            static_cast<unsigned long long>(m_FpsSlow) );
-        m_FpsStart = now.QuadPart;
-        m_FpsFrames = m_FpsSlow = 0;
-        m_FpsWorst = 0.0;
-    }
-
-    void Driver::ProfileCollect(
-        double window_ms
-    )
-    {
-        static const char * const names[PROFILE_CATEGORIES] = { "opaque", "opaque lit", "sky", "additive", "HUD/2D", "edge pass 2", "alpha lit", "alpha unlit", "back pass", "car copy", "car reflect", "blur chain", "ambient occlusion" };
-        const double gpu_frames = static_cast<double>(std::max<std::uint64_t>( m_ProfileGpuFrames, 1 ));
-        const double frames = static_cast<double>(std::max<std::uint64_t>( m_ProfileFlips, 1 ));
-        LARGE_INTEGER frequency = {};
-        ::QueryPerformanceFrequency( &frequency );
-        const double us = 1e6 / static_cast<double>(std::max<LONGLONG>( frequency.QuadPart, 1 )) / frames;
-        double total = 0.0;
-        for (double value : m_ProfileMs)
-            total += value;
-        Log( "Profile: window %.2f s, %llu frames = %.1f fps, frame time %.2f ms", window_ms / 1000.0, static_cast<unsigned long long>(m_ProfileFlips),
-            static_cast<double>(m_ProfileFlips) * 1000.0 / std::max( window_ms, 1.0 ), std::max( window_ms, 1.0 ) / frames );
-        Log( "Profile: %llu frames (%llu with GPU time), GPU %.2f ms per frame in the draws, CPU ApplyPipeline %.0f us per frame",
-            static_cast<unsigned long long>(m_ProfileFlips), static_cast<unsigned long long>(m_ProfileGpuFrames), total / gpu_frames,
-            static_cast<double>(m_ProfileApplyTicks) * us );
-        for (int i = 0; i < PROFILE_CATEGORIES; ++i)
-        {
-            const double ps = static_cast<double>(m_ProfilePs[static_cast<std::size_t>(i)]) / gpu_frames;
-            Log( "Profile:   %-11s GPU %.3f ms per frame, %.0f draws per frame, %.2f M pixel shader runs and %.0f k triangles per frame, %.1f ns per run", names[i],
-                m_ProfileMs[static_cast<std::size_t>(i)] / gpu_frames, static_cast<double>(m_ProfileDraws[static_cast<std::size_t>(i)]) / frames, ps / 1e6,
-                static_cast<double>(m_ProfilePrimitives[static_cast<std::size_t>(i)]) / gpu_frames / 1e3,
-                ps > 0.0 ? m_ProfileMs[static_cast<std::size_t>(i)] / gpu_frames * 1e6 / ps : 0.0 );
-        }
-        const double lit = static_cast<double>(std::max<std::uint64_t>( m_ProfileLitDraws, 1 ));
-        Log( "Profile:   constants %.0f uploads per frame, %.0f bytes per upload (block %zu); lit draws %.0f per frame, car lights %.1f -> %.1f, "
-            "tail glows %.1f -> %.1f per lit draw (LightCulling %d, MaxCarLights %d)",
-            static_cast<double>(m_ProfileUploads) / frames, static_cast<double>(m_ProfileUploadBytes) / static_cast<double>(std::max<std::uint64_t>( m_ProfileUploads, 1 )),
-            sizeof( DrawConstants ), static_cast<double>(m_ProfileLitDraws) / frames, static_cast<double>(m_ProfileExtraBefore) / lit,
-            static_cast<double>(m_ProfileExtraAfter) / lit, static_cast<double>(m_ProfileRearBefore) / lit, static_cast<double>(m_ProfileRearAfter) / lit,
-            m_ConfigLightCulling, m_ConfigMaxCarLights );
-        {
-            static const char * const fields[26] = { "target", "colour op 0", "colour op 1", "alpha op 0", "alpha op 1", "texture factor", "fog colour", "fog params",
-                "flags (fog, specular, alpha func, texture mask)", "alpha ref", "debug (edge pass)", "head light on", "head colour", "head projection", "view to light 0",
-                "view to light 1", "view to light 2", "view to light 3", "car light count", "high beam", "tail glow count", "tail shape", "test", "clip", "night", "light arrays" };
-            std::vector<std::pair<std::uint64_t, std::size_t>> top;
-            for (std::size_t i = 0; i < m_ProfileUploadField.size(); ++i)
-                if (m_ProfileUploadField[i] > 0)
-                    top.emplace_back( m_ProfileUploadField[i], i );
-            std::sort( top.begin(), top.end(), []( const auto & a, const auto & b ) { return a.first > b.first; } );
-            std::string line;
-            for (std::size_t i = 0; i < top.size() && i < 6; ++i)
-            {
-                char item[96] = {};
-                std::snprintf( item, sizeof( item ), "; %s %.0f", top[i].second < 26 ? fields[top[i].second] : "?", static_cast<double>(top[i].first) / frames );
-                line += item;
-            }
-            Log( "Profile:   constants first changed field per upload (per frame)%s", line.c_str() );
-            m_ProfileUploadField = {};
-        }
-        if (m_ProfileCarCopies > 0 || m_ProfileCarBatches > 0)
-        {
-            // 'CPU batches' as before = prepare (CarReflBatch) + submit (CarReflDrawPending), now also apart.
-            Log( "Profile:   car reflections per frame: %.1f frame copies, CPU copy %.0f us, CPU batches %.0f us (prepare %.0f, submit %.0f; %.1f batches, %.0f vertices), GPU copy %.3f ms (resolve and mips), GPU blur chain %.3f ms, GPU reflect draws %.3f ms",
-                static_cast<double>(m_ProfileCarCopies) / frames, static_cast<double>(m_ProfileCarCopyTicks) * us,
-                static_cast<double>(m_ProfileCarBatchTicks + m_ProfileCarDrawTicks) * us, static_cast<double>(m_ProfileCarBatchTicks) * us,
-                static_cast<double>(m_ProfileCarDrawTicks) * us,
-                static_cast<double>(m_ProfileCarBatches) / frames, static_cast<double>(m_ProfileCarVertices) / frames, m_ProfileMs[9] / gpu_frames,
-                m_ProfileMs[11] / gpu_frames, m_ProfileMs[10] / gpu_frames );
-            m_ProfileCarCopyTicks = m_ProfileCarBatchTicks = m_ProfileCarDrawTicks = 0;
-            m_ProfileCarBatches = m_ProfileCarVertices = m_ProfileCarCopies = 0;
-        }
-        m_ProfileMs = {};
-        m_ProfileDraws = {};
-        m_ProfilePs = {};
-        m_ProfilePrimitives = {};
-        m_ProfileGpuFrames = 0;
-        m_ProfileFlips = 0;
-        m_ProfileUploads = m_ProfileUploadBytes = m_ProfileLitDraws = 0;
-        m_ProfileExtraBefore = m_ProfileExtraAfter = m_ProfileRearBefore = m_ProfileRearAfter = 0;
-        m_ProfileApplyTicks = 0;
-    }
-
-
     void Driver::ApplyPipeline()
     {
-        const PerfScope profile_scope( m_ConfigProfile > 0, m_ProfileApplyTicks, m_ProfileDepth );
         const auto & render = m_D3D.m_Render;
 
         // '[Dx11] SkyEdgeFill' (B32): the sky comes right after the full clear; the first other draw ends it.
@@ -5531,22 +5178,12 @@ namespace dx11z
                 }
                 m_SkyEdgeState = 2;
                 m_SkyEdgeDraw = m_EdgePass != 3;
-                if (m_SkyEdgeLogging && m_EdgePass != 2)
-                    LogSkyDraw();
             }
             else
             {
                 if (m_SkyEdgeState == 2)
                     SkyEdgeFill();
                 m_SkyEdgeState = 3;
-                if (m_SkyEdgeLogging)
-                {
-                    Log( "SkyEdge: %d sky draws, clear %.3f %.3f %.3f, first other draw zfunc %u, %u vertices", m_SkyEdgeLogIndex,
-                        m_SkyEdgeClear[0], m_SkyEdgeClear[1], m_SkyEdgeClear[2], static_cast<unsigned>(render[rs::ZFUNC]),
-                        static_cast<unsigned>(m_BatchVertices.size()) );
-                    m_SkyEdgeLogging = false;
-                    m_SkyEdgeLogNext = ::GetTickCount64() + 10000;
-                }
             }
         }
 
@@ -5590,7 +5227,7 @@ namespace dx11z
         constants.m_AlphaRef[1] = m_ConfigShoreFade > 0.0f && m_Bound[0] != nullptr &&
             std::find( m_ConfigShoreTextures.begin(), m_ConfigShoreTextures.end(), m_Bound[0]->m_Hash ) != m_ConfigShoreTextures.end()
             ? m_ConfigShoreFade : 0.0f;
-        constants.m_Debug[0] = m_ConfigMeasure == 2 && m_MeasureSuspect ? 1.0f : 0.0f;
+        constants.m_Debug[0] = 0.0f;
         constants.m_Debug[1] = static_cast<float>(m_EdgePass);
         constants.m_Debug[2] = static_cast<float>(m_ConfigAlphaEdgeRef) / 255.0f;
         constants.m_Debug[3] = m_ConfigAlphaMipScale;
@@ -5643,7 +5280,7 @@ namespace dx11z
                 night_resolved = true;
                 if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
                     night_fn = reinterpret_cast<NightFn>(::GetProcAddress( lfsp, "LfspNightGradeEx" ));
-                Log( "Night grade (dx11z build 9zh, 9.15e matte palette kept, prepare/submit profile): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
+                Log( "Night grade (dx11z build 9zk, settings menu removed): LFSP export %s", night_fn != nullptr ? "found" : "not available" );
             }
             const std::uint32_t night_source = render[rs::SRCBLEND];
             const std::uint32_t night_destination = render[rs::DESTBLEND];
@@ -5810,11 +5447,6 @@ namespace dx11z
             constants.m_Head[2] = m_HeadScale[1];
             constants.m_Head[3] = m_HeadScale[2];
             std::memcpy( constants.m_HeadColour, m_HeadColour.data(), sizeof( constants.m_HeadColour ) );
-            if (object_light && m_ConfigHeadlightsObjects == 2)
-            {
-                for (int ch = 0; ch < 3; ++ch)
-                    constants.m_HeadColour[ch] *= 4.0f;
-            }
             std::memcpy( constants.m_HeadProjection, m_HeadProjection.data(), sizeof( constants.m_HeadProjection ) );
             std::memcpy( constants.m_ViewToLight, m_HeadViewToLight.data(), sizeof( constants.m_ViewToLight ) );
             // Snow slope: the same screen side as the light, to track space (camera position in the last row).
@@ -5877,22 +5509,8 @@ namespace dx11z
                 ++rear;
             }
             constants.m_Rear[0] = rear;
-            ++m_ProfileLitDraws;
-            m_ProfileExtraBefore += static_cast<std::uint64_t>(extra_all);
-            m_ProfileExtraAfter += static_cast<std::uint64_t>(extra);
-            m_ProfileRearBefore += static_cast<std::uint64_t>(rear_all);
-            m_ProfileRearAfter += static_cast<std::uint64_t>(rear);
         }
 
-        if (m_ConfigProfile > 0)
-        {
-            const bool sky = render[rs::ZFUNC] == 8 && !m_BatchVertices.empty() && flat_z[0] >= 0.99f && flat_rhw[1] < 0.05f;
-            const bool lit = constants.m_Head[0] > 0.0f;
-            const bool additive = render[rs::ALPHABLENDENABLE] != 0 && render[rs::DESTBLEND] == 2;
-            const bool alpha = render[rs::ALPHABLENDENABLE] != 0 || render[rs::ALPHATESTENABLE] != 0;
-            const int category = m_BackPass ? 8 : sky ? 2 : flat_draw ? 4 : m_EdgePass == 2 ? 5 : additive ? 3 : alpha ? (lit ? 6 : 7) : (lit ? 1 : 0);
-            ProfileMark( category );
-        }
 
         // Fog of the main view's world draws for the ambient occlusion ('[AmbientOcclusion] FogFade'): the first fogged draw
         // of the run (the track fog is the same for all of them). Mode 0 without the game's table is vertex fog the game
@@ -6107,7 +5725,8 @@ namespace dx11z
 
         // Rasterizer, D3D7 culls by screen winding like D3D11 with clockwise front faces.
         // Projected headlight overlays share depth with the underlying road geometry (upstream caaa305).
-        const bool projected_candidate = !m_BackPass && render[rs::ZENABLE] != 0 &&
+        // Not on car parts: their 64x64 window textures matched too, the bias put them in front of the car reflection (B34).
+        const bool projected_candidate = !m_BackPass && m_CarLodMask == 0 && render[rs::ZENABLE] != 0 &&
             render[rs::ZWRITEENABLE] != 0 && render[rs::ALPHABLENDENABLE] != 0 &&
             render[rs::ZFUNC] == 4 && render[rs::STENCILENABLE] == 0 &&
             m_Bound[0] != nullptr && m_Bound[1] == nullptr &&
@@ -6261,7 +5880,6 @@ namespace dx11z
 
     void Driver::Flush()
     {
-        const PerfScope perf( m_ConfigMeasure > 0, m_PerfFlushTicks, m_PerfDepth );
 
         if (m_BatchIndices.empty() || m_BatchVertices.empty() || !m_FrameView)
         {
@@ -6273,7 +5891,6 @@ namespace dx11z
         if (m_BatchPrimitive == Primitive::LINES)
             WidenLines();
 
-        m_MeasureSuspect = false;
 
         const std::size_t probe_first = m_ProbeHits.size();
         m_ProbeFirst = probe_first;
@@ -6282,19 +5899,6 @@ namespace dx11z
             ProbeBatch();
         }
 
-        if (m_ConfigMeasure > 0)
-        {
-            MeasureDrawCall();
-            MeasurePassCall();
-
-            if (m_MeasureSnapActive)
-            {
-                MeasureSnapBatch();
-            }
-        }
-
-        if (m_ConfigCarEnvMeasure > 0)
-            CarEnvBatch();
 
         // Blending while writing depth, see '[Dx11] AlphaEdgeFix'.
         const auto & render = m_D3D.m_Render;
@@ -6434,12 +6038,10 @@ namespace dx11z
         }
         const bool edge_split = edge_candidate && (!m_ConfigAlphaToCoverage || !coverage_world);
 
+        CarSkyNoteBatch(); // B36: the band and the flat colour of the sky, for the car reflections
+
         m_EdgePass = edge_split ? 1 : (edge_candidate ? 3 : 0);
 
-        if (m_ConfigMeasure > 0)
-        {
-            MeasureUvRange();
-        }
 
         ApplyPipeline();
 
@@ -6475,7 +6077,6 @@ namespace dx11z
 
         m_Context->IASetPrimitiveTopology( topology );
         m_Context->DrawIndexed( index_count, first_index, static_cast<INT>(base_vertex) );
-        ++m_CopyOrderDraws;
 
         if (edge_split)
         {
@@ -6548,27 +6149,6 @@ namespace dx11z
         m_BatchPrimitive = Primitive::NONE;
     }
 
-    void Driver::MeasureUvRange()
-    {
-        const Texture * texture = m_Bound[0];
-
-        if (texture == nullptr || !texture->m_Translucent || std::max( texture->m_Width, texture->m_Height ) < 128 ||
-            m_BatchPrimitive != Primitive::TRIANGLES)
-            return;
-
-        auto & uv = m_MeasureUv[texture];
-
-        for (const TlVertex & vertex : m_BatchVertices)
-        {
-            uv.m_MinU = std::min( uv.m_MinU, vertex.m_U0 );
-            uv.m_MaxU = std::max( uv.m_MaxU, vertex.m_U0 );
-            uv.m_MinV = std::min( uv.m_MinV, vertex.m_V0 );
-            uv.m_MaxV = std::max( uv.m_MaxV, vertex.m_V0 );
-        }
-
-        ++uv.m_Draws;
-    }
-
     bool Driver::BatchTranslucent() const
     {
         if (m_Bound[0] != nullptr && m_Bound[0]->m_Translucent)
@@ -6583,371 +6163,10 @@ namespace dx11z
         } );
     }
 
-    // Measuring, PLAN.md 3T.1.
-
-    void Driver::MeasureDrawCall()
-    {
-        const Texture * texture = m_Bound[0];
-
-        if (texture == nullptr)
-            return;
-
-        const auto & render = m_D3D.m_Render;
-        const auto & stage = m_D3D.m_Stage[0];
-
-        const bool blend = render[rs::ALPHABLENDENABLE] != 0;
-        const bool z = render[rs::ZENABLE] != 0;
-        const bool z_write = render[rs::ZWRITEENABLE] != 0;
-        const bool alpha_test = render[rs::ALPHATESTENABLE] != 0;
-
-        // Blending into the frame while writing depth, the H-B4c pattern of doc/BUGS.md 8.1.
-        m_MeasureSuspect = blend && z && z_write;
-
-        const std::uint64_t key = static_cast<std::uint64_t>(texture->m_Format & 0xFF) |
-            (static_cast<std::uint64_t>(blend) << 8) |
-            (static_cast<std::uint64_t>(render[rs::SRCBLEND] & 15) << 9) |
-            (static_cast<std::uint64_t>(render[rs::DESTBLEND] & 15) << 13) |
-            (static_cast<std::uint64_t>(z) << 17) |
-            (static_cast<std::uint64_t>(z_write) << 18) |
-            (static_cast<std::uint64_t>(render[rs::ZFUNC] & 15) << 19) |
-            (static_cast<std::uint64_t>(alpha_test) << 23) |
-            (static_cast<std::uint64_t>(render[rs::ALPHAFUNC] & 15) << 24) |
-            (static_cast<std::uint64_t>(render[rs::ALPHAREF] & 0xFF) << 28) |
-            (static_cast<std::uint64_t>(stage[tss::COLOROP] & 31) << 36) |
-            (static_cast<std::uint64_t>(stage[tss::ALPHAOP] & 31) << 41) |
-            (static_cast<std::uint64_t>(m_Bound[1] != nullptr) << 46);
-
-        auto & entry = m_MeasureDraws[key];
-
-        if (entry.m_Id == 0)
-        {
-            entry.m_Id = static_cast<int>(m_MeasureDraws.size());
-            Log( "M3T draw #%d %s blend %d src %u dst %u z %d zwrite %d zfunc %u atest %d afunc %u aref %u colorop %u alphaop %u stage1 %d%s",
-                entry.m_Id, FormatName( texture->m_Format ), blend ? 1 : 0, render[rs::SRCBLEND], render[rs::DESTBLEND], z ? 1 : 0, z_write ? 1 : 0,
-                render[rs::ZFUNC], alpha_test ? 1 : 0, render[rs::ALPHAFUNC], render[rs::ALPHAREF] & 0xFF, stage[tss::COLOROP], stage[tss::ALPHAOP],
-                m_Bound[1] != nullptr ? 1 : 0, m_MeasureSuspect ? " SUSPECT" : "" );
-        }
-
-        ++entry.m_Draws;
-        entry.m_Primitives += m_BatchPrimitive == Primitive::TRIANGLES ? m_BatchIndices.size() / 3 :
-            (m_BatchPrimitive == Primitive::LINES ? m_BatchIndices.size() / 2 : m_BatchIndices.size());
-        if (m_BatchPrimitive == Primitive::TRIANGLES)
-            m_MeasureTexTriangles[texture->m_Hash] += m_BatchIndices.size() / 3;
-        if (m_SkidDraw)
-            m_MeasureSkidTriangles += m_BatchIndices.size() / 3;
-    }
-
-
-    void Driver::MeasureReport(
-        const char * reason
-    )
-    {
-        Log( "M3T report (%s) at flip %u, %.1f s: %zu draw states, %zu texture shapes, %d dynamic textures, %zu textures alive",
-            reason, m_FlipCount, MeasureSeconds(), m_MeasureDraws.size(), m_MeasureAllocs.size(), m_MeasureDynamic, m_Textures.size() );
-
-        // Memory, PLAN.md 2.0b. Address space is what a 32 bit process runs out of first.
-        PROCESS_MEMORY_COUNTERS_EX counters = {};
-        counters.cb = sizeof( counters );
-        MEMORYSTATUSEX status = {};
-        status.dwLength = sizeof( status );
-
-        if (::GetProcessMemoryInfo( ::GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&counters), sizeof( counters ) ) &&
-            ::GlobalMemoryStatusEx( &status ))
-        {
-            constexpr double MB = 1024.0 * 1024.0;
-            Log( "M3T   memory: address space %.0f of %.0f MB, private %.0f MB (peak %.0f), working set %.0f MB (peak %.0f), textures %.1f MB",
-                static_cast<double>(status.ullTotalVirtual - status.ullAvailVirtual) / MB, static_cast<double>(status.ullTotalVirtual) / MB,
-                static_cast<double>(counters.PrivateUsage) / MB, static_cast<double>(counters.PeakPagefileUsage) / MB,
-                static_cast<double>(counters.WorkingSetSize) / MB, static_cast<double>(counters.PeakWorkingSetSize) / MB,
-                static_cast<double>(m_MeasureTextureBytes) / MB );
-        }
-
-        std::vector<const MeasureDraw *> draws;
-
-        for (const auto & [key, entry] : m_MeasureDraws)
-        {
-            if (entry.m_Draws > 0)
-            {
-                draws.push_back( &entry );
-            }
-        }
-
-        std::sort( draws.begin(), draws.end(), [] ( const MeasureDraw * a, const MeasureDraw * b )
-        {
-            return a->m_Id < b->m_Id;
-        } );
-
-        for (const MeasureDraw * entry : draws)
-        {
-            Log( "M3T   draw #%d: %llu batches, %llu primitives", entry->m_Id, static_cast<unsigned long long>(entry->m_Draws),
-                static_cast<unsigned long long>(entry->m_Primitives) );
-        }
-
-        // Translucent textures from 128 up, with the coordinate range they were drawn with.
-        for (const auto & [texture, uv] : m_MeasureUv)
-        {
-            if (uv.m_Draws == 0)
-                continue;
-
-            Log( "M3T   uv tex %08X %dx%d %s: u %.3f..%.3f v %.3f..%.3f, %llu batches",
-                texture->m_Hash, texture->m_Width, texture->m_Height, FormatName( texture->m_Format ),
-                uv.m_MinU, uv.m_MaxU, uv.m_MinV, uv.m_MaxV, static_cast<unsigned long long>(uv.m_Draws) );
-        }
-
-        std::unordered_map<int, std::uint64_t> per_format;
-
-        for (const auto & [key, count] : m_MeasureAllocs)
-        {
-            per_format[static_cast<int>(key >> 48)] += count;
-        }
-
-        for (const auto & [format, count] : per_format)
-        {
-            Log( "M3T   talloc %s: %llu", FormatName( format ), static_cast<unsigned long long>(count) );
-        }
-
-        // Light passes, sorted by id like the draw states.
-        std::vector<const MeasurePass *> passes;
-
-        for (const auto & [key, pass] : m_MeasurePasses)
-        {
-            if (pass.m_Draws > 0)
-            {
-                passes.push_back( &pass );
-            }
-        }
-
-        std::sort( passes.begin(), passes.end(), [] ( const MeasurePass * a, const MeasurePass * b )
-        {
-            return a->m_Id < b->m_Id;
-        } );
-
-        for (const MeasurePass * pass : passes)
-        {
-            Log( "M3T   pass #%d: %llu batches, %llu primitives, uv0 %.3f..%.3f / %.3f..%.3f, uv1 %.3f..%.3f / %.3f..%.3f", pass->m_Id,
-                static_cast<unsigned long long>(pass->m_Draws), static_cast<unsigned long long>(pass->m_Primitives),
-                pass->m_MinU0, pass->m_MaxU0, pass->m_MinV0, pass->m_MaxV0, pass->m_MinU1, pass->m_MaxU1, pass->m_MinV1, pass->m_MaxV1 );
-        }
-
-        if (m_MeasureColourVertices > 0)
-        {
-            const double n = static_cast<double>(m_MeasureColourVertices);
-            Log( "M3T   vertex colour of opaque world draws: diffuse %.1f %.1f %.1f, specular %.1f %.1f %.1f (RGB 0-255, %llu vertices)",
-                m_MeasureColour[0] / n, m_MeasureColour[1] / n, m_MeasureColour[2] / n, m_MeasureColour[3] / n, m_MeasureColour[4] / n,
-                m_MeasureColour[5] / n, static_cast<unsigned long long>(m_MeasureColourVertices) );
-        }
-
-        // Counts restart, the ids stay so the log reads across reports.
-        for (auto & [key, entry] : m_MeasureDraws)
-        {
-            entry.m_Draws = 0;
-            entry.m_Primitives = 0;
-        }
-
-        for (auto & [key, pass] : m_MeasurePasses)
-        {
-            const int id = pass.m_Id;
-            pass = {};
-            pass.m_Id = id;
-        }
-
-        m_MeasureColour = {};
-        m_MeasureColourVertices = 0;
-
-        if (m_ConfigHeadlights > 0 && m_ConfigHeadlightsObjects > 0)
-        {
-            const ObjectLightStats & o = m_ObjectStats;
-            Log( "M3T   object lights: batches track %llu, objects lit %llu, not lit: no track light yet %llu, depth off %llu, blend %llu",
-                static_cast<unsigned long long>(o.m_Track), static_cast<unsigned long long>(o.m_Lit), static_cast<unsigned long long>(o.m_NoState),
-                static_cast<unsigned long long>(o.m_NoDepth), static_cast<unsigned long long>(o.m_Blend) );
-            m_ObjectStats = {};
-        }
-
-        if (m_ConfigHeadlights > 0 && m_ConfigHeadlightsDay > 0)
-        {
-            const DayStats & d = m_DayStats;
-            Log( "M3T   day lights: %llu track draws (night %llu, no car %llu, switch off %llu), mesh setups (prepared %llu, failed %llu), "
-                "%llu mesh draws (%llu lit), night flag %u, player %u, light bytes %u %u",
-                static_cast<unsigned long long>(d.m_Calls), static_cast<unsigned long long>(d.m_Night), static_cast<unsigned long long>(d.m_NoCar),
-                static_cast<unsigned long long>(d.m_SwitchOff), static_cast<unsigned long long>(d.m_Prepared),
-                static_cast<unsigned long long>(d.m_Failed), static_cast<unsigned long long>(d.m_Draws),
-                static_cast<unsigned long long>(d.m_LitDraws), d.m_NightFlag, d.m_Index, d.m_Lights[0], d.m_Lights[1] );
-            m_DayStats = {};
-        }
-    }
-
-
-    void Driver::MeasurePassCall()
-    {
-        const auto & render = m_D3D.m_Render;
-        const auto & stage0 = m_D3D.m_Stage[0];
-        const auto & stage1 = m_D3D.m_Stage[1];
-
-        const bool blend = render[rs::ALPHABLENDENABLE] != 0;
-        const std::uint32_t src = render[rs::SRCBLEND];
-        const std::uint32_t dst = render[rs::DESTBLEND];
-
-        // Vertex colours of the opaque world, where baked or computed vertex lighting shows up.
-        if (m_BatchPrimitive == Primitive::TRIANGLES && render[rs::ZENABLE] != 0 && render[rs::ZWRITEENABLE] != 0 &&
-            (!blend || render[rs::ALPHATESTENABLE] != 0))
-        {
-            for (const TlVertex & vertex : m_BatchVertices)
-            {
-                m_MeasureColour[0] += (vertex.m_Diffuse >> 16) & 0xFF;
-                m_MeasureColour[1] += (vertex.m_Diffuse >> 8) & 0xFF;
-                m_MeasureColour[2] += vertex.m_Diffuse & 0xFF;
-                m_MeasureColour[3] += (vertex.m_Specular >> 16) & 0xFF;
-                m_MeasureColour[4] += (vertex.m_Specular >> 8) & 0xFF;
-                m_MeasureColour[5] += vertex.m_Specular & 0xFF;
-            }
-
-            m_MeasureColourVertices += m_BatchVertices.size();
-        }
-
-        // D3D7 blend factors: 1 zero, 2 one, 3 src colour, 4 inv src colour, 9 dest colour, 10 inv dest colour.
-        const bool second_stage = m_Bound[1] != nullptr;
-        const bool light_blend = blend && (src == 9 || src == 10 || dst == 2 || dst == 3 || dst == 4);
-
-        if (!second_stage && !light_blend)
-            return;
-
-        const Texture * tex0 = m_Bound[0];
-        const Texture * tex1 = m_Bound[1];
-
-        char key[256];
-        // By content hash, so a pass keeps its id when the game reloads its textures.
-        std::snprintf( key, sizeof( key ), "%08X %08X %u %u %u %u %u %u %u %u %d %u %u %d %d %d",
-            tex0 != nullptr ? tex0->m_Hash : 0u, tex1 != nullptr ? tex1->m_Hash : 0u, stage0[tss::COLOROP],
-            stage0[tss::COLORARG1], stage0[tss::COLORARG2], stage1[tss::COLOROP], stage1[tss::COLORARG1], stage1[tss::COLORARG2],
-            stage1[tss::ALPHAOP], stage1[tss::TEXCOORDINDEX], blend ? 1 : 0, src, dst, render[rs::ZENABLE] != 0 ? 1 : 0,
-            render[rs::ZWRITEENABLE] != 0 ? 1 : 0, static_cast<int>(m_BatchPrimitive) );
-
-        auto & pass = m_MeasurePasses[key];
-
-        if (pass.m_Id == 0)
-        {
-            pass.m_Id = static_cast<int>(m_MeasurePasses.size());
-
-            const auto describe = [] ( const Texture * texture, char * text, std::size_t size )
-            {
-                if (texture == nullptr)
-                {
-                    std::snprintf( text, size, "none" );
-                }
-                else
-                {
-                    std::snprintf( text, size, "%08X %dx%d %s alloc-stage %d%s", texture->m_Hash, texture->m_Width, texture->m_Height,
-                        FormatName( texture->m_Format ), texture->m_Stage, texture->m_Updates > 1 ? " dynamic" : "" );
-                }
-            };
-
-            char text0[96];
-            char text1[96];
-            describe( tex0, text0, sizeof( text0 ) );
-            describe( tex1, text1, sizeof( text1 ) );
-
-            Log( "M3T pass #%d at flip %u, %.1f s: tex0 %s, tex1 %s, stage0 op %u arg %u/%u, stage1 op %u arg %u/%u alphaop %u texcoord %u, "
-                "blend %d src %u dst %u z %d zwrite %d",
-                pass.m_Id, m_FlipCount, MeasureSeconds(), text0, text1, stage0[tss::COLOROP], stage0[tss::COLORARG1], stage0[tss::COLORARG2],
-                stage1[tss::COLOROP], stage1[tss::COLORARG1], stage1[tss::COLORARG2], stage1[tss::ALPHAOP], stage1[tss::TEXCOORDINDEX],
-                blend ? 1 : 0, src, dst, render[rs::ZENABLE] != 0 ? 1 : 0, render[rs::ZWRITEENABLE] != 0 ? 1 : 0 );
-
-            MeasureDump( tex0 );
-            MeasureDump( tex1 );
-        }
-
-        for (const TlVertex & vertex : m_BatchVertices)
-        {
-            pass.m_MinU0 = std::min( pass.m_MinU0, vertex.m_U0 );
-            pass.m_MaxU0 = std::max( pass.m_MaxU0, vertex.m_U0 );
-            pass.m_MinV0 = std::min( pass.m_MinV0, vertex.m_V0 );
-            pass.m_MaxV0 = std::max( pass.m_MaxV0, vertex.m_V0 );
-            pass.m_MinU1 = std::min( pass.m_MinU1, vertex.m_U1 );
-            pass.m_MaxU1 = std::max( pass.m_MaxU1, vertex.m_U1 );
-            pass.m_MinV1 = std::min( pass.m_MinV1, vertex.m_V1 );
-            pass.m_MaxV1 = std::max( pass.m_MaxV1, vertex.m_V1 );
-        }
-
-        ++pass.m_Draws;
-        pass.m_Primitives += m_BatchPrimitive == Primitive::TRIANGLES ? m_BatchIndices.size() / 3 :
-            (m_BatchPrimitive == Primitive::LINES ? m_BatchIndices.size() / 2 : m_BatchIndices.size());
-    }
-
+    // Helpers for reading game memory.
 
     namespace
     {
-        // Stack values that point into the game's code right after a call instruction, the usual
-        // heuristic for return addresses without frame pointers.
-        bool LooksLikeReturn(
-            std::uintptr_t value
-        )
-        {
-            static std::uintptr_t exe_begin = 0, exe_end = 0, gimme_begin = 0, gimme_end = 0;
-
-            if (exe_begin == 0)
-            {
-                const auto range = [] ( const char * name, std::uintptr_t & begin, std::uintptr_t & end )
-                {
-                    const auto * base = reinterpret_cast<const std::uint8_t *>(::GetModuleHandleA( name ));
-                    if (base == nullptr)
-                        return;
-
-                    const auto * dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(base);
-                    const auto * nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
-                    begin = reinterpret_cast<std::uintptr_t>(base) + nt->OptionalHeader.BaseOfCode;
-                    end = begin + nt->OptionalHeader.SizeOfCode;
-                };
-
-                range( nullptr, exe_begin, exe_end );
-                range( "gimme.dll", gimme_begin, gimme_end );
-            }
-
-            const bool in_code = (value >= exe_begin + 8 && value < exe_end) || (value >= gimme_begin + 8 && value < gimme_end);
-            if (!in_code)
-                return false;
-
-            const auto * p = reinterpret_cast<const std::uint8_t *>(value);
-            return p[-5] == 0xE8 ||                                   // call rel32
-                (p[-6] == 0xFF && (p[-5] & 0x38) == 0x10) ||          // call [disp32] / [reg+disp32]
-                (p[-3] == 0xFF && (p[-2] & 0xF8) == 0x50) ||          // call [reg+disp8]
-                (p[-2] == 0xFF && ((p[-1] & 0xF8) == 0xD0 || (p[-1] & 0xF8) == 0x10)); // call reg / [reg]
-        }
-
-
-        // Address as Ghidra shows it (porsche.exe at 0x400000, gimme.dll at 0x10000000).
-        void DescribeAddress(
-            void * address,
-            char * text,
-            std::size_t size
-        )
-        {
-            HMODULE module = nullptr;
-            char path[MAX_PATH] = {};
-
-            if (address == nullptr || !::GetModuleHandleExA( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                static_cast<LPCSTR>(address), &module ) || ::GetModuleFileNameA( module, path, MAX_PATH ) == 0)
-            {
-                std::snprintf( text, size, "%p", address );
-                return;
-            }
-
-            const char * name = std::strrchr( path, '\\' );
-            name = name != nullptr ? name + 1 : path;
-            const std::uintptr_t rva = reinterpret_cast<std::uintptr_t>(address) - reinterpret_cast<std::uintptr_t>(module);
-            std::uintptr_t base = 0;
-
-            if (_stricmp( name, "porsche.exe" ) == 0)
-                base = 0x00400000;
-            else if (_stricmp( name, "gimme.dll" ) == 0)
-                base = 0x10000000;
-
-            if (base != 0)
-                std::snprintf( text, size, "%s:%08X", name, static_cast<unsigned>(base + rva) );
-            else
-                std::snprintf( text, size, "%s+%X", name, static_cast<unsigned>(rva) );
-        }
-
-
         // Copies memory the game owns, false when it is not readable.
         bool SafeCopy(
             const void * source,
@@ -6972,151 +6191,6 @@ namespace dx11z
         }
 
 
-        // Hardware write watch (DR0) on the render thread, PLAN.md 9.4d. The handler only records,
-        // the log is written at the next flip.
-        struct WatchHit
-        {
-            std::uintptr_t m_Eip = 0;
-            std::array<std::uintptr_t, 6> m_Stack = {};
-            std::uint32_t m_Value = 0;
-            std::uint32_t m_Count = 0;
-        };
-
-        constexpr LONG WATCH_HITS = 32;
-        std::array<WatchHit, WATCH_HITS> g_WatchHits = {};
-        volatile LONG g_WatchHitCount = 0;
-        volatile LONG g_WatchTotal = 0;
-        std::uintptr_t g_WatchAddress = 0;
-        ULONGLONG g_WatchUntil = 0;
-        constexpr DWORD DR7_SLOT0 = 0x000F0003;
-        constexpr DWORD DR7_WRITE4 = 0x00000001 | (1u << 16) | (3u << 18);
-
-        LONG CALLBACK WatchHandler(
-            EXCEPTION_POINTERS * info
-        )
-        {
-            CONTEXT * context = info->ContextRecord;
-
-            if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || (context->Dr6 & 1) == 0)
-                return EXCEPTION_CONTINUE_SEARCH;
-
-            context->Dr6 = 0;
-            ::InterlockedIncrement( &g_WatchTotal );
-
-            const std::uintptr_t eip = context->Eip;
-            const LONG count = g_WatchHitCount;
-            bool known = false;
-
-            for (LONG i = 0; i < count; ++i)
-            {
-                if (g_WatchHits[static_cast<std::size_t>(i)].m_Eip == eip)
-                {
-                    ++g_WatchHits[static_cast<std::size_t>(i)].m_Count;
-                    known = true;
-                    break;
-                }
-            }
-
-            if (!known && count < WATCH_HITS)
-            {
-                WatchHit & hit = g_WatchHits[static_cast<std::size_t>(count)];
-                hit = {};
-                hit.m_Eip = eip;
-                hit.m_Count = 1;
-                SafeCopy( reinterpret_cast<const void *>(g_WatchAddress), &hit.m_Value, sizeof( hit.m_Value ) );
-
-                const auto * stack = reinterpret_cast<const std::uintptr_t *>(context->Esp);
-                const auto * top = reinterpret_cast<const std::uintptr_t *>(reinterpret_cast<NT_TIB *>(::NtCurrentTeb())->StackBase);
-                std::size_t used = 0;
-
-                for (std::size_t i = 0; i < 1024 && stack + i < top && used < hit.m_Stack.size(); ++i)
-                {
-                    if (LooksLikeReturn( stack[i] ))
-                    {
-                        hit.m_Stack[used++] = stack[i];
-                    }
-                }
-
-                g_WatchHitCount = count + 1;
-            }
-
-            if (::GetTickCount64() > g_WatchUntil || g_WatchTotal > 100000)
-            {
-                context->Dr7 &= ~DR7_SLOT0;
-            }
-
-            return EXCEPTION_CONTINUE_EXECUTION;
-        }
-
-
-        struct WatchArm
-        {
-            HANDLE m_Thread = nullptr;
-            std::uintptr_t m_Address = 0;
-            bool m_Enable = false;
-        };
-
-        DWORD WINAPI WatchArmThread(
-            void * parameter
-        )
-        {
-            auto * arm = static_cast<WatchArm *>(parameter);
-
-            if (::SuspendThread( arm->m_Thread ) == static_cast<DWORD>(-1))
-                return 1;
-
-            CONTEXT context = {};
-            context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-
-            if (::GetThreadContext( arm->m_Thread, &context ))
-            {
-                context.Dr7 &= ~DR7_SLOT0;
-
-                if (arm->m_Enable)
-                {
-                    context.Dr0 = arm->m_Address;
-                    context.Dr7 |= DR7_WRITE4;
-                }
-
-                context.Dr6 = 0;
-                ::SetThreadContext( arm->m_Thread, &context );
-            }
-
-            ::ResumeThread( arm->m_Thread );
-            return 0;
-        }
-
-        // Debug registers of the calling thread can only be set from another thread.
-        bool SetWatch(
-            std::uintptr_t address,
-            bool enable
-        )
-        {
-            HANDLE self = nullptr;
-            if (!::DuplicateHandle( ::GetCurrentProcess(), ::GetCurrentThread(), ::GetCurrentProcess(), &self, THREAD_ALL_ACCESS, FALSE, 0 ))
-                return false;
-
-            WatchArm arm = {};
-            arm.m_Thread = self;
-            arm.m_Address = address & ~static_cast<std::uintptr_t>(3);
-            arm.m_Enable = enable;
-
-            HANDLE helper = ::CreateThread( nullptr, 0, WatchArmThread, &arm, 0, nullptr );
-            bool done = false;
-
-            if (helper != nullptr)
-            {
-                ::WaitForSingleObject( helper, 5000 );
-                DWORD code = 1;
-                done = ::GetExitCodeThread( helper, &code ) && code == 0;
-                ::CloseHandle( helper );
-            }
-
-            ::CloseHandle( self );
-            return done;
-        }
-
-
         // Headlight factor FUN_00452910 (cdecl), called from the track mesh node FUN_00453110 (doc/LICHT.md 6.15).
         constexpr std::uintptr_t HEADLIGHT_CALL = 0x0045321A;
         constexpr std::uintptr_t HEADLIGHT_FACTOR = 0x00452910;
@@ -7134,7 +6208,6 @@ namespace dx11z
         {
             reinterpret_cast<HeadlightFn>(HEADLIGHT_FACTOR)(count, positions, matrix);
             Driver & driver = Driver::GetInstance();
-            driver.NoteHeadlight( count, positions, matrix );
             driver.OnHeadlightFactor( count );
         }
 
@@ -7169,7 +6242,6 @@ namespace dx11z
         // World draw FUN_00543ae0, called directly from the draw node FUN_0053f620 (doc/LICHT.md 6.6).
         constexpr std::uintptr_t ROAD_DRAW_CALL = 0x0053F70F;
         constexpr std::uintptr_t ROAD_DRAW = 0x00543AE0;
-        constexpr std::uint32_t ROAD_TEXTURE = 0xC4B0AEFA;
 
         using RoadDrawFn = void( __thiscall * )(void *, const void *, const void *, const void *, std::uint32_t, std::uint32_t, void *);
 
@@ -7187,7 +6259,6 @@ namespace dx11z
             Driver & driver = Driver::GetInstance();
             driver.OnBeforeMeshDraw();
             reinterpret_cast<RoadDrawFn>(ROAD_DRAW)(self, a, b, c, count, second, third);
-            driver.NoteRoadDraw( self, a, b, c, count );
             driver.OnMeshDrawn( self );
         }
 
@@ -7519,55 +6590,6 @@ namespace dx11z
             out[15] = 1.0f;
             return true;
         }
-    }
-
-
-    namespace
-    {
-        // Vertex lighting node of porsche.exe v3.5, vtable slot 0 at 0x005BBD5C (doc/LICHT.md 6.6).
-        constexpr std::uintptr_t LIGHT_NODE_SLOT = 0x005BBD5C;
-        constexpr std::uintptr_t LIGHT_NODE = 0x00574440;
-        constexpr std::uintptr_t NODE_STREAM = 0x0053F430;
-
-        using LightNodeFn = std::uint32_t( __thiscall * )(void *, std::uint32_t, int *);
-        using NodeStreamFn = int( __thiscall * )(void *, int, int);
-
-        std::uint32_t __fastcall LightNodeHook(
-            void * self,
-            void *,
-            std::uint32_t a,
-            int * b
-        )
-        {
-            Driver::GetInstance().NoteLightNode( self );
-            return reinterpret_cast<LightNodeFn>(LIGHT_NODE)(self, a, b);
-        }
-    }
-
-
-    void Driver::InstallLightHook()
-    {
-        auto * slot = reinterpret_cast<std::uintptr_t *>(LIGHT_NODE_SLOT);
-
-        // Only on the expected build: image at 0x400000 and the slot still holds the node.
-        if (::GetModuleHandleA( nullptr ) != reinterpret_cast<HMODULE>(0x00400000) || *slot != LIGHT_NODE)
-        {
-            Log( "M3T light hook not installed" );
-            return;
-        }
-
-        DWORD old = 0;
-        if (::VirtualProtect( slot, sizeof( *slot ), PAGE_READWRITE, &old ))
-        {
-            RememberPatch( LIGHT_NODE_SLOT );
-            *slot = reinterpret_cast<std::uintptr_t>(&LightNodeHook);
-            ::VirtualProtect( slot, sizeof( *slot ), old, &old );
-            Log( "M3T light hook installed at %08X", static_cast<unsigned>(LIGHT_NODE_SLOT) );
-        }
-
-        // Write watch of the snapshot (PLAN.md 9.4d).
-        if (g_WatchVeh == nullptr)
-            g_WatchVeh = ::AddVectoredExceptionHandler( 1, WatchHandler );
     }
 
 
@@ -8251,319 +7273,6 @@ namespace dx11z
     }
 
 
-    // Car reflections, stage 1 (PLAN.md 9): the environment slots of the player's car, see 'CarEnvPass' in driver.h.
-    // Once per frame: the textures behind the three slots, a log line when the game objects or the selected section
-    // change (at most 300 lines with the passes), the report every 10 s.
-    void Driver::CarEnvFlip()
-    {
-        ++m_CarEnvFrames;
-        if (m_CarEnvDrawnThisFrame)
-            ++m_CarEnvFramesDrawn;
-        m_CarEnvDrawnThisFrame = false;
-
-        if (::GetTickCount64() >= m_CarEnvNextReport)
-        {
-            if (m_CarEnvNextReport != 0)
-                CarEnvReport();
-            m_CarEnvNextReport = ::GetTickCount64() + 10000;
-        }
-
-        const std::uint32_t player = *reinterpret_cast<const std::uint32_t *>(0x0065741C);
-        const std::uintptr_t car = RacerCar( player );
-        std::uintptr_t model = 0;
-        std::array<std::uintptr_t, 3> objects = {};
-        if (car == 0 || !SafeCopy( reinterpret_cast<const void *>(car + 0x74C), &model, 4 ) || model == 0 ||
-            !SafeCopy( reinterpret_cast<const void *>(model + 0x2DC + 0xD0), objects.data(), sizeof( objects ) ))
-        {
-            m_CarEnvTextures.fill( nullptr );
-            return;
-        }
-
-        const auto resolve = [&]( std::uintptr_t object, int a, int b ) -> const Texture *
-        {
-            std::uintptr_t value = object;
-            if (object == 0 || (a >= 0 && !SafeCopy( reinterpret_cast<const void *>(object + static_cast<std::uintptr_t>(a)), &value, 4 )))
-                return nullptr;
-            if (b >= 0 && (value < 0x10000 || !SafeCopy( reinterpret_cast<const void *>(value + static_cast<std::uintptr_t>(b)), &value, 4 )))
-                return nullptr;
-            return IsTextureHandle( value ) ? reinterpret_cast<const Texture *>(value) : nullptr;
-        };
-
-        // The path has to give a texture for every filled slot.
-        const auto fits = [&]( int a, int b )
-        {
-            bool any = false;
-            for (const std::uintptr_t object : objects)
-            {
-                if (object == 0)
-                    continue;
-                if (resolve( object, a, b ) == nullptr)
-                    return false;
-                any = true;
-            }
-            return any;
-        };
-
-        if (m_CarEnvOffset == -2)
-        {
-            if (fits( -1, -1 ))
-                m_CarEnvOffset = -1;
-            for (int a = 0; a < 0x80 && m_CarEnvOffset == -2; a += 4)
-                if (fits( a, -1 ))
-                    m_CarEnvOffset = a;
-            for (int a = 0; a < 0x80 && m_CarEnvOffset == -2; a += 4)
-                for (int b = 0; b < 0x40 && m_CarEnvOffset == -2; b += 4)
-                    if (fits( a, b ))
-                    {
-                        m_CarEnvOffset = a;
-                        m_CarEnvOffset2 = b;
-                    }
-            if (m_CarEnvOffset != -2)
-                Log( "Car env: texture handle at object %s%X%s%X", m_CarEnvOffset < 0 ? "itself " : "+", m_CarEnvOffset < 0 ? 0 : m_CarEnvOffset,
-                    m_CarEnvOffset2 < 0 ? "" : ", then +", m_CarEnvOffset2 < 0 ? 0 : m_CarEnvOffset2 );
-        }
-
-        for (std::size_t i = 0; i < objects.size(); ++i)
-            m_CarEnvTextures[i] = m_CarEnvOffset == -2 ? nullptr : resolve( objects[i], m_CarEnvOffset, m_CarEnvOffset2 );
-
-        std::uintptr_t env = 0;
-        std::uintptr_t section = 0;
-        SafeCopy( reinterpret_cast<const void *>(0x006115D8), &env, 4 ) && env != 0 &&
-            SafeCopy( reinterpret_cast<const void *>(env + 0x58), &section, 4 );
-
-        if ((objects == m_CarEnvObjects && section == m_CarEnvSection) || m_CarEnvLines >= 300)
-            return;
-
-        const bool objects_changed = objects != m_CarEnvObjects;
-        m_CarEnvObjects = objects;
-        m_CarEnvSection = section;
-        ++m_CarEnvLines;
-
-        // Slice of the car on the route (TrkPos at [model + 0xF4] + 8), scales of the light block, the game's reflection switch.
-        std::uintptr_t sim = 0;
-        std::int16_t slice = -1;
-        SafeCopy( reinterpret_cast<const void *>(model + 0xF4), &sim, 4 ) && sim != 0 &&
-            SafeCopy( reinterpret_cast<const void *>(sim + 8), &slice, 2 );
-        float scales[2] = {};
-        SafeCopy( reinterpret_cast<const void *>(model + 0x2E0), scales, sizeof( scales ) );
-        std::uint8_t switch_byte = 0;
-        SafeCopy( reinterpret_cast<const void *>(0x006197CB), &switch_byte, 1 );
-
-        char textures[3][96] = {};
-        for (std::size_t i = 0; i < objects.size(); ++i)
-        {
-            const Texture * texture = m_CarEnvTextures[i];
-            if (texture != nullptr)
-            {
-                std::snprintf( textures[i], sizeof( textures[i] ), "%08X %dx%d %s stage %d%s", texture->m_Hash, texture->m_Width, texture->m_Height,
-                    FormatName( texture->m_Format ), texture->m_Stage, texture->m_Updates > 1 ? " dynamic" : "" );
-                MeasureDump( texture );
-            }
-            else
-            {
-                std::snprintf( textures[i], sizeof( textures[i] ), "%s", objects[i] != 0 ? "unresolved" : "none" );
-            }
-        }
-
-        Log( "Car env at flip %u, %.1f s: model %08X slice %d switch %u scales %.4f %.4f, slots %08X (%s) %08X (%s) %08X (%s)", m_FlipCount,
-            MeasureSeconds(), static_cast<unsigned>(model), slice, switch_byte, scales[0], scales[1], static_cast<unsigned>(objects[0]), textures[0],
-            static_cast<unsigned>(objects[1]), textures[1], static_cast<unsigned>(objects[2]), textures[2] );
-
-        // Section entry (0x48 bytes): slice range, picture numbers per slot and tunnel flag at +8, scales at +0x40/+0x44.
-        std::uint32_t entry[18] = {};
-        if (section != 0 && SafeCopy( reinterpret_cast<const void *>(section), entry, sizeof( entry ) ))
-        {
-            float scale[2] = {};
-            std::memcpy( scale, entry + 16, sizeof( scale ) );
-            Log( "Car env section %08X (last selected): slices %u-%u, pictures %u %u %u / tunnel %u %u %u, words %08X %08X %08X %08X %08X %08X %08X %08X, "
-                "scales %.3f %.3f", static_cast<unsigned>(section), entry[0], entry[1], entry[2], entry[3], entry[4], entry[5], entry[6], entry[7], entry[8],
-                entry[9], entry[10], entry[11], entry[12], entry[13], entry[14], entry[15], scale[0], scale[1] );
-        }
-
-        // Raw objects while the handle is not found, for the search by hand.
-        if (objects_changed && m_CarEnvOffset == -2)
-        {
-            for (const std::uintptr_t object : objects)
-            {
-                std::uint32_t words[32] = {};
-                if (object == 0 || !SafeCopy( reinterpret_cast<const void *>(object), words, sizeof( words ) ))
-                    continue;
-                std::string text;
-                for (int i = 0; i < 32; ++i)
-                {
-                    char word[16];
-                    std::snprintf( word, sizeof( word ), "%s%08X", (i % 8) == 0 ? (i == 0 ? "" : " |") : " ", words[i] );
-                    text += word;
-                }
-                Log( "Car env object %08X: %s", static_cast<unsigned>(object), text.c_str() );
-            }
-        }
-    }
-
-
-    // Every draw with one of the player's environment textures bound, by texture slot, stage and state.
-    void Driver::CarEnvBatch()
-    {
-        int slot = -1;
-        int stage = -1;
-        for (int s = 0; s < 2 && slot < 0; ++s)
-        {
-            for (int e = 0; e < 3; ++e)
-            {
-                if (m_Bound[static_cast<std::size_t>(s)] != nullptr && m_Bound[static_cast<std::size_t>(s)] == m_CarEnvTextures[static_cast<std::size_t>(e)])
-                {
-                    slot = e;
-                    stage = s;
-                    break;
-                }
-            }
-        }
-
-        if (slot < 0)
-            return;
-
-        m_CarEnvDrawnThisFrame = true;
-
-        const auto & render = m_D3D.m_Render;
-        const auto & stage0 = m_D3D.m_Stage[0];
-        const auto & stage1 = m_D3D.m_Stage[1];
-        const Texture * texture = m_Bound[static_cast<std::size_t>(stage)];
-        const Texture * other = m_Bound[stage == 0 ? 1u : 0u];
-        const bool blend = render[rs::ALPHABLENDENABLE] != 0;
-
-        char key[256];
-        std::snprintf( key, sizeof( key ), "%d %d %08X %d %u %u %u %u %u %u | %u %u %u %u %u | %u %u %u %u %u | %d", slot, stage,
-            other != nullptr ? other->m_Hash : 0u, blend ? 1 : 0, blend ? render[rs::SRCBLEND] : 0u, blend ? render[rs::DESTBLEND] : 0u,
-            render[rs::ZENABLE], render[rs::ZWRITEENABLE], render[rs::ALPHATESTENABLE], render[rs::CULLMODE], stage0[tss::COLOROP],
-            stage0[tss::COLORARG1], stage0[tss::COLORARG2], stage0[tss::ALPHAOP], stage0[tss::TEXCOORDINDEX], stage1[tss::COLOROP],
-            stage1[tss::COLORARG1], stage1[tss::COLORARG2], stage1[tss::ALPHAOP], stage1[tss::TEXCOORDINDEX], static_cast<int>(m_BatchPrimitive) );
-
-        auto & pass = m_CarEnvPasses[key];
-        if (pass.m_Id == 0)
-        {
-            pass.m_Id = static_cast<int>(m_CarEnvPasses.size());
-
-            if (m_CarEnvLines < 300)
-            {
-                ++m_CarEnvLines;
-                char other_text[96];
-                if (other != nullptr)
-                    std::snprintf( other_text, sizeof( other_text ), "%08X %dx%d %s", other->m_Hash, other->m_Width, other->m_Height, FormatName( other->m_Format ) );
-                else
-                    std::snprintf( other_text, sizeof( other_text ), "none" );
-
-                Log( "Car env pass #%d at flip %u, %.1f s: slot %d texture %08X in stage %d, other stage %s; blend %d src %u dst %u, z %u zwrite %u "
-                    "alphatest %u ref %u cull %u, stage0 op %u arg %u/%u alphaop %u texcoord %u, stage1 op %u arg %u/%u alphaop %u texcoord %u, "
-                    "primitive %d, %zu vertices", pass.m_Id, m_FlipCount, MeasureSeconds(), slot, texture->m_Hash, stage, other_text, blend ? 1 : 0,
-                    render[rs::SRCBLEND], render[rs::DESTBLEND], render[rs::ZENABLE], render[rs::ZWRITEENABLE], render[rs::ALPHATESTENABLE],
-                    render[rs::ALPHAREF], render[rs::CULLMODE], stage0[tss::COLOROP], stage0[tss::COLORARG1], stage0[tss::COLORARG2],
-                    stage0[tss::ALPHAOP], stage0[tss::TEXCOORDINDEX], stage1[tss::COLOROP], stage1[tss::COLORARG1], stage1[tss::COLORARG2],
-                    stage1[tss::ALPHAOP], stage1[tss::TEXCOORDINDEX], static_cast<int>(m_BatchPrimitive), m_BatchVertices.size() );
-
-                for (std::size_t i = 0; i < std::min<std::size_t>( 4, m_BatchVertices.size() ); ++i)
-                {
-                    const TlVertex & v = m_BatchVertices[i];
-                    Log( "  v%zu: screen %.1f %.1f z %.5f rhw %.5f, diffuse %08X specular %08X, uv0 %.4f %.4f uv1 %.4f %.4f", i, v.m_X, v.m_Y, v.m_Z,
-                        v.m_Rhw, v.m_Diffuse, v.m_Specular, v.m_U0, v.m_V0, v.m_U1, v.m_V1 );
-                }
-
-                // Return addresses into the game on the stack (heuristic, the game has no frame pointers).
-                const auto * stack = static_cast<const std::uintptr_t *>(_AddressOfReturnAddress());
-                const auto top = reinterpret_cast<const std::uintptr_t *>(reinterpret_cast<NT_TIB *>(::NtCurrentTeb())->StackBase);
-                std::string frames;
-                int used = 0;
-                for (std::size_t i = 0; i < 2048 && stack + i < top && used < 8; ++i)
-                {
-                    if (!LooksLikeReturn( stack[i] ))
-                        continue;
-                    char frame[48];
-                    DescribeAddress( reinterpret_cast<void *>(stack[i]), frame, sizeof( frame ) );
-                    frames += ' ';
-                    frames += frame;
-                    ++used;
-                }
-                Log( "  stack:%s", frames.c_str() );
-            }
-        }
-
-        for (const TlVertex & v : m_BatchVertices)
-        {
-            pass.m_MinU0 = std::min( pass.m_MinU0, v.m_U0 );
-            pass.m_MaxU0 = std::max( pass.m_MaxU0, v.m_U0 );
-            pass.m_MinV0 = std::min( pass.m_MinV0, v.m_V0 );
-            pass.m_MaxV0 = std::max( pass.m_MaxV0, v.m_V0 );
-            pass.m_MinU1 = std::min( pass.m_MinU1, v.m_U1 );
-            pass.m_MaxU1 = std::max( pass.m_MaxU1, v.m_U1 );
-            pass.m_MinV1 = std::min( pass.m_MinV1, v.m_V1 );
-            pass.m_MaxV1 = std::max( pass.m_MaxV1, v.m_V1 );
-            pass.m_Diffuse[0] += (v.m_Diffuse >> 24) & 0xFF;
-            pass.m_Diffuse[1] += (v.m_Diffuse >> 16) & 0xFF;
-            pass.m_Diffuse[2] += (v.m_Diffuse >> 8) & 0xFF;
-            pass.m_Diffuse[3] += v.m_Diffuse & 0xFF;
-            pass.m_Specular[0] += (v.m_Specular >> 16) & 0xFF;
-            pass.m_Specular[1] += (v.m_Specular >> 8) & 0xFF;
-            pass.m_Specular[2] += v.m_Specular & 0xFF;
-        }
-
-        if (m_BatchPrimitive == Primitive::TRIANGLES)
-        {
-            for (std::size_t i = 0; i + 2 < m_BatchIndices.size(); i += 3)
-            {
-                const TlVertex & a = m_BatchVertices[m_BatchIndices[i]];
-                const TlVertex & b = m_BatchVertices[m_BatchIndices[i + 1]];
-                const TlVertex & c = m_BatchVertices[m_BatchIndices[i + 2]];
-                pass.m_Area += 0.5 * std::fabs( static_cast<double>((b.m_X - a.m_X) * (c.m_Y - a.m_Y) - (c.m_X - a.m_X) * (b.m_Y - a.m_Y)) );
-            }
-            pass.m_Triangles += m_BatchIndices.size() / 3;
-        }
-
-        ++pass.m_Draws;
-        pass.m_Vertices += m_BatchVertices.size();
-    }
-
-
-    // Every 10 s: the passes since the last report, then their counters start again.
-    void Driver::CarEnvReport()
-    {
-        if (m_CarEnvFramesDrawn == 0 && m_CarEnvPasses.empty())
-        {
-            m_CarEnvFrames = 0;
-            return;
-        }
-
-        // The slots were resolved at the last flip, the game may have freed a texture since.
-        const auto hash = [&]( std::size_t i )
-        {
-            const Texture * texture = m_CarEnvTextures[i];
-            return texture != nullptr && IsTextureHandle( reinterpret_cast<std::uintptr_t>(texture) ) ? texture->m_Hash : 0u;
-        };
-        Log( "Car env report at %.1f s: %llu frames, %llu with env draws, slots now %08X %08X %08X", MeasureSeconds(),
-            static_cast<unsigned long long>(m_CarEnvFrames), static_cast<unsigned long long>(m_CarEnvFramesDrawn), hash( 0 ), hash( 1 ), hash( 2 ) );
-
-        const double frames = static_cast<double>(std::max<std::uint64_t>( 1, m_CarEnvFramesDrawn ));
-        for (auto & [key, pass] : m_CarEnvPasses)
-        {
-            if (pass.m_Draws == 0)
-                continue;
-
-            const double n = static_cast<double>(std::max<std::uint64_t>( 1, pass.m_Vertices ));
-            Log( "  #%d: %llu draws (%.1f per frame), %llu triangles, %.0f px per draw, uv0 %.3f..%.3f %.3f..%.3f, uv1 %.3f..%.3f %.3f..%.3f, "
-                "diffuse a %.0f rgb %.0f %.0f %.0f, specular %.0f %.0f %.0f", pass.m_Id, static_cast<unsigned long long>(pass.m_Draws),
-                static_cast<double>(pass.m_Draws) / frames, static_cast<unsigned long long>(pass.m_Triangles),
-                pass.m_Area / static_cast<double>(pass.m_Draws), pass.m_MinU0, pass.m_MaxU0, pass.m_MinV0, pass.m_MaxV0, pass.m_MinU1, pass.m_MaxU1,
-                pass.m_MinV1, pass.m_MaxV1, pass.m_Diffuse[0] / n, pass.m_Diffuse[1] / n, pass.m_Diffuse[2] / n, pass.m_Diffuse[3] / n,
-                pass.m_Specular[0] / n, pass.m_Specular[1] / n, pass.m_Specular[2] / n );
-
-            const int id = pass.m_Id;
-            pass = {};
-            pass.m_Id = id;
-        }
-
-        m_CarEnvFrames = 0;
-        m_CarEnvFramesDrawn = 0;
-    }
-
-
     std::uint32_t Driver::BeginCarLodDraw(
         std::uint32_t mask,
         bool room,
@@ -8579,6 +7288,7 @@ namespace dx11z
         // The draws so far are not of this pass; batches end at the edges of the call.
         Flush();
         CarReflDrawPending();
+        m_CarReflGlassCount = 0;
 
         // A menu room is no car: no reflection on its walls, and the frame copy waits for the car so it shows the room.
         if (room)
@@ -8608,6 +7318,14 @@ namespace dx11z
             std::memcpy( m_CarReflClipOfView.data(), clip_of_view, sizeof( clip_of_view ) );
             std::memcpy( m_CarReflViewOfClip.data(), view_of_clip, sizeof( view_of_clip ) );
             std::memcpy( m_CarReflViewport.data(), viewport, sizeof( viewport ) );
+        }
+
+        // B36: the sky by direction: the axes of this view, and the panorama when the sky has changed.
+        if (m_ConfigCarReflSky != 0 && m_ConfigCarReflSkyPanorama != 0)
+        {
+            float position[3] = {};
+            m_CarSkyRowsValid = ReadWorldCamera( m_CarSkyRows, position );
+            CarSkyBuildPanorama();
         }
 
         // What is reflected: the frame as it is before the first car part of the frame, the world without the cars.
@@ -8656,9 +7374,7 @@ namespace dx11z
             return;
 
         bool matte = false;
-        if (m_ConfigCarReflOnlyPart >= 0)
-            matte = part != m_ConfigCarReflOnlyPart;
-        else if (part >= 0)
+        if (part >= 0)
             for (const std::uint32_t entry : m_ConfigCarReflMatte)
                 matte = matte || ((entry >> 8) == static_cast<std::uint32_t>(part) &&
                     ((entry & 0xFF) == 0xFF || (entry & 0xFF) == static_cast<std::uint32_t>(variant)));
@@ -8672,10 +7388,14 @@ namespace dx11z
         // each matte part too, for the log.
         const bool body = part == 1;
         const int id = part << 8 | (variant & 0xFF);
-        if (matte != m_CarPartMatte || body != m_CarPartBody || (matte && id != m_CarPart))
+        // B34: glass and 'SkipParts' as well: in a batch with a neighbour they would count as whichever part came last.
+        const auto listed = [part]( const std::vector<int> & list ) { return std::find( list.begin(), list.end(), part ) != list.end(); };
+        const bool own = listed( m_ConfigCarReflGlassParts ) || listed( m_ConfigCarReflSkipParts );
+        if (matte != m_CarPartMatte || body != m_CarPartBody || own != m_CarPartOwn || ((matte || own) && id != m_CarPart))
             Flush();
         m_CarPartMatte = matte;
         m_CarPartBody = body;
+        m_CarPartOwn = own;
         m_CarPart = id;
     }
 
@@ -8684,16 +7404,9 @@ namespace dx11z
     {
         if (!m_Frame)
             return false;
-        const PerfScope car_copy_scope( m_ConfigProfile > 0, m_ProfileCarCopyTicks, m_ProfileDepth3 );
-        if (m_ConfigProfile > 0)
-        {
-            ++m_ProfileCarCopies;
-            ProfileMark( 9 );
-        }
 
         D3D11_TEXTURE2D_DESC desc = {};
         m_Frame->GetDesc( &desc );
-        CopyOrderNote( "car reflections" );
 
         // '[CarReflections] SourceScale' 0.5 (9.13d): resolved at full size without levels, drawn into a half size copy.
         const bool half = m_ConfigCarReflSourceScale < 1.0f && m_CarReflDownPs && m_ReflCompositeVs;
@@ -8826,8 +7539,6 @@ namespace dx11z
     {
         if (source == nullptr || !m_Frame || !m_BlurDownPs || !m_BlurUpPs || !m_ReflCompositeVs)
             return false;
-        if (m_ConfigProfile > 0)
-            ProfileMark( 11 );
 
         D3D11_TEXTURE2D_DESC frame = {};
         m_Frame->GetDesc( &frame );
@@ -8944,23 +7655,8 @@ namespace dx11z
     }
 
 
-    void Driver::CopyOrderNote(
-        const char * what
-    )
-    {
-        // '[Dx11] Measure' (9.13d, step 6): which frame copy comes first in a frame and after how many draws, every 600th frame
-        // (40 lines at most), to see whether the car and water copies could be one.
-        if (m_ConfigMeasure <= 0 || m_CopyOrderLines >= 40 || m_FlipCount % 600 != 0)
-            return;
-        ++m_CopyOrderLines;
-        Log( "Copy order: flip %u, %s frame copy after %llu draws of the frame, queue list %d, car pass %02X", m_FlipCount, what,
-            static_cast<unsigned long long>(m_CopyOrderDraws), m_QueueList, m_CarLodMask );
-    }
-
-
     void Driver::CarReflBatch()
     {
-        const PerfScope car_batch_scope( m_ConfigProfile > 0, m_ProfileCarBatchTicks, m_ProfileDepth2 );
         const std::uint32_t mask = m_CarLodMask;
         const auto & render = m_D3D.m_Render;
 
@@ -9001,6 +7697,13 @@ namespace dx11z
             m_CarReflOutcome = "SkipTextures";
             return;
         }
+        // B34: door handle and lamps ('SkipParts'): small grey details, the paint reflection made them a bright ring.
+        if (m_CarPart >= 0 && std::find( m_ConfigCarReflSkipParts.begin(), m_ConfigCarReflSkipParts.end(), m_CarPart >> 8 ) != m_ConfigCarReflSkipParts.end())
+        {
+            ++stats.m_Skipped;
+            m_CarReflOutcome = "SkipParts";
+            return;
+        }
         // B34: glass parts reflect as a whole as glass (own strength, no paint look); 'GlassStrength' 0 = none at all.
         const bool glass_part = m_CarPart >= 0 &&
             std::find( m_ConfigCarReflGlassParts.begin(), m_ConfigCarReflGlassParts.end(), m_CarPart >> 8 ) != m_ConfigCarReflGlassParts.end();
@@ -9020,9 +7723,33 @@ namespace dx11z
                 return;
             }
         }
-        // B34: grilles and meshes, mostly half transparent texels; not with '[CarReflections] Glass' 1 (glass is wanted then).
+        // B34: the windows of most cars are the glass texture on a body part: they reflect as glass, only their see-through texels.
+        const bool glass_page = !glass_part && blended && texture != nullptr && texture->m_GlassPage && m_ConfigCarReflGlassStrength > 0.0f;
+        if (glass_page && m_CarReflAlphaSkipped.insert( hash ).second && m_CarReflAlphaSkipped.size() <= 64 && m_CarReflLines < 300)
+        {
+            ++m_CarReflLines;
+            Log( "Car reflections: texture %08X %dx%d part %d/%d is a glass texture, reflected as glass (B34)", hash, texture->m_Width,
+                texture->m_Height, m_CarPart >> 8, m_CarPart & 0xFF );
+        }
+        // B34: the game draws every window twice with the same corners (the glass, then a second layer). One reflection only.
+        if ((glass_part || glass_page) && !m_BatchVertices.empty())
+        {
+            const TlVertex & first = m_BatchVertices[0];
+            if (m_CarReflGlassCount == m_BatchVertices.size() && m_CarReflGlassFirst[0] == first.m_X &&
+                m_CarReflGlassFirst[1] == first.m_Y && m_CarReflGlassFirst[2] == first.m_Z)
+            {
+                ++stats.m_Skipped;
+                m_CarReflOutcome = "second layer of a window";
+                return;
+            }
+            m_CarReflGlassCount = m_BatchVertices.size();
+            m_CarReflGlassFirst[0] = first.m_X;
+            m_CarReflGlassFirst[1] = first.m_Y;
+            m_CarReflGlassFirst[2] = first.m_Z;
+        }
+        // B34: grilles and meshes, mostly half transparent texels.
         // Not on glass parts: glass is half transparent all over and reflects as glass (B34, the GT1 side window stayed bare).
-        if (!glass_part && m_ConfigCarReflSkipAlphaMid > 0.0f && m_ConfigCarReflGlass == 0 && texture != nullptr && texture->m_Translucent &&
+        if (!glass_part && !glass_page && m_ConfigCarReflSkipAlphaMid > 0.0f && texture != nullptr && texture->m_Translucent &&
             texture->m_AlphaMid >= m_ConfigCarReflSkipAlphaMid)
         {
             ++stats.m_Skipped;
@@ -9109,7 +7836,25 @@ namespace dx11z
         // B28: parts of '[CarReflections] MatteSolid' hold no paint, they stay matte all over.
         const bool matte_solid = m_CarPartMatte && m_CarPart >= 0 &&
             std::find( m_ConfigCarReflMatteSolid.begin(), m_ConfigCarReflMatteSolid.end(), m_CarPart >> 8 ) != m_ConfigCarReflMatteSolid.end();
-        const auto paint_cells = m_CarPartMatte && !matte_solid && m_CarReflBodyTextures.count( hash ) != 0 ? m_CarReflPaintCells.find( hash )
+        // B34: a body part may use a corner of the interior texture, that does not make the interior paint. A texture on which
+        // one pure interior part has many triangles is the interior page, all matte parts on it stay matte. Measured on 40 paint
+        // textures: at most 20 triangles of such a part (small trim); on the interior page 123 to 257.
+        constexpr std::size_t INTERIOR_PAGE_TRIANGLES = 60;
+        static constexpr int INTERIOR_PARTS[] = { 9, 24, 25, 26, 28, 29, 30, 43, 45, 46, 49, 56, 59 };
+        if (m_CarPartMatte && hash != 0 && m_CarPart >= 0 && m_BatchIndices.size() / 3 >= INTERIOR_PAGE_TRIANGLES &&
+            std::find( std::begin( INTERIOR_PARTS ), std::end( INTERIOR_PARTS ), m_CarPart >> 8 ) != std::end( INTERIOR_PARTS ))
+        {
+            if (m_CarReflInteriorPages.size() > 1024)
+                m_CarReflInteriorPages.clear();
+            if (m_CarReflInteriorPages.insert( hash ).second && m_CarReflLines < 400)
+            {
+                ++m_CarReflLines;
+                Log( "Car reflections: texture %08X is the interior page (part %d, %zu triangles), its matte parts stay matte (B34)", hash,
+                    m_CarPart >> 8, m_BatchIndices.size() / 3 );
+            }
+        }
+        const bool interior_page = m_CarPartMatte && m_CarReflInteriorPages.count( hash ) != 0;
+        const auto paint_cells = m_CarPartMatte && !matte_solid && !interior_page && m_CarReflBodyTextures.count( hash ) != 0 ? m_CarReflPaintCells.find( hash )
             : m_CarReflPaintCells.end();
         const bool matte_paint = paint_cells != m_CarReflPaintCells.end();
         const auto log_matte = [&]( std::size_t kept )
@@ -10026,7 +8771,7 @@ namespace dx11z
             ? static_cast<float>(render[rs::ALPHAREF] & 0xFF) / 255.0f : -1.0f;
         // Blended draws: below this alpha the pixel is glass, reflected only with '[CarReflections] Glass'.
         // B34: -2 marks a glass part, reflected as a whole with the glass settings (CarReflDrawPending).
-        const float glass_ref = glass_part ? -2.0f : (blended && texture != nullptr ? 0.95f : -1.0f);
+        const float glass_ref = glass_part ? -2.0f : glass_page ? CAR_REFL_GLASS_PAGE : (blended && texture != nullptr ? 0.95f : -1.0f);
         const float up_f[3] = { static_cast<float>(up[0]), static_cast<float>(up[1]), static_cast<float>(up[2]) };
         m_CarReflOutcome = glass_part ? "reflected as glass" : "reflected";
         m_CarReflGlassRefLast = glass_ref;
@@ -10132,11 +8877,6 @@ namespace dx11z
         for (const std::uint16_t index : indices)
             pending->m_Indices.push_back( static_cast<std::uint16_t>(index + base) );
         ++m_CarReflPendingParts;
-        if (m_ConfigProfile > 0)
-        {
-            ++m_ProfileCarBatches;
-            m_ProfileCarVertices += count;
-        }
 
         ++stats.m_Drawn;
         stats.m_Triangles += indices.size() / 3;
@@ -10147,7 +8887,6 @@ namespace dx11z
     {
         if (m_CarReflPendingCount == 0)
             return;
-        const PerfScope car_batch_scope( m_ConfigProfile > 0, m_ProfileCarDrawTicks, m_ProfileDepth2 );
         for (std::size_t k = 0; k < m_CarReflPendingCount; ++k)
         {
             CarReflPending & pending = m_CarReflPending[k];
@@ -10217,6 +8956,265 @@ namespace dx11z
     }
 
 
+    // B36: the car reflection looked the sky up at the top row of the sky image of this camera; a small change of the camera
+    // moved that row through the whole height of the sky texture. The game keeps the horizon band as a ring of 16 segments
+    // (SkyHorizon, last level of Sky_Current): it is drawn once into a panorama and looked up by the direction in the world.
+    void Driver::CarSkyNoteBatch()
+    {
+        if (m_ConfigCarRefl <= 0 || m_ConfigCarReflSky == 0 || m_ConfigCarReflSkyPanorama == 0 || !BatchIsSky())
+            return;
+
+        // The flat plane behind the band, the colour of the sky above it.
+        if (m_Bound[0] == nullptr)
+        {
+            if (m_D3D.m_Render[rs::ALPHABLENDENABLE] == 0)
+            {
+                m_CarSkyFlatColour = m_BatchVertices.front().m_Diffuse | 0xFF000000u;
+                m_CarSkyFlatFlip = m_FlipCount;
+            }
+            return;
+        }
+
+        std::uintptr_t sky = 0;
+        std::int32_t levels = 0;
+        std::uintptr_t horizon = 0;
+        if (!SafeCopy( reinterpret_cast<const void *>(0x00627E48), &sky, 4 ) || sky == 0 ||
+            !SafeCopy( reinterpret_cast<const void *>(sky + 0x28), &levels, 4 ) || levels < 1 || levels > 10 ||
+            !SafeCopy( reinterpret_cast<const void *>(sky + static_cast<std::uintptr_t>(levels - 1) * 4), &horizon, 4 ) || horizon == 0)
+            return;
+
+        if (horizon != m_CarSkyHorizon)
+        {
+            std::uint32_t vtable = 0;
+            std::int32_t count = 0;
+            unsigned char ready = 0;
+            std::uint32_t positions = 0, uvs = 0, colours = 0;
+            if (!SafeCopy( reinterpret_cast<const void *>(horizon), &vtable, 4 ) || vtable != 0x005B3E54u ||
+                !SafeCopy( reinterpret_cast<const void *>(horizon + 0x28), &count, 4 ) || count != 0x80 ||
+                !SafeCopy( reinterpret_cast<const void *>(horizon + 0x54), &ready, 1 ) || ready == 0 ||
+                !SafeCopy( reinterpret_cast<const void *>(horizon + 0x2C), &positions, 4 ) || positions == 0 ||
+                !SafeCopy( reinterpret_cast<const void *>(horizon + 0x34), &uvs, 4 ) || uvs == 0 ||
+                !SafeCopy( reinterpret_cast<const void *>(horizon + 0x3C), &colours, 4 ) || colours == 0 ||
+                !SafeCopy( reinterpret_cast<const void *>(static_cast<std::uintptr_t>(positions)), m_CarSkyBandPositions.data(), sizeof( m_CarSkyBandPositions ) ) ||
+                !SafeCopy( reinterpret_cast<const void *>(static_cast<std::uintptr_t>(uvs)), m_CarSkyBandUv.data(), sizeof( m_CarSkyBandUv ) ) ||
+                !SafeCopy( reinterpret_cast<const void *>(static_cast<std::uintptr_t>(colours)), m_CarSkyBandColours.data(), sizeof( m_CarSkyBandColours ) ))
+                return;
+            // A new sky. The flat plane comes before the band: its colour of this frame is the new one, an older one is not.
+            if (m_CarSkyFlatFlip != m_FlipCount)
+                m_CarSkyFlatFlip = ~0ull;
+            m_CarSkyHorizon = horizon;
+            m_CarSkyBandView.Reset();
+            m_CarSkyBandHash = 0;
+            m_CarSkyPanoValid = false;
+        }
+        if (m_CarSkyBandView)
+            return;
+
+        // The texture of the band: the draw whose corners carry the texture coordinates of the ring.
+        std::size_t matches = 0;
+        for (const TlVertex & vertex : m_BatchVertices)
+            for (const auto & uv : m_CarSkyBandUv)
+                if (std::abs( vertex.m_U0 - uv[0] ) < 1e-3f && std::abs( vertex.m_V0 - uv[1] ) < 1e-3f)
+                {
+                    ++matches;
+                    break;
+                }
+        if (matches >= 4 && matches * 2 >= m_BatchVertices.size() && m_Bound[0]->m_View)
+        {
+            m_CarSkyBandView = m_Bound[0]->m_View;
+            m_CarSkyBandHash = static_cast<std::uint32_t>(m_Bound[0]->m_Hash);
+        }
+    }
+
+
+    bool Driver::CarSkyPanoramaUsable() const
+    {
+        return m_ConfigCarReflSky != 0 && m_ConfigCarReflSkyPanorama != 0 && m_CarSkyPanoValid && m_CarSkyRowsValid && m_CarSkyPanoView &&
+            *reinterpret_cast<const std::int32_t *>(0x0065B928) == 0;
+    }
+
+
+    void Driver::CarSkyBuildPanorama()
+    {
+        if (*reinterpret_cast<const std::int32_t *>(0x0065B928) != 0 || !m_CarSkyBandView || !m_CarSkyPanoVs || !m_CarSkyPanoPs || !m_CarSkyPanoLayout)
+            return;
+
+        // Above the band: the flat colour of the sky, without one the clear colour of the game. The flat plane is not drawn in
+        // every view (the game culls it), so its colour is kept: falling back for a frame made the whole sky jump.
+        const std::uint32_t zenith = (m_CarSkyFlatFlip != ~0ull ? m_CarSkyFlatColour : m_BackgroundColor) | 0xFF000000u;
+        if (m_CarSkyPanoValid && m_CarSkyBuiltHorizon == m_CarSkyHorizon && m_CarSkyBuiltHash == m_CarSkyBandHash && m_CarSkyBuiltZenith == zenith)
+            return;
+
+        if (!m_CarSkyPano)
+        {
+            D3D11_TEXTURE2D_DESC desc = {};
+            desc.Width = 512;
+            desc.Height = 256;
+            desc.MipLevels = 0;
+            desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            desc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+            if (FAILED( m_Device->CreateTexture2D( &desc, nullptr, m_CarSkyPano.Put() ) ) ||
+                FAILED( m_Device->CreateRenderTargetView( m_CarSkyPano.Get(), nullptr, m_CarSkyPanoRtv.Put() ) ) ||
+                FAILED( m_Device->CreateShaderResourceView( m_CarSkyPano.Get(), nullptr, m_CarSkyPanoView.Put() ) ))
+            {
+                m_CarSkyPano.Reset();
+                m_CarSkyPanoRtv.Reset();
+                m_CarSkyPanoView.Reset();
+                return;
+            }
+            D3D11_BLEND_DESC blend = {};
+            blend.RenderTarget[0].BlendEnable = TRUE;
+            blend.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+            blend.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+            blend.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+            blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+            blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+            blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+            m_Device->CreateBlendState( &blend, m_CarSkyPanoBlend.Put() );
+            D3D11_DEPTH_STENCIL_DESC depth = {};
+            depth.DepthEnable = FALSE;
+            depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+            depth.DepthFunc = D3D11_COMPARISON_ALWAYS;
+            m_Device->CreateDepthStencilState( &depth, m_CarSkyPanoDepth.Put() );
+            D3D11_RASTERIZER_DESC raster = {};
+            raster.FillMode = D3D11_FILL_SOLID;
+            raster.CullMode = D3D11_CULL_NONE;
+            raster.DepthClipEnable = FALSE;
+            m_Device->CreateRasterizerState( &raster, m_CarSkyPanoRaster.Put() );
+            D3D11_SAMPLER_DESC sampler = {};
+            sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+            sampler.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+            sampler.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+            sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+            sampler.MaxLOD = D3D11_FLOAT32_MAX;
+            m_Device->CreateSamplerState( &sampler, m_CarSkyPanoSampler.Put() );
+        }
+        if (!m_CarSkyPanoBlend || !m_CarSkyPanoDepth || !m_CarSkyPanoRaster || !m_CarSkyPanoSampler)
+            return;
+
+        struct PanoVertex
+        {
+            float m_X, m_Y, m_U, m_V;
+            std::uint32_t m_Colour;
+        };
+        std::vector<PanoVertex> vertices;
+        vertices.reserve( 16 * 3 * 6 * 2 );
+        const auto height = []( float y ) { return 2.0f * (y + 0.35f) / 1.35f - 1.0f; }; // direction height -> clip y
+        const auto around = []( const std::array<float, 4> & p )
+        {
+            return static_cast<float>(std::atan2( static_cast<double>(p[0]), static_cast<double>(p[2]) ) / 6.283185307179586 + 0.5);
+        };
+        const auto rise = []( const std::array<float, 4> & p )
+        {
+            const double flat = std::sqrt( static_cast<double>(p[0]) * p[0] + static_cast<double>(p[2]) * p[2] );
+            return static_cast<float>(p[1] / std::sqrt( flat * flat + static_cast<double>(p[1]) * p[1] ));
+        };
+        float band_top = -1.0f, band_bottom = 1.0f;
+        for (std::size_t segment = 0; segment < 16; ++segment)
+        {
+            const std::size_t base = segment * 4;
+            const auto & top_a = m_CarSkyBandPositions[base];
+            const auto & top_b = m_CarSkyBandPositions[base + 1];
+            const auto & low_a = m_CarSkyBandPositions[base + 3];
+            float a0 = around( top_a );
+            float a1 = around( top_b );
+            if (a1 - a0 > 0.5f)
+                a1 -= 1.0f;
+            else if (a0 - a1 > 0.5f)
+                a1 += 1.0f;
+            const float y_top = rise( top_a );
+            const float y_low = rise( low_a );
+            band_top = std::max( band_top, y_top );
+            band_bottom = std::min( band_bottom, y_low );
+            const auto & uv_ta = m_CarSkyBandUv[base];
+            const auto & uv_tb = m_CarSkyBandUv[base + 1];
+            const auto & uv_lb = m_CarSkyBandUv[base + 2];
+            const auto & uv_la = m_CarSkyBandUv[base + 3];
+            const std::uint32_t c_ta = m_CarSkyBandColours[base], c_tb = m_CarSkyBandColours[base + 1];
+            const std::uint32_t c_lb = m_CarSkyBandColours[base + 2], c_la = m_CarSkyBandColours[base + 3];
+            for (const float shift : { 0.0f, 1.0f, -1.0f })
+            {
+                const float x0 = 2.0f * (a0 + shift) - 1.0f;
+                const float x1 = 2.0f * (a1 + shift) - 1.0f;
+                if (std::max( x0, x1 ) <= -1.0f || std::min( x0, x1 ) >= 1.0f)
+                    continue;
+                const auto quad = [&]( const PanoVertex & a, const PanoVertex & b, const PanoVertex & c, const PanoVertex & d )
+                {
+                    vertices.push_back( a );
+                    vertices.push_back( b );
+                    vertices.push_back( c );
+                    vertices.push_back( a );
+                    vertices.push_back( c );
+                    vertices.push_back( d );
+                };
+                // The band.
+                quad( { x0, height( y_top ), uv_ta[0], uv_ta[1], c_ta }, { x1, height( y_top ), uv_tb[0], uv_tb[1], c_tb },
+                    { x1, height( y_low ), uv_lb[0], uv_lb[1], c_lb }, { x0, height( y_low ), uv_la[0], uv_la[1], c_la } );
+                // Above it the top row fades into the flat colour, no edge.
+                const float y_fade = std::min( y_top + 0.14f, 1.0f );
+                quad( { x0, height( y_fade ), uv_ta[0], uv_ta[1], c_ta & 0x00FFFFFFu }, { x1, height( y_fade ), uv_tb[0], uv_tb[1], c_tb & 0x00FFFFFFu },
+                    { x1, height( y_top ), uv_tb[0], uv_tb[1], c_tb }, { x0, height( y_top ), uv_ta[0], uv_ta[1], c_ta } );
+                // Below it the bottom row down to the end of the panorama.
+                quad( { x0, height( y_low ), uv_la[0], uv_la[1], c_la }, { x1, height( y_low ), uv_lb[0], uv_lb[1], c_lb },
+                    { x1, -1.0f, uv_lb[0], uv_lb[1], c_lb }, { x0, -1.0f, uv_la[0], uv_la[1], c_la } );
+            }
+        }
+
+        D3D11_BUFFER_DESC buffer_desc = {};
+        buffer_desc.ByteWidth = static_cast<UINT>(vertices.size() * sizeof( PanoVertex ));
+        buffer_desc.Usage = D3D11_USAGE_IMMUTABLE;
+        buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA data = {};
+        data.pSysMem = vertices.data();
+        if (vertices.empty() || FAILED( m_Device->CreateBuffer( &buffer_desc, &data, m_CarSkyPanoVertices.Put() ) ))
+            return;
+
+        ID3D11ShaderResourceView * none[4] = {};
+        m_Context->PSSetShaderResources( 0, 4, none );
+        ID3D11RenderTargetView * target = m_CarSkyPanoRtv.Get();
+        m_Context->OMSetRenderTargets( 1, &target, nullptr );
+        float clear[4];
+        ColorToFloat4( zenith, clear );
+        clear[3] = 1.0f;
+        m_Context->ClearRenderTargetView( target, clear );
+        const D3D11_VIEWPORT viewport = { 0.0f, 0.0f, 512.0f, 256.0f, 0.0f, 1.0f };
+        m_Context->RSSetViewports( 1, &viewport );
+        m_Context->RSSetState( m_CarSkyPanoRaster.Get() );
+        const float factor[4] = {};
+        m_Context->OMSetBlendState( m_CarSkyPanoBlend.Get(), factor, 0xFFFFFFFF );
+        m_Context->OMSetDepthStencilState( m_CarSkyPanoDepth.Get(), 0 );
+        m_Context->IASetInputLayout( m_CarSkyPanoLayout.Get() );
+        UINT stride = sizeof( PanoVertex );
+        UINT offset = 0;
+        ID3D11Buffer * vertex_buffer = m_CarSkyPanoVertices.Get();
+        m_Context->IASetVertexBuffers( 0, 1, &vertex_buffer, &stride, &offset );
+        m_Context->IASetPrimitiveTopology( D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST );
+        m_Context->VSSetShader( m_CarSkyPanoVs.Get(), nullptr, 0 );
+        m_Context->PSSetShader( m_CarSkyPanoPs.Get(), nullptr, 0 );
+        ID3D11ShaderResourceView * band = m_CarSkyBandView.Get();
+        ID3D11SamplerState * band_sampler = m_PresentSampler.Get();
+        m_Context->PSSetShaderResources( 0, 1, &band );
+        m_Context->PSSetSamplers( 0, 1, &band_sampler );
+        m_Context->Draw( static_cast<UINT>(vertices.size()), 0 );
+        m_Context->PSSetShaderResources( 0, 1, none );
+        ID3D11RenderTargetView * no_target = nullptr;
+        m_Context->OMSetRenderTargets( 1, &no_target, nullptr );
+        m_Context->GenerateMips( m_CarSkyPanoView.Get() );
+
+        m_CarSkyBuiltHorizon = m_CarSkyHorizon;
+        m_CarSkyBuiltHash = m_CarSkyBandHash;
+        m_CarSkyBuiltZenith = zenith;
+        m_CarSkyPanoValid = true;
+        Log( "Car reflections: sky panorama built (B36): band texture %08X, height of the band %.3f to %.3f, colour above it %08X",
+            m_CarSkyBandHash, band_bottom, band_top, zenith );
+    }
+
+
     void Driver::CarReflDraw(
         CarReflPending & pending
     )
@@ -10258,13 +9256,26 @@ namespace dx11z
 
         const float * viewport = m_CarReflViewport.data();
         const float * view_of_clip = m_CarReflViewOfClip.data();
-        const float sky_blend = CarSkyImageBlend();
+        // B36: the sky by direction when the panorama is there, else the sky image of the water reflection.
+        const bool sky_panorama = CarSkyPanoramaUsable();
+        const float sky_blend = sky_panorama ? 1.0f : CarSkyImageBlend();
         const bool sky_image = sky_blend > 0.0f;
 
         // Layout of 'CarReflectConstants' in shaders::CAR_REFLECT.
         if (SUCCEEDED( m_Context->Map( m_CarReflConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
         {
-            float constants[96] = {};
+            float constants[108] = {};
+            // B36: view -> world for the sky by direction (x right + y up - z forward).
+            if (sky_panorama)
+            {
+                for (int j = 0; j < 3; ++j)
+                {
+                    constants[96 + j * 4] = m_CarSkyRows[j];
+                    constants[97 + j * 4] = m_CarSkyRows[3 + j];
+                    constants[98 + j * 4] = -m_CarSkyRows[6 + j];
+                }
+                constants[99] = 1.0f;
+            }
             // 9.15b: highlights and clearcoat (g_Highlight, g_Coat).
             constants[88] = m_ConfigCarReflHighlightBoost;
             constants[89] = m_ConfigCarReflHighlightThreshold;
@@ -10289,7 +9300,7 @@ namespace dx11z
                 constants[44 + j] = forward_length > 0.0 ? static_cast<float>(forward[j] / forward_length) : (j == 2 ? 1.0f : 0.0f);
             constants[47] = pending.m_AlphaRef;
             constants[48] = pending.m_GlassRef;
-            constants[49] = m_ConfigCarReflGlass > 0 ? 1.0f : 0.0f;
+            constants[49] = 0.0f; // was the old 'Glass' key (all translucent pixels as paint), replaced by 'GlassParts'
             const bool glass_part = pending.m_GlassRef < -1.5f;
             for (int j = 0; j < 3; ++j)
                 constants[52 + j] = pending.m_Up[j];
@@ -10338,7 +9349,16 @@ namespace dx11z
                 }
                 ++m_WeatherStats[m_CarWeather[0] > 0.0f ? 4 : 5];
             }
-            // B34: glass parts: glass look, no clip by alpha, no highlight boost, no clearcoat, Schlick 5.
+            // B34: the glass texture on a body part: glass look. All other blended textures keep the cut (handle and lamp rims).
+            if (pending.m_GlassRef == CAR_REFL_GLASS_PAGE)
+            {
+                constants[50] = m_ConfigCarReflGlassStrength;
+                constants[51] = std::clamp( m_ConfigCarReflGlassF0 / m_ConfigCarReflGlassStrength, 0.0f, 1.0f );
+            }
+            if (glass_part || pending.m_GlassRef == CAR_REFL_GLASS_PAGE)
+                constants[90] = m_ConfigCarReflGlassSkyBoost;
+            // B34: glass parts: glass look, no clip by alpha, no clearcoat, Fresnel exponent 3; highlights as on the paint
+            // (bright sky on the glass).
             if (glass_part)
             {
                 // Cover = strength x (F0 + (1 - F0) x (1 - facing)^3): 'GlassReflectance' head on, 'GlassStrength' at a flat
@@ -10348,7 +9368,6 @@ namespace dx11z
                 constants[41] = std::clamp( m_ConfigCarReflGlassF0 / glass_strength, 0.0f, 1.0f );
                 constants[48] = -1.0f;
                 constants[60] = 3.0f;
-                constants[88] = 0.0f;
                 constants[92] = 0.0f;
             }
             std::memcpy( mapped.pData, constants, sizeof( constants ) );
@@ -10407,16 +9426,15 @@ namespace dx11z
         m_Context->VSSetConstantBuffers( 0, 1, &constant_buffer );
         m_Context->PSSetConstantBuffers( 0, 1, &constant_buffer );
         ID3D11ShaderResourceView * views[4] = { m_CarReflSourceView.Get(), pending.m_View,
-            m_ConfigCarReflBlurChain > 0 && m_BlurChainValid ? m_BlurChainView.Get() : nullptr, sky_image ? m_ReflSkyView.Get() : nullptr };
-        ID3D11SamplerState * samplers[2] = { m_PresentSampler.Get(), pending.m_Sampler };
+            m_ConfigCarReflBlurChain > 0 && m_BlurChainValid ? m_BlurChainView.Get() : nullptr,
+            sky_panorama ? m_CarSkyPanoView.Get() : (sky_image ? m_ReflSkyView.Get() : nullptr) };
+        ID3D11SamplerState * samplers[3] = { m_PresentSampler.Get(), pending.m_Sampler, m_CarSkyPanoSampler.Get() };
         m_Context->PSSetShaderResources( 0, 4, views );
-        m_Context->PSSetSamplers( 0, 2, samplers );
+        m_Context->PSSetSamplers( 0, 3, samplers );
         const float factor[4] = {};
         m_Context->OMSetBlendState( m_CarReflBlend.Get(), factor, 0xFFFFFFFF );
         m_Context->OMSetDepthStencilState( m_CarReflDepth.Get(), 0 );
         m_Context->RSSetState( raster.Get() );
-        if (m_ConfigProfile > 0)
-            ProfileMark( 10 );
         m_Context->DrawIndexed( static_cast<UINT>(index_count), first_index, static_cast<INT>(base_vertex) );
         ++m_CarReflPendingDraws;
     }
@@ -11257,7 +10275,6 @@ namespace dx11z
 
         if (PrepareHeadMesh( true ))
         {
-            ++m_DayStats.m_Prepared;
             if ((m_DayLogged & 4) == 0)
             {
                 m_DayLogged |= 4;
@@ -11266,7 +10283,6 @@ namespace dx11z
         }
         else
         {
-            ++m_DayStats.m_Failed;
             if ((m_DayLogged & 8) == 0)
             {
                 m_DayLogged |= 8;
@@ -11532,11 +10548,9 @@ namespace dx11z
         if (m_ConfigHeadlights == 0 || (m_ConfigHeadlightsDay == 0 && m_ConfigOpponents == 0 && m_ConfigTailGlow == 0))
             return;
 
-        ++m_DayStats.m_Calls;
 
         // Also at night: when the player's light is off, the other cars light the track through this path.
         auto * night = reinterpret_cast<std::uint16_t *>(0x00628A28);
-        m_DayStats.m_NightFlag = *night;
         if ((m_DayLogged & 1) == 0)
         {
             m_DayLogged |= 1;
@@ -11545,18 +10559,14 @@ namespace dx11z
         }
 
         const std::uint32_t index = *reinterpret_cast<const std::uint32_t *>(0x0065741C);
-        m_DayStats.m_Index = index;
         const std::uintptr_t car = RacerCar( index );
         if (car == 0)
         {
-            ++m_DayStats.m_NoCar;
             return;
         }
 
         std::uint8_t lights[2] = {};
         const bool switch_on = CarLightsOn( car, lights );
-        m_DayStats.m_Lights[0] = lights[0];
-        m_DayStats.m_Lights[1] = lights[1];
 
         if ((m_DayLogged & 2) == 0)
         {
@@ -11572,7 +10582,6 @@ namespace dx11z
         // Night with the player's light on: the game's own path through FUN_00452910 lights the meshes.
         if (native_night && switch_on)
         {
-            ++m_DayStats.m_Night;
             return;
         }
 
@@ -11595,7 +10604,6 @@ namespace dx11z
         // Player light off (night, 'HeadlightsDay' 0, or switch off with 1) and no flasher: only the other cars light the track.
         if (!player_on)
         {
-            ++m_DayStats.m_SwitchOff;
             CollectCarLights();
             if (m_CarLights.empty() && m_RearLights.empty())
                 return;
@@ -11612,12 +10620,10 @@ namespace dx11z
         void * renderer
     )
     {
-        ++m_DayStats.m_Draws;
 
         if (!m_HeadMesh)
             return;
 
-        ++m_DayStats.m_LitDraws;
 
         // By day the light ends with the world draw, the next one prepares it again.
         if (m_DayMesh)
@@ -11655,655 +10661,9 @@ namespace dx11z
 
         // Check of the reconstruction in the snapshot frame: light space from the vertex array the
         // driver received versus the game's own result in DAT_0061d178 (doc/LICHT.md 7.3).
-        if (m_MeasureSnapActive && !m_HeadValidated)
-        {
-            m_HeadValidated = true;
-            const auto * engine = reinterpret_cast<const float *>(0x0061D178);
-            const auto * vertices = reinterpret_cast<const std::uint8_t *>(renderer) + 0x434;
-
-            Log( "Headlights check: projection fx %g fy %g cx %g cy %g, scale %g %g %g, colour %.3f %.3f %.3f", m_HeadProjection[0],
-                m_HeadProjection[1], m_HeadProjection[2], m_HeadProjection[3], m_HeadScale[0], m_HeadScale[1], m_HeadScale[2], m_HeadColour[0],
-                m_HeadColour[1], m_HeadColour[2] );
-
-            for (int row = 0; row < 4; ++row)
-            {
-                Log( "Headlights check: model view row %d: %10.4f %10.4f %10.4f %10.4f | projection %10.4f %10.4f %10.4f %10.4f", row,
-                    m_HeadModelView[row * 4], m_HeadModelView[row * 4 + 1], m_HeadModelView[row * 4 + 2], m_HeadModelView[row * 4 + 3],
-                    m_HeadProjectionMatrix[row * 4], m_HeadProjectionMatrix[row * 4 + 1], m_HeadProjectionMatrix[row * 4 + 2],
-                    m_HeadProjectionMatrix[row * 4 + 3] );
-            }
-
-            for (int i = 0; i < m_HeadCount && i < 6; ++i)
-            {
-                float tl[4] = {};
-                if (!SafeCopy( vertices + static_cast<std::size_t>(i) * 32, tl, sizeof( tl ) ) || tl[3] <= 0.0f)
-                    continue;
-
-                const float w = 1.0f / tl[3];
-                const float view[4] = { (tl[0] - m_HeadProjection[2]) * w / m_HeadProjection[0], (tl[1] - m_HeadProjection[3]) * w / m_HeadProjection[1],
-                    w, 1.0f };
-                float light[3] = {};
-                for (int column = 0; column < 3; ++column)
-                {
-                    light[column] = view[0] * m_HeadViewToLight[column] + view[1] * m_HeadViewToLight[4 + column] +
-                        view[2] * m_HeadViewToLight[8 + column] + m_HeadViewToLight[12 + column];
-                }
-
-                Log( "Headlights check: v%d screen %.1f %.1f rhw %.6f -> light %.3f %.3f %.3f, game %.3f %.3f %.3f", i, tl[0], tl[1], tl[3],
-                    light[0], light[1], light[2], engine[i * 4], engine[i * 4 + 1], engine[i * 4 + 2] );
-            }
-        }
 
         Flush();
         m_HeadMesh = false;
-    }
-
-
-    void Driver::NoteHeadlight(
-        int count,
-        const float * positions,
-        const float * matrix
-    )
-    {
-        if (!m_MeasureSnapActive || m_HeadlightLogged)
-            return;
-
-        m_HeadlightLogged = true;
-
-        // Globals of FUN_00452910 / FUN_00452a50 (doc/LICHT.md 6.15).
-        const auto f = [] ( std::uintptr_t address ) { return *reinterpret_cast<const float *>(address); };
-        const auto u = [] ( std::uintptr_t address ) { return *reinterpret_cast<const std::uint32_t *>(address); };
-
-        Log( "M3T headlight: count %d, colour %08X, flags %08X, second light %08X, player %u, map %08X", count, u( 0x0061BD4C ),
-            u( 0x0061BD5C ), u( 0x0061E180 ), u( 0x0065741C ), u( 0x0061E1CC ) );
-        Log( "M3T headlight: scale x %g (raw %g), z %g (raw %g), y %g, k %g; second: xz %g, y %g, k %g", f( 0x0061D170 ), f( 0x0061BD58 ),
-            f( 0x0061E178 ), f( 0x0061BD54 ), f( 0x005CEC60 ), f( 0x005CEC64 ), f( 0x005CEC6C ), f( 0x005CEC70 ), f( 0x005CEC68 ) );
-
-        const auto log_matrix = [&] ( const char * name, const float * m )
-        {
-            for (int row = 0; row < 4; ++row)
-            {
-                Log( "M3T headlight: %s row %d: %10.4f %10.4f %10.4f %10.4f", name, row, m[row * 4], m[row * 4 + 1], m[row * 4 + 2], m[row * 4 + 3] );
-            }
-        };
-
-        log_matrix( "camera (param 3)", matrix );
-        log_matrix( "light   0061BCCC", reinterpret_cast<const float *>(0x0061BCCC) );
-        log_matrix( "second  0061E184", reinterpret_cast<const float *>(0x0061E184) );
-
-        // Input positions (stride 16), light space (DAT_0061d178, stride 16), factor (DAT_0061bd60).
-        const auto * light = reinterpret_cast<const float *>(0x0061D178);
-        const auto * factor = reinterpret_cast<const float *>(0x0061BD60);
-
-        for (int i = 0; i < count && i < 12; ++i)
-        {
-            Log( "M3T headlight: v%-2d in %9.3f %9.3f %9.3f  light %9.3f %9.3f %9.3f  factor %.4f", i, positions[i * 4], positions[i * 4 + 1],
-                positions[i * 4 + 2], light[i * 4], light[i * 4 + 1], light[i * 4 + 2], factor[i] );
-        }
-
-        // The 128 x 128 byte light map, once per run, as a grey BMP next to the log.
-        const auto * map = reinterpret_cast<const std::uint8_t *>(u( 0x0061E1CC ));
-        if (m_HeadlightMapDumped || map == nullptr)
-            return;
-
-        std::uint8_t copy[128 * 128];
-        if (!SafeCopy( map, copy, sizeof( copy ) ))
-        {
-            Log( "M3T headlight: map not readable" );
-            return;
-        }
-
-        m_HeadlightMapDumped = true;
-
-        int low = 255, high = 0, used = 0;
-        for (const std::uint8_t value : copy)
-        {
-            low = std::min<int>( low, value );
-            high = std::max<int>( high, value );
-            used += value != 0 ? 1 : 0;
-        }
-
-        Log( "M3T headlight: map values %d..%d, %d of 16384 non-zero (row = forward iz, column = side ix + 64)", low, high, used );
-
-        const std::size_t slash = m_LogPath.find_last_of( "\\/" );
-        const std::string path = (slash != std::string::npos ? m_LogPath.substr( 0, slash + 1 ) : std::string()) + "m3t_headlight_map_128x128.bmp";
-
-        if (FILE * file = std::fopen( path.c_str(), "wb" ))
-        {
-            BITMAPFILEHEADER file_header = {};
-            BITMAPINFOHEADER info_header = {};
-            file_header.bfType = 0x4D42;
-            file_header.bfOffBits = sizeof( file_header ) + sizeof( info_header );
-            file_header.bfSize = file_header.bfOffBits + 128 * 128 * 3;
-            info_header.biSize = sizeof( info_header );
-            info_header.biWidth = 128;
-            info_header.biHeight = -128;
-            info_header.biPlanes = 1;
-            info_header.biBitCount = 24;
-            info_header.biCompression = BI_RGB;
-            std::fwrite( &file_header, sizeof( file_header ), 1, file );
-            std::fwrite( &info_header, sizeof( info_header ), 1, file );
-
-            std::uint8_t row[128 * 3];
-            for (int y = 0; y < 128; ++y)
-            {
-                for (int x = 0; x < 128; ++x)
-                {
-                    row[x * 3] = row[x * 3 + 1] = row[x * 3 + 2] = copy[y * 128 + x];
-                }
-                std::fwrite( row, 1, sizeof( row ), file );
-            }
-
-            std::fclose( file );
-            Log( "M3T headlight: map dumped to m3t_headlight_map_128x128.bmp" );
-        }
-
-        // Raw bytes too, for offline recomputation.
-        const std::string raw = (slash != std::string::npos ? m_LogPath.substr( 0, slash + 1 ) : std::string()) + "m3t_headlight_map_128x128.raw";
-        if (FILE * file = std::fopen( raw.c_str(), "wb" ))
-        {
-            std::fwrite( copy, 1, sizeof( copy ), file );
-            std::fclose( file );
-        }
-    }
-
-
-    void Driver::NoteRoadDraw(
-        void * renderer,
-        const void * positions,
-        const void * second,
-        const void * third,
-        std::uint32_t count
-    )
-    {
-        if (!m_MeasureSnapActive || m_WatchDoneThisSnap || m_WatchArmed || m_Bound[0] == nullptr || m_Bound[0]->m_Hash != ROAD_TEXTURE ||
-            m_BatchVertices.empty())
-            return;
-
-        m_WatchDoneThisSnap = true;
-
-        const std::uint32_t diffuse = m_BatchVertices.back().m_Diffuse;
-        const void * streams[3] = { positions, second, third };
-        Log( "M3T watch: road draw, count %u, last diffuse %08X, streams %p %p %p", count, diffuse, positions, second, third );
-
-        std::uintptr_t found = 0;
-        const std::size_t limit = std::min<std::size_t>( count > 0 ? count : 1024, 4096 ) * 8;
-
-        for (std::size_t s = 0; s < 3; ++s)
-        {
-            if (streams[s] == nullptr)
-                continue;
-
-            std::uint32_t head[8] = {};
-            if (SafeCopy( streams[s], head, sizeof( head ) ))
-            {
-                Log( "M3T watch:   stream %zu: %08X %08X %08X %08X %08X %08X %08X %08X", s + 1, head[0], head[1], head[2], head[3], head[4],
-                    head[5], head[6], head[7] );
-            }
-
-            std::vector<std::uint32_t> data( limit );
-            if (found != 0 || !SafeCopy( streams[s], data.data(), data.size() * sizeof( std::uint32_t ) ))
-                continue;
-
-            for (std::size_t i = 0; i < data.size(); ++i)
-            {
-                if ((data[i] & 0x00FFFFFF) == (diffuse & 0x00FFFFFF))
-                {
-                    found = reinterpret_cast<std::uintptr_t>(streams[s]) + i * 4;
-                    Log( "M3T watch: diffuse found in stream %zu at +%zX (dword %zu)", s + 1, i * 4, i );
-                    break;
-                }
-            }
-        }
-
-        // FUN_00543ae0 copies the colours into its own vertex array (32 bytes per vertex from +0x434,
-        // diffuse at +0x444) and hands that array to the driver. Watch the first diffuse there.
-        const std::uintptr_t array = reinterpret_cast<std::uintptr_t>(renderer) + 0x444;
-        std::uint32_t copied[2] = {};
-        SafeCopy( reinterpret_cast<const void *>(array), copied, sizeof( copied ) );
-        Log( "M3T watch: renderer %p, vertex 0 diffuse %08X specular %08X%s", renderer, copied[0], copied[1],
-            found != 0 ? "" : " (last diffuse not in the source streams)" );
-        found = array;
-
-        if (found == 0)
-            return;
-
-        g_WatchAddress = found;
-        g_WatchHitCount = 0;
-        g_WatchTotal = 0;
-        g_WatchUntil = ::GetTickCount64() + 1000;
-
-        if (SetWatch( found, true ))
-        {
-            m_WatchArmed = true;
-            Log( "M3T watch: armed on %08X for 1 s", static_cast<unsigned>(found) );
-        }
-        else
-        {
-            Log( "M3T watch: arming failed" );
-        }
-    }
-
-
-    void Driver::CheckWatch()
-    {
-        if (!m_WatchArmed || ::GetTickCount64() < g_WatchUntil + 250)
-            return;
-
-        SetWatch( 0, false );
-        m_WatchArmed = false;
-
-        Log( "M3T watch report: %ld writes to %08X, %ld writing places", static_cast<long>(g_WatchTotal), static_cast<unsigned>(g_WatchAddress),
-            static_cast<long>(g_WatchHitCount) );
-
-        for (LONG i = 0; i < g_WatchHitCount; ++i)
-        {
-            const WatchHit & hit = g_WatchHits[static_cast<std::size_t>(i)];
-            char frames[7][48] = {};
-            DescribeAddress( reinterpret_cast<void *>(hit.m_Eip), frames[0], sizeof( frames[0] ) );
-
-            for (std::size_t f = 0; f < hit.m_Stack.size(); ++f)
-            {
-                if (hit.m_Stack[f] != 0)
-                {
-                    DescribeAddress( reinterpret_cast<void *>(hit.m_Stack[f]), frames[f + 1], sizeof( frames[f + 1] ) );
-                }
-            }
-
-            Log( "M3T   write after %s (value %08X): %u times, from %s < %s < %s < %s < %s < %s", frames[0], hit.m_Value, hit.m_Count,
-                frames[1], frames[2], frames[3], frames[4], frames[5], frames[6] );
-        }
-    }
-
-
-    void Driver::NoteLightNode(
-        void * node
-    )
-    {
-        if (!m_MeasureSnapActive)
-            return;
-
-        ++m_MeasureLightCalls;
-        m_LitSinceDraw = true;
-
-        // Same access as the node itself: stream 10 holds the light list, count first,
-        // vectors at +1, types at +0x21, colours at +0x2A (4 floats each).
-        const int stream = reinterpret_cast<NodeStreamFn>(NODE_STREAM)(node, 10, 0);
-        if (stream == 0)
-            return;
-
-        const auto table = *reinterpret_cast<const std::uintptr_t *>(*reinterpret_cast<const std::uintptr_t *>(stream + 0x20) + 8);
-        const auto * lights = *reinterpret_cast<const int * const *>(table + 4 + static_cast<std::uintptr_t>(*reinterpret_cast<const int *>(stream + 0x1C)) * 8);
-        if (lights == nullptr)
-            return;
-
-        MeasureLights entry = {};
-        entry.m_Count = std::clamp( lights[0], 0, 8 );
-        const auto * floats = reinterpret_cast<const float *>(lights);
-        std::string key = std::to_string( entry.m_Count );
-
-        for (std::size_t i = 0; i < static_cast<std::size_t>(entry.m_Count); ++i)
-        {
-            entry.m_Types[i] = lights[0x21 + i];
-            for (std::size_t c = 0; c < 4; ++c)
-            {
-                entry.m_Vectors[i][c] = floats[1 + i * 4 + c];
-                entry.m_Colours[i][c] = floats[0x2A + i * 4 + c];
-            }
-
-            char part[160];
-            std::snprintf( part, sizeof( part ), "|%d %.1f %.1f %.1f %.2f %.2f %.2f", entry.m_Types[i], entry.m_Vectors[i][0],
-                entry.m_Vectors[i][1], entry.m_Vectors[i][2], entry.m_Colours[i][0], entry.m_Colours[i][1], entry.m_Colours[i][2] );
-            key += part;
-        }
-
-        auto & slot = m_MeasureLights[key];
-        if (slot.m_Calls == 0)
-        {
-            slot = entry;
-        }
-
-        ++slot.m_Calls;
-    }
-
-
-    void Driver::NoteCaller(
-        void * address
-    )
-    {
-        if (!m_MeasureSnapActive)
-            return;
-
-        // The direct return address is exact. Further entries are stack values that point into the
-        // game's code right after a call instruction, the usual heuristic without frame pointers.
-        MeasureCaller caller = {};
-        caller.m_Stack[0] = address;
-
-        const auto after_call = LooksLikeReturn;
-
-        const auto * stack = static_cast<const std::uintptr_t *>(_AddressOfReturnAddress());
-        const auto top = reinterpret_cast<const std::uintptr_t *>(reinterpret_cast<NT_TIB *>(::NtCurrentTeb())->StackBase);
-        std::size_t used = 1;
-        bool past = false;
-
-        for (std::size_t i = 0; i < 2048 && stack + i < top && used < caller.m_Stack.size(); ++i)
-        {
-            const std::uintptr_t value = stack[i];
-
-            if (!past)
-            {
-                past = value == reinterpret_cast<std::uintptr_t>(address);
-                continue;
-            }
-
-            if (after_call( value ) && value != reinterpret_cast<std::uintptr_t>(caller.m_Stack[used - 1]))
-            {
-                caller.m_Stack[used++] = reinterpret_cast<void *>(value);
-            }
-        }
-
-        const auto & render = m_D3D.m_Render;
-        caller.m_Hash = m_Bound[0] != nullptr ? m_Bound[0]->m_Hash : 0u;
-        caller.m_Blend = render[rs::ALPHABLENDENABLE] != 0;
-        caller.m_Src = caller.m_Blend ? render[rs::SRCBLEND] : 0u;
-        caller.m_Dst = caller.m_Blend ? render[rs::DESTBLEND] : 0u;
-        caller.m_Lit = m_LitSinceDraw;
-        m_LitSinceDraw = false;
-
-        char key[128];
-        std::snprintf( key, sizeof( key ), "%p %p %p %p %p %p %08X %d %u %u %d", caller.m_Stack[0], caller.m_Stack[1], caller.m_Stack[2],
-            caller.m_Stack[3], caller.m_Stack[4], caller.m_Stack[5], caller.m_Hash, caller.m_Blend ? 1 : 0, caller.m_Src, caller.m_Dst,
-            caller.m_Lit ? 1 : 0 );
-
-        auto & entry = m_MeasureCallers[key];
-        if (entry.m_Calls == 0)
-        {
-            entry = caller;
-        }
-
-        ++entry.m_Calls;
-    }
-
-
-    void Driver::MeasureSnapBatch()
-    {
-        if (m_BatchPrimitive != Primitive::TRIANGLES)
-            return;
-
-        const auto & render = m_D3D.m_Render;
-        const bool blend = render[rs::ALPHABLENDENABLE] != 0;
-        const Texture * texture = m_Bound[0];
-
-        const std::uint32_t cull = render[rs::CULLMODE];
-
-        // B15: list of the game's render queue being drawn, from LFSP (lfsp.asi v7f); -1 = not available.
-        using QueueListFn = int( * )();
-        static QueueListFn queue_list_fn = nullptr;
-        static bool queue_list_asked = false;
-
-        if (!queue_list_asked)
-        {
-            queue_list_asked = true;
-
-            if (HMODULE lfsp = ::GetModuleHandleA( "lfsp.asi" ))
-                queue_list_fn = reinterpret_cast<QueueListFn>(reinterpret_cast<void *>(::GetProcAddress( lfsp, "LfspQueueList" )));
-
-            Log( "M3T queue list from LFSP %s", queue_list_fn != nullptr ? "found" : "not available" );
-        }
-
-        const int list = queue_list_fn != nullptr ? queue_list_fn() : -1;
-
-        char key[64];
-        std::snprintf( key, sizeof( key ), "%p %d %u %u %u %d", static_cast<const void *>(texture), blend ? 1 : 0,
-            blend ? render[rs::SRCBLEND] : 0u, blend ? render[rs::DESTBLEND] : 0u, cull, list );
-
-        auto & snap = m_MeasureSnap[key];
-        snap.m_Texture = texture;
-        snap.m_Blend = blend;
-        snap.m_Src = render[rs::SRCBLEND];
-        snap.m_Dst = render[rs::DESTBLEND];
-        snap.m_Cull = cull;
-        snap.m_List = list;
-        ++snap.m_Draws;
-        snap.m_Vertices += m_BatchVertices.size();
-
-        for (const TlVertex & v : m_BatchVertices)
-        {
-            snap.m_MinX = std::min( snap.m_MinX, v.m_X );
-            snap.m_MinY = std::min( snap.m_MinY, v.m_Y );
-            snap.m_MaxX = std::max( snap.m_MaxX, v.m_X );
-            snap.m_MaxY = std::max( snap.m_MaxY, v.m_Y );
-        }
-
-        // Colour weighted by the screen area of each triangle, so a lit wall counts as much as it covers.
-        for (std::size_t i = 0; i + 2 < m_BatchIndices.size(); i += 3)
-        {
-            const TlVertex & a = m_BatchVertices[m_BatchIndices[i]];
-            const TlVertex & b = m_BatchVertices[m_BatchIndices[i + 1]];
-            const TlVertex & c = m_BatchVertices[m_BatchIndices[i + 2]];
-            const double signed_area = ((b.m_X - a.m_X) * (c.m_Y - a.m_Y) - (c.m_X - a.m_X) * (b.m_Y - a.m_Y)) * 0.5;
-            const double area = std::abs( signed_area );
-
-            // Screen y points down, so a positive cross product is clockwise on screen.
-            if (signed_area > 0.0)
-            {
-                snap.m_AreaCw += area;
-            }
-
-            for (int channel = 0; channel < 3; ++channel)
-            {
-                const int shift = 16 - channel * 8;
-                const double mean = (((a.m_Diffuse >> shift) & 0xFF) + ((b.m_Diffuse >> shift) & 0xFF) + ((c.m_Diffuse >> shift) & 0xFF)) / 3.0;
-                snap.m_Colour[static_cast<std::size_t>(channel)] += area * mean;
-            }
-
-            snap.m_Area += area;
-        }
-    }
-
-
-    void Driver::MeasureSnapReport()
-    {
-        ++m_MeasureSnapCount;
-
-        std::vector<const MeasureSnap *> snaps;
-        double area = 0.0;
-        std::array<double, 3> colour = {};
-
-        for (const auto & [key, snap] : m_MeasureSnap)
-        {
-            snaps.push_back( &snap );
-
-            if (!snap.m_Blend)
-            {
-                area += snap.m_Area;
-                for (std::size_t c = 0; c < 3; ++c)
-                {
-                    colour[c] += snap.m_Colour[c];
-                }
-            }
-        }
-
-        std::sort( snaps.begin(), snaps.end(), [] ( const MeasureSnap * a, const MeasureSnap * b )
-        {
-            return a->m_Area > b->m_Area;
-        } );
-
-        Log( "M3T snapshot #%d at flip %u, %.1f s: %zu draw groups, opaque area %.0f px, opaque diffuse %.1f %.1f %.1f",
-            m_MeasureSnapCount, m_FlipCount, MeasureSeconds(), snaps.size(), area,
-            area > 0.0 ? colour[0] / area : 0.0, area > 0.0 ? colour[1] / area : 0.0, area > 0.0 ? colour[2] / area : 0.0 );
-
-        constexpr std::size_t MAX_LINES = 80;
-
-        for (std::size_t i = 0; i < snaps.size() && i < MAX_LINES; ++i)
-        {
-            const MeasureSnap & snap = *snaps[i];
-            const Texture * texture = snap.m_Texture;
-            const double a = snap.m_Area > 0.0 ? snap.m_Area : 1.0;
-
-            Log( "M3T   snap #%d tex %08X %dx%d blend %d src %u dst %u cull %u list %d: %llu batches, %llu vertices, area %.0f px (cw %.0f%%), "
-                "diffuse %.1f %.1f %.1f, rect %.0f,%.0f-%.0f,%.0f",
-                m_MeasureSnapCount, texture != nullptr ? texture->m_Hash : 0u, texture != nullptr ? texture->m_Width : 0,
-                texture != nullptr ? texture->m_Height : 0, snap.m_Blend ? 1 : 0, snap.m_Blend ? snap.m_Src : 0u, snap.m_Blend ? snap.m_Dst : 0u,
-                snap.m_Cull, snap.m_List, static_cast<unsigned long long>(snap.m_Draws), static_cast<unsigned long long>(snap.m_Vertices), snap.m_Area,
-                100.0 * snap.m_AreaCw / a, snap.m_Colour[0] / a, snap.m_Colour[1] / a, snap.m_Colour[2] / a,
-                snap.m_MinX, snap.m_MinY, snap.m_MaxX, snap.m_MaxY );
-
-            // B15: pictures of the largest textures of the frame, to match the mirrored copy against the original.
-            if (i < 40)
-            {
-                MeasureDump( texture );
-            }
-        }
-
-        m_MeasureSnap.clear();
-
-        // Who drew what, addresses as Ghidra shows them (porsche.exe at 0x400000, gimme.dll at 0x10000000).
-        const auto describe = DescribeAddress;
-
-        std::vector<const MeasureCaller *> callers;
-
-        for (const auto & [key, caller] : m_MeasureCallers)
-        {
-            callers.push_back( &caller );
-        }
-
-        std::sort( callers.begin(), callers.end(), [] ( const MeasureCaller * a, const MeasureCaller * b )
-        {
-            return a->m_Calls > b->m_Calls;
-        } );
-
-        constexpr std::size_t MAX_CALLERS = 400;
-
-        for (std::size_t i = 0; i < callers.size() && i < MAX_CALLERS; ++i)
-        {
-            const MeasureCaller & caller = *callers[i];
-            char frames[6][48] = {};
-
-            for (std::size_t f = 0; f < caller.m_Stack.size(); ++f)
-            {
-                if (caller.m_Stack[f] != nullptr)
-                {
-                    describe( caller.m_Stack[f], frames[f], sizeof( frames[f] ) );
-                }
-            }
-
-            Log( "M3T   caller #%d tex %08X blend %d src %u dst %u lit %d: %llu calls, from %s < %s < %s < %s < %s < %s", m_MeasureSnapCount,
-                caller.m_Hash, caller.m_Blend ? 1 : 0, caller.m_Src, caller.m_Dst, caller.m_Lit ? 1 : 0,
-                static_cast<unsigned long long>(caller.m_Calls), frames[0],
-                frames[1], frames[2], frames[3], frames[4], frames[5] );
-        }
-
-        m_MeasureCallers.clear();
-
-        // Light lists of the lighting node, PLAN.md 9.4c.
-        Log( "M3T   light node: %llu calls, %zu distinct light lists", static_cast<unsigned long long>(m_MeasureLightCalls), m_MeasureLights.size() );
-
-        for (const auto & [key, lights] : m_MeasureLights)
-        {
-            Log( "M3T   lights #%d: %d lights, %llu calls", m_MeasureSnapCount, lights.m_Count, static_cast<unsigned long long>(lights.m_Calls) );
-
-            for (std::size_t i = 0; i < static_cast<std::size_t>(lights.m_Count); ++i)
-            {
-                const auto & v = lights.m_Vectors[i];
-                const auto & c = lights.m_Colours[i];
-                Log( "M3T     light %zu: type %d, vector %.3f %.3f %.3f %.3f, colour %.3f %.3f %.3f %.3f", i, lights.m_Types[i],
-                    v[0], v[1], v[2], v[3], c[0], c[1], c[2], c[3] );
-            }
-        }
-
-        m_MeasureLights.clear();
-        m_MeasureLightCalls = 0;
-    }
-
-
-    void Driver::MeasureDump(
-        const Texture * texture
-    )
-    {
-        constexpr std::size_t MAX_DUMPS = 64;
-
-        if (texture == nullptr || !texture->m_Texture || formats::IsBlockCompressed( texture->m_Format ) ||
-            m_MeasureDumps.size() >= MAX_DUMPS || !m_MeasureDumps.emplace( texture->m_Hash, true ).second)
-            return;
-
-        // Top level through a staging copy, the textures live on the GPU only.
-        D3D11_TEXTURE2D_DESC desc = {};
-        texture->m_Texture->GetDesc( &desc );
-        desc.MipLevels = 1;
-        desc.Usage = D3D11_USAGE_STAGING;
-        desc.BindFlags = 0;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        desc.MiscFlags = 0;
-
-        ComPtr<ID3D11Texture2D> staging;
-        if (FAILED( m_Device->CreateTexture2D( &desc, nullptr, staging.Put() ) ))
-            return;
-
-        m_Context->CopySubresourceRegion( staging.Get(), 0, 0, 0, 0, texture->m_Texture.Get(), 0, nullptr );
-
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-        if (FAILED( m_Context->Map( staging.Get(), 0, D3D11_MAP_READ, 0, &mapped ) ))
-            return;
-
-        const std::size_t slash = m_LogPath.find_last_of( "\\/" );
-        const std::string folder = slash != std::string::npos ? m_LogPath.substr( 0, slash + 1 ) : std::string();
-        const int width = static_cast<int>(desc.Width);
-        const int height = static_cast<int>(desc.Height);
-
-        // 24 bit top-down BMP, once with the colour and once with alpha as grey.
-        const auto write = [&] ( const char * suffix, bool alpha )
-        {
-            char name[64];
-            std::snprintf( name, sizeof( name ), "m3t_%08X_%dx%d%s.bmp", texture->m_Hash, width, height, suffix );
-
-            FILE * file = std::fopen( (folder + name).c_str(), "wb" );
-            if (file == nullptr)
-                return;
-
-            const std::uint32_t row_bytes = (static_cast<std::uint32_t>(width) * 3 + 3) & ~3u;
-
-            BITMAPFILEHEADER file_header = {};
-            BITMAPINFOHEADER info_header = {};
-            file_header.bfType = 0x4D42;
-            file_header.bfOffBits = sizeof( file_header ) + sizeof( info_header );
-            file_header.bfSize = file_header.bfOffBits + row_bytes * static_cast<std::uint32_t>(height);
-            info_header.biSize = sizeof( info_header );
-            info_header.biWidth = width;
-            info_header.biHeight = -height;
-            info_header.biPlanes = 1;
-            info_header.biBitCount = 24;
-            info_header.biCompression = BI_RGB;
-
-            std::fwrite( &file_header, sizeof( file_header ), 1, file );
-            std::fwrite( &info_header, sizeof( info_header ), 1, file );
-
-            std::vector<std::uint8_t> row( row_bytes, 0 );
-
-            for (int y = 0; y < height; ++y)
-            {
-                const auto * texels = reinterpret_cast<const std::uint8_t *>(mapped.pData) + static_cast<std::size_t>(y) * mapped.RowPitch;
-
-                for (int x = 0; x < width; ++x)
-                {
-                    const std::uint8_t * bgra = texels + static_cast<std::size_t>(x) * 4;
-                    for (int c = 0; c < 3; ++c)
-                    {
-                        row[static_cast<std::size_t>(x) * 3 + static_cast<std::size_t>(c)] = alpha ? bgra[3] : bgra[c];
-                    }
-                }
-
-                std::fwrite( row.data(), 1, row.size(), file );
-            }
-
-            std::fclose( file );
-            Log( "M3T   dump %s", name );
-        };
-
-        write( "", false );
-        write( "_alpha", true );
-
-        m_Context->Unmap( staging.Get(), 0 );
     }
 
 
@@ -12470,38 +10830,6 @@ namespace dx11z
     }
 
 
-    void Driver::LogSkyDraw()
-    {
-        const auto & render = m_D3D.m_Render;
-        const TlVertex * top = nullptr;
-        const TlVertex * bottom = nullptr;
-        std::uint32_t fog_min = 255, fog_max = 0, alpha_min = 255, alpha_max = 0;
-        for (const TlVertex & v : m_BatchVertices)
-        {
-            if (top == nullptr || v.m_Y < top->m_Y)
-                top = &v;
-            if (bottom == nullptr || v.m_Y > bottom->m_Y)
-                bottom = &v;
-            fog_min = std::min( fog_min, v.m_Specular >> 24 );
-            fog_max = std::max( fog_max, v.m_Specular >> 24 );
-            alpha_min = std::min( alpha_min, v.m_Diffuse >> 24 );
-            alpha_max = std::max( alpha_max, v.m_Diffuse >> 24 );
-        }
-        const Texture * texture = m_Bound[0];
-        if (top == nullptr)
-            return;
-        // y in game pixels; colours ARGB of the topmost and lowest vertex; fog = specular alpha (255 = no fog).
-        Log( "SkyEdge draw %d (flat %d): texture %08X %dx%d translucent %d, blend %u src %u dst %u, alpha test %u, fog %u, zwrite %u, %u vertices %u indices, "
-            "y %.1f..%.1f, top %08X uv %.3f %.3f, bottom %08X uv %.3f %.3f, vertex alpha %u..%u, fog %u..%u",
-            m_SkyEdgeLogIndex, m_SkyEdgeFlatDraw ? 1 : 0, texture != nullptr ? texture->m_Hash : 0u, texture != nullptr ? texture->m_Width : 0, texture != nullptr ? texture->m_Height : 0,
-            texture != nullptr && texture->m_Translucent ? 1 : 0, static_cast<unsigned>(render[rs::ALPHABLENDENABLE]), static_cast<unsigned>(render[rs::SRCBLEND]),
-            static_cast<unsigned>(render[rs::DESTBLEND]), static_cast<unsigned>(render[rs::ALPHATESTENABLE]), static_cast<unsigned>(render[rs::FOGENABLE]),
-            static_cast<unsigned>(render[rs::ZWRITEENABLE]), static_cast<unsigned>(m_BatchVertices.size()), static_cast<unsigned>(m_BatchIndices.size()),
-            top->m_Y, bottom->m_Y, top->m_Diffuse, top->m_U0, top->m_V0, bottom->m_Diffuse, bottom->m_U0, bottom->m_V0, alpha_min, alpha_max, fog_min, fog_max );
-        ++m_SkyEdgeLogIndex;
-    }
-
-
     void Driver::SkyEdgeFill()
     {
         if (!m_Frame || !m_FrameView || !m_ReflCompositeVs || !m_SkyEdgeColumnPs || !m_SkyEdgeSmoothPs || !m_SkyEdgeFillPs || m_RenderWidth <= 0 ||
@@ -12608,7 +10936,7 @@ namespace dx11z
         const float seam = std::max( 3.0f, 6.0f * static_cast<float>(height) / 1440.0f );
         // Into the band '[Dx11] SkyEdgeBlend' rows (at 1440): the top rows of a 16 bit band texture keep a colour step there.
         const float seam_in = m_ConfigSkyEdgeBlend * static_cast<float>(height) / 1440.0f;
-        float constants[12] = { m_SkyEdgeClear[0], m_SkyEdgeClear[1], m_SkyEdgeClear[2], m_ConfigSkyEdgeFill == 2 ? 2.0f : 1.0f,
+        float constants[12] = { m_SkyEdgeClear[0], m_SkyEdgeClear[1], m_SkyEdgeClear[2], 1.0f,
             static_cast<float>(width), static_cast<float>(height), radius, seam, seam_in, 0.0f, 0.0f, 0.0f };
         D3D11_MAPPED_SUBRESOURCE mapped = {};
         if (FAILED( m_Context->Map( m_SkyEdgeConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ))
@@ -12721,7 +11049,6 @@ namespace dx11z
             m_RenderWidth <= 0 || m_RenderHeight <= 0)
             return;
 
-        ProfileMark( 12 );
 
         D3D11_TEXTURE2D_DESC have = {};
         if (m_AoRaw)
@@ -12828,6 +11155,41 @@ namespace dx11z
             mips = m_AoDepthMips && m_AoDepthMipsSrv;
         }
 
+        // 'HalfRes': target of the raw occlusion at half width and height.
+        bool half_res = m_ConfigAoHalfRes != 0 && m_AoUpsamplePs;
+        if (half_res)
+        {
+            D3D11_TEXTURE2D_DESC have_half = {};
+            if (m_AoHalf)
+                m_AoHalf->GetDesc( &have_half );
+            if (!m_AoHalf || have_half.Width != static_cast<UINT>(half_width) || have_half.Height != static_cast<UINT>(half_height))
+            {
+                m_AoHalfRtv.Reset();
+                m_AoHalfSrv.Reset();
+                m_AoHalf.Reset();
+                D3D11_TEXTURE2D_DESC desc = {};
+                desc.Width = static_cast<UINT>(half_width);
+                desc.Height = static_cast<UINT>(half_height);
+                desc.MipLevels = 1;
+                desc.ArraySize = 1;
+                desc.Format = DXGI_FORMAT_R16G16_FLOAT;
+                desc.SampleDesc.Count = 1;
+                desc.Usage = D3D11_USAGE_DEFAULT;
+                desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+                const bool made = SUCCEEDED( m_Device->CreateTexture2D( &desc, nullptr, m_AoHalf.Put() ) ) &&
+                    SUCCEEDED( m_Device->CreateRenderTargetView( m_AoHalf.Get(), nullptr, m_AoHalfRtv.Put() ) ) &&
+                    SUCCEEDED( m_Device->CreateShaderResourceView( m_AoHalf.Get(), nullptr, m_AoHalfSrv.Put() ) );
+                Log( "Ambient occlusion: half size target %dx%d %s (HalfRes)", half_width, half_height, made ? "created" : "FAILED" );
+                if (!made)
+                {
+                    m_AoHalfRtv.Reset();
+                    m_AoHalfSrv.Reset();
+                    m_AoHalf.Reset();
+                }
+            }
+            half_res = m_AoHalfRtv && m_AoHalfSrv;
+        }
+
         if (!m_AoMultiply)
         {
             // frame x factor
@@ -12898,7 +11260,7 @@ namespace dx11z
         const bool filter_pass = m_ConfigAoFilter >= 1 || temporal;
         const bool fog = m_ConfigAoFogFade != 0 && m_AoFogMode >= 0;
 
-        // Slices x samples per side: Niedrig, Mittel, Hoch (were Medium, High, Ultra of MXAO).
+        // Slices x samples per side: low, medium, high.
         static const int presets[3][2] = { { 2, 4 }, { 2, 10 }, { 4, 14 } };
         m_ConfigAoQuality = std::clamp( m_ConfigAoQuality, 0, 2 );
         D3D11_MAPPED_SUBRESOURCE mapped = {};
@@ -12914,11 +11276,22 @@ namespace dx11z
             constants[23] = static_cast<float>(++m_AoFrame & 0xFFFF);
             constants[24] = m_ConfigAoRadius;
             constants[25] = m_ConfigAoAmount;
-            constants[26] = m_ConfigAoFade;
+            // 'FadeDistance' D metres -> the same point on the normalised depth d = z / (F - z (F - 1)), z = 1 - n / w:
+            // d = (w - n) / (w + (F - 1) n) at w = D.
+            if (m_ConfigAoFadeDistance > 0.0f)
+            {
+                const float n = m_ReflNear > 0.0f ? m_ReflNear : 0.5f;
+                const float far_plane = m_ConfigAoFarPlane;
+                constants[26] = std::clamp( (m_ConfigAoFadeDistance - n) / (m_ConfigAoFadeDistance + (far_plane - 1.0f) * n), 0.01f, 1.0f );
+            }
+            else
+                constants[26] = m_ConfigAoFade;
             constants[27] = m_ConfigAoFarPlane;
             constants[28] = static_cast<float>(presets[m_ConfigAoQuality][0]);
             constants[29] = static_cast<float>(presets[m_ConfigAoQuality][1]);
-            constants[30] = static_cast<float>(m_ConfigAoShadingRate);
+            // 'HalfRes' and the checkerboard are not combined: the half size pass computes every one of its pixels.
+            constants[30] = half_res ? 0.0f : static_cast<float>(m_ConfigAoShadingRate);
+            constants[47] = half_res ? 1.0f : 0.0f;
             constants[31] = static_cast<float>(m_ConfigAoDebug);
             constants[32] = static_cast<float>(m_ConfigAoFilter);
             constants[33] = static_cast<float>(m_ConfigAoGrow);
@@ -12929,6 +11302,7 @@ namespace dx11z
             constants[38] = reproject ? 1.0f : 0.0f;
             constants[39] = std::clamp( m_ConfigAoAngleBias, 0.0f, 30.0f ) * 3.14159265f / 180.0f;
             constants[40] = static_cast<float>(m_ConfigAoMultiBounce);
+            constants[41] = std::clamp( m_ConfigAoFill, 0.0f, 1.0f );
             constants[42] = fog ? static_cast<float>(m_AoFogMode) : -1.0f;
             constants[43] = fog ? m_AoFogParams[3] : 0.0f;
             constants[44] = m_AoFogParams[0];
@@ -12985,7 +11359,12 @@ namespace dx11z
         m_Context->RSSetViewports( 1, &full );
 
         // 1: raw occlusion (persistent: the skipped half of the checkerboard keeps last frame's value).
-        ID3D11RenderTargetView * target = m_AoRawRtv.Get();
+        ID3D11RenderTargetView * target = half_res ? m_AoHalfRtv.Get() : m_AoRawRtv.Get();
+        if (half_res)
+        {
+            const D3D11_VIEWPORT half = { 0, 0, static_cast<float>(half_width), static_cast<float>(half_height), 0, 1 };
+            m_Context->RSSetViewports( 1, &half );
+        }
         m_Context->OMSetRenderTargets( 1, &target, nullptr );
         {
             ID3D11ShaderResourceView * views[4] = { depth, nullptr, nullptr, mips ? m_AoDepthMipsSrv.Get() : nullptr };
@@ -12993,7 +11372,21 @@ namespace dx11z
         }
         m_Context->PSSetShader( m_AoPs.Get(), nullptr, 0 );
         m_Context->Draw( 3, 0 );
+        m_Context->OMSetRenderTargets( 0, nullptr, nullptr );
         m_Context->PSSetShaderResources( 0, 6, none );
+        // 'HalfRes': back to full size into the raw target, by depth (UpsamplePS); the filters read it as before.
+        if (half_res)
+        {
+            m_Context->RSSetViewports( 1, &full );
+            target = m_AoRawRtv.Get();
+            m_Context->OMSetRenderTargets( 1, &target, nullptr );
+            ID3D11ShaderResourceView * views[2] = { depth, m_AoHalfSrv.Get() };
+            m_Context->PSSetShaderResources( 0, 2, views );
+            m_Context->PSSetShader( m_AoUpsamplePs.Get(), nullptr, 0 );
+            m_Context->Draw( 3, 0 );
+            m_Context->OMSetRenderTargets( 0, nullptr, nullptr );
+            m_Context->PSSetShaderResources( 0, 6, none );
+        }
 
         // 2: first filter pass and the accumulation; its target alternates, the other one holds the last frame.
         ID3D11ShaderResourceView * occlusion = m_AoRawSrv.Get();
@@ -13038,11 +11431,11 @@ namespace dx11z
         }
 
         ++m_AoRuns;
-        if (m_AoRuns == 1 || (m_ConfigMeasure > 0 && m_AoRuns % 600 == 0))
+        if (m_AoRuns == 1)
             Log( "Ambient occlusion (dx11z 9zd): run %llu, %dx%d, near %.3f, slices %d x %d samples per side, shading rate %d, filter %d, "
-                 "method %d, depth mips %d, temporal %d (reprojected %d), fog mode %d",
+                 "method %d, depth mips %d, half res %d, temporal %d (reprojected %d), fog mode %d",
                 static_cast<unsigned long long>(m_AoRuns), m_RenderWidth, m_RenderHeight, m_ReflNear, presets[m_ConfigAoQuality][0],
-                presets[m_ConfigAoQuality][1], m_ConfigAoShadingRate, m_ConfigAoFilter, m_ConfigAoMethod, mips ? 1 : 0, temporal ? 1 : 0,
+                presets[m_ConfigAoQuality][1], m_ConfigAoShadingRate, m_ConfigAoFilter, m_ConfigAoMethod, mips ? 1 : 0, half_res ? 1 : 0, temporal ? 1 : 0,
                 reproject ? 1 : 0, fog ? m_AoFogMode : -1 );
     }
 
@@ -13226,74 +11619,6 @@ namespace dx11z
     }
 
 
-    Driver::ReflTiming * Driver::ReflTimingBegin()
-    {
-        if (m_ConfigMeasure <= 0)
-            return nullptr;
-
-        // Finished measurements first, without waiting for the GPU.
-        ReflTiming * slot = nullptr;
-        for (ReflTiming & timing : m_ReflTimings)
-        {
-            if (timing.m_Pending)
-            {
-                D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint = {};
-                if (m_Context->GetData( timing.m_Disjoint.Get(), &disjoint, sizeof( disjoint ), D3D11_ASYNC_GETDATA_DONOTFLUSH ) != S_OK)
-                    continue;
-                std::array<UINT64, 4> stamps = {};
-                bool ready = true;
-                for (std::size_t i = 0; i < stamps.size() && ready; ++i)
-                    ready = m_Context->GetData( timing.m_Stamps[i].Get(), &stamps[i], sizeof( UINT64 ), D3D11_ASYNC_GETDATA_DONOTFLUSH ) == S_OK;
-                if (!ready)
-                    continue;
-                timing.m_Pending = false;
-                if (!disjoint.Disjoint && disjoint.Frequency > 0)
-                {
-                    for (std::size_t i = 0; i < m_ReflTimingSum.size(); ++i)
-                        m_ReflTimingSum[i] += static_cast<double>(stamps[i + 1] - stamps[i]) * 1000.0 / static_cast<double>(disjoint.Frequency);
-                    if (++m_ReflTimingCount == 300)
-                    {
-                        const double n = m_ReflTimingCount;
-                        Log( "Water: GPU time per reflection (mean of %u) %.3f ms: mirrored scene and sky %.3f, stencil pack and frame copy %.3f, composite %.3f",
-                            m_ReflTimingCount, (m_ReflTimingSum[0] + m_ReflTimingSum[1] + m_ReflTimingSum[2]) / n, m_ReflTimingSum[0] / n,
-                            m_ReflTimingSum[1] / n, m_ReflTimingSum[2] / n );
-                        Log( "Water: mirrored draws kept %llu (lights %llu), under the water left out %llu, smaller than ReflectionMinSize left out %llu; "
-                            "rear view mirror runs left out %llu", static_cast<unsigned long long>(m_ReflKept), static_cast<unsigned long long>(m_ReflLightsKept),
-                            static_cast<unsigned long long>(m_ReflCulledBelow), static_cast<unsigned long long>(m_ReflCulledSmall),
-                            static_cast<unsigned long long>(m_ReflMirrorViewSkipped) );
-                        m_ReflKept = m_ReflCulledBelow = m_ReflCulledSmall = m_ReflMirrorViewSkipped = m_ReflLightsKept = 0;
-                        m_ReflTimingSum = {};
-                        m_ReflTimingCount = 0;
-                    }
-                }
-            }
-            if (!timing.m_Pending && slot == nullptr)
-                slot = &timing;
-        }
-
-        if (slot == nullptr)
-            return nullptr;
-
-        if (!slot->m_Disjoint)
-        {
-            D3D11_QUERY_DESC desc = { D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
-            bool made = SUCCEEDED( m_Device->CreateQuery( &desc, slot->m_Disjoint.Put() ) );
-            desc.Query = D3D11_QUERY_TIMESTAMP;
-            for (auto & stamp : slot->m_Stamps)
-                made = made && SUCCEEDED( m_Device->CreateQuery( &desc, stamp.Put() ) );
-            if (!made)
-            {
-                *slot = {};
-                return nullptr;
-            }
-        }
-
-        m_Context->Begin( slot->m_Disjoint.Get() );
-        m_Context->End( slot->m_Stamps[0].Get() );
-        return slot;
-    }
-
-
     bool Driver::IsWaterTexture() const
     {
         const Texture * texture = m_Bound[0];
@@ -13439,7 +11764,6 @@ namespace dx11z
 
     void Driver::DrawReflections()
     {
-        const PerfScope perf( m_ConfigMeasure > 0, m_PerfReflTicks, m_PerfDepth );
         const std::size_t batches = m_ReflUsed;
         const std::size_t water = m_ReflWater.size() / 3;
         m_ReflUsed = m_ReflSkyCount; // the sky stays for the next view of the frame
@@ -13464,9 +11788,6 @@ namespace dx11z
 
         if (batches == 0 || water == 0 || !m_FrameView || !m_DepthView)
         {
-            if (m_ReflTrace > 0)
-                Log( "Water: queue end at flip %u without reflection: %zu draws, %zu water triangles, %u shore draws", m_FlipCount, batches, water,
-                    m_ReflShoreDraws );
             return;
         }
 
@@ -13558,14 +11879,7 @@ namespace dx11z
         if (plane[3] <= 0.0f)
             return; // camera under the water plane
 
-        // Scroll Lock with '[Dx11] Measure' records the next 120 reflections (B15, jumping between frames).
-        if (m_MeasureSnapActive && m_ReflTrace == 0)
-            m_ReflTrace = 120;
-        const bool trace = m_ReflTrace > 0;
-        if (trace)
-            --m_ReflTrace;
-
-        if (m_ReflLogged < 6 || trace)
+        if (m_ReflLogged < 6)
         {
             ++m_ReflLogged;
             Log( "Water: reflection #%llu flip %u, %zu draws, %zu water triangles, %u shore draws, sky %d, plane %.3f %.3f %.3f %.2f, viewport %.1f %.1f %.1f %.1f, clip %ld %ld %ld %ld",
@@ -13573,97 +11887,6 @@ namespace dx11z
                 viewport[0], viewport[1], viewport[2], viewport[3], m_ReflClip.left, m_ReflClip.top, m_ReflClip.right, m_ReflClip.bottom );
         }
 
-        // First frame of the trace: the kept draws by texture, where they are on screen, their w and z (z against
-        // 1/w as z = a + b/w; a draw off that line has a w of its own) and their height above the plane.
-        if (trace && m_ReflTrace == 119)
-        {
-            struct Group
-            {
-                std::size_t m_Batches = 0, m_Triangles = 0, m_Count = 0;
-                double m_X[2] = { 1e30, -1e30 }, m_Y[2] = { 1e30, -1e30 }, m_W[2] = { 1e30, -1e30 }, m_Z[2] = { 1e30, -1e30 };
-                double m_Above[2] = { 1e30, -1e30 };
-                double m_R = 0, m_Zs = 0, m_RR = 0, m_RZ = 0;
-            };
-            std::map<std::uint32_t, Group> groups;
-            for (std::size_t i = std::min( m_ReflSkyCount, batches ); i < batches; ++i)
-            {
-                const MirrorBatch & batch = m_ReflBatches[i];
-                Group & group = groups[batch.m_Hash];
-                ++group.m_Batches;
-                group.m_Triangles += batch.m_Indices.size() / 3;
-                for (const TlVertex & v : batch.m_Vertices)
-                {
-                    if (!(v.m_Rhw > 0.0f && v.m_Rhw < 1e30f))
-                        continue;
-                    const double w = 1.0 / v.m_Rhw;
-                    double view[3];
-                    to_view( { v.m_X, v.m_Y, static_cast<float>(w) }, view );
-                    const double above = plane[0] * view[0] + plane[1] * view[1] + plane[2] * view[2] + plane[3];
-                    const double values[5] = { v.m_X, v.m_Y, w, v.m_Z, above };
-                    double * ranges[5] = { group.m_X, group.m_Y, group.m_W, group.m_Z, group.m_Above };
-                    for (int k = 0; k < 5; ++k)
-                    {
-                        ranges[k][0] = std::min( ranges[k][0], values[k] );
-                        ranges[k][1] = std::max( ranges[k][1], values[k] );
-                    }
-                    ++group.m_Count;
-                    group.m_R += v.m_Rhw;
-                    group.m_Zs += v.m_Z;
-                    group.m_RR += static_cast<double>(v.m_Rhw) * v.m_Rhw;
-                    group.m_RZ += static_cast<double>(v.m_Rhw) * v.m_Z;
-                }
-            }
-            // The water triangles of the plane fit by texture: w, distance of their corners to the plane, share of the fit.
-            struct Fit
-            {
-                std::size_t m_Triangles = 0;
-                double m_W[2] = { 1e30, -1e30 }, m_Above[2] = { 1e30, -1e30 };
-                double m_Weight = 0.0;
-            };
-            std::map<std::uint32_t, Fit> fits;
-            double fit_total = 0.0;
-            for (std::size_t t = 0; t < water && t < m_ReflWaterHash.size(); ++t)
-            {
-                Fit & fit = fits[m_ReflWaterHash[t]];
-                ++fit.m_Triangles;
-                double mid[3] = {};
-                for (int k = 0; k < 3; ++k)
-                {
-                    const auto & corner = m_ReflWater[t * 3 + k];
-                    double view[3];
-                    to_view( corner, view );
-                    const double above = plane[0] * view[0] + plane[1] * view[1] + plane[2] * view[2] + plane[3];
-                    fit.m_W[0] = std::min( fit.m_W[0], static_cast<double>(corner[2]) );
-                    fit.m_W[1] = std::max( fit.m_W[1], static_cast<double>(corner[2]) );
-                    fit.m_Above[0] = std::min( fit.m_Above[0], above );
-                    fit.m_Above[1] = std::max( fit.m_Above[1], above );
-                    for (int j = 0; j < 3; ++j)
-                        mid[j] += view[j] / 3.0;
-                }
-                const double weight = 1.0 / std::max( mid[0] * mid[0] + mid[1] * mid[1] + mid[2] * mid[2], 1.0 );
-                fit.m_Weight += weight;
-                fit_total += weight;
-            }
-            Log( "Water: water triangles by texture: texture triangles, w, distance of the corners to the plane, share of the fit" );
-            for (const auto & [hash, fit] : fits)
-                Log( "Water:   %08X %zu, w %.2f..%.2f, plane %.3f..%.3f, fit %.1f %%", hash, fit.m_Triangles, fit.m_W[0], fit.m_W[1], fit.m_Above[0],
-                    fit.m_Above[1], fit_total > 0.0 ? fit.m_Weight / fit_total * 100.0 : 0.0 );
-
-            Log( "Water: kept draws by texture (%zu sky draws left out): texture batches triangles, screen x y, w, z, z = a + b/w, height above water",
-                std::min( m_ReflSkyCount, batches ) );
-            for (const auto & [hash, group] : groups)
-            {
-                if (group.m_Count == 0)
-                    continue;
-                const double n = static_cast<double>(group.m_Count);
-                const double variance = group.m_RR / n - (group.m_R / n) * (group.m_R / n);
-                const double b = variance > 1e-18 ? (group.m_RZ / n - (group.m_R / n) * (group.m_Zs / n)) / variance : 0.0;
-                const double a = group.m_Zs / n - b * group.m_R / n;
-                Log( "Water:   %08X %zu %zu, x %.0f..%.0f y %.0f..%.0f, w %.2f..%.2f, z %.5f..%.5f, a %.5f b %.5f, above %.2f..%.2f", hash,
-                    group.m_Batches, group.m_Triangles, group.m_X[0], group.m_X[1], group.m_Y[0], group.m_Y[1], group.m_W[0], group.m_W[1],
-                    group.m_Z[0], group.m_Z[1], a, b, group.m_Above[0], group.m_Above[1] );
-            }
-        }
 
         // Target and depth of the reflection, one sample, the render size times '[Water] ReflectionScale'.
         const int refl_width = std::max( 1, static_cast<int>(std::lround( m_RenderWidth * m_ConfigReflectionScale )) );
@@ -13737,13 +11960,6 @@ namespace dx11z
                 }
             }
         }
-
-        ReflTiming * timing = ReflTimingBegin();
-        const auto timing_mark = [&]( std::size_t stamp )
-        {
-            if (timing != nullptr)
-                m_Context->End( timing->m_Stamps[stamp].Get() );
-        };
 
         const float transparent[4] = {};
         m_Context->ClearRenderTargetView( m_ReflTargetView.Get(), transparent );
@@ -14067,12 +12283,8 @@ namespace dx11z
         // solid draws in front of the sky for the sky lookup.
         // The frame and its depth: holes of the mirrored scene (geometry the game never drew) take the frame in the
         // mirrored direction where what is seen there is far away (then it lies like the sky, mirrored at the horizon).
-        timing_mark( 1 );
-        if (m_ReflSkyRun)
-            CopyOrderNote( "water" );
         const bool stencil = m_ReflSkyRun && PackStencil() && CopyFrame();
         const bool edge_fade = stencil && m_ConfigWaterEdgeFade > 0.0f;
-        timing_mark( 2 );
 
         // Over the water pixels of the frame (stencil bit 1, then cleared), tinted and with the strength as alpha.
         ID3D11RenderTargetView * frame_target = m_FrameView.Get();
@@ -14122,7 +12334,7 @@ namespace dx11z
             float position[3] = {};
             const bool world_waves = m_ConfigReflectionWorldWaves != 0 && m_ConfigReflectionWaveSlope > 0.0f;
             const bool glint = m_ConfigReflectionSunGlint > 0.0f && !night_water;
-            if ((world_waves || glint || m_ConfigMeasure > 0) && m_ReflWorldValid)
+            if ((world_waves || glint) && m_ReflWorldValid)
             {
                 std::memcpy( rows, m_ReflWorldRows, sizeof( rows ) );
                 std::memcpy( position, m_ReflWorldPosition, sizeof( position ) );
@@ -14186,15 +12398,6 @@ namespace dx11z
                 {
                     world_to_view( sun, out + 72 );
                     out[75] = m_ConfigReflectionSunGlint;
-                }
-                const std::uint64_t now = ::GetTickCount64();
-                if (m_ConfigMeasure > 0 && now - m_WorldCameraLogTick >= 1000)
-                {
-                    m_WorldCameraLogTick = now;
-                    Log( "Water: world camera %.2f %.2f %.2f, forward %.3f %.3f %.3f, water normal in the world %.3f %.3f %.3f (up axis %d), sun %s %.3f %.3f %.3f, night %d, strength %.2f, camera reads %llu failed %llu",
-                        position[0], position[1], position[2], rows[6], rows[7], rows[8], normal_world[0], normal_world[1], normal_world[2], up,
-                        sun_found ? "found" : "none", sun[0], sun[1], sun[2], night_water ? 1 : 0, out[3],
-                        static_cast<unsigned long long>(m_ReflWorldReads), static_cast<unsigned long long>(m_ReflWorldFails) );
                 }
             }
             m_Context->Unmap( m_MirrorConstants.Get(), 0 );
@@ -14262,13 +12465,6 @@ namespace dx11z
         m_Context->PSSetSamplers( 1, 1, &sky_sampler );
         m_Context->Draw( 3, 0 );
 
-        if (timing != nullptr)
-        {
-            timing_mark( 3 );
-            m_Context->End( timing->m_Disjoint.Get() );
-            timing->m_Pending = true;
-        }
-
         // The next draws set their own state; the target must not stay bound as a texture.
         ID3D11ShaderResourceView * none[7] = {};
         m_Context->PSSetShaderResources( 0, 7, none );
@@ -14277,12 +12473,6 @@ namespace dx11z
 
     void RestoreGamePatches()
     {
-        if (g_WatchVeh != nullptr)
-        {
-            ::RemoveVectoredExceptionHandler( g_WatchVeh );
-            g_WatchVeh = nullptr;
-        }
-
         // Backwards, so an entry changed twice gets the game's own value.
         for (auto patch = g_GamePatches.rbegin(); patch != g_GamePatches.rend(); ++patch)
         {

@@ -330,6 +330,7 @@ namespace
     float g_engineRoofBoost = 0.6f;    // Innenansicht: Motor lauter bei offenem Verdeck (Anteil)
     float g_engineWindowBoost = 0.25f; // Innenansicht: Motor lauter bei offenen Fenstern (Anteil)
     float g_actImpact = 1.0f;  // Stoß-Wackeln bei Aufprall und Landung, Anteil (0 = aus)
+    int g_actWallCheck = 1;    // Action-Versatz noch einmal gegen die Streckenwände prüfen (wie Game_CamView)
     bool g_cineKeyDown = false;
     bool g_actionKeyDown = false;
     // Freecam zum Testen: Kamera frei bewegen (Numpad), Blick mit der Maus
@@ -522,7 +523,6 @@ namespace
 
     // Auspuffrauch bei Motorschaden ([Damage], InstallExhaustSmoke)
     int g_exhaustSmoke = 1;
-    int g_lodMeasure = 0; // [Cars] LodMeasure, InstallLodMeasure
     // [SimTrace]: Zugriffe auf carSpecs-Felder per Hardware-Haltepunkt (StartSimTrace)
     int g_simTrace = 0;
     int g_simTraceFields[4] = {};
@@ -531,8 +531,6 @@ namespace
     int g_simTraceDumpSec = 10;
     // [Debug] ForceCops: Polizei in jedem Rennen (Test der .cop-Dateien, InstallForceCops)
     int g_forceCops = 0;
-    // [Debug] WeatherLog: Zustand der Scheibentropfen jede Sekunde ins Log (StartWeatherLog)
-    int g_weatherLog = 0;
     // [Debug] StateLog: Menü- und Modusvariablen bei jeder Änderung ins Log (StartStateLog)
     int g_stateLog = 0;
     float g_exhaustStart = 45.0f, g_exhaustFull = 200.0f, g_exhaustMin = 0.25f, g_exhaustMax = 1.0f;
@@ -689,7 +687,9 @@ namespace
         Log("Kamera: EngineRoofBoost %.2f, EngineWindowBoost %.2f", g_engineRoofBoost, g_engineWindowBoost);
         Log("Kamera: SpeedBoost %.2f, CockpitFov %.0f, ReplayMinFov %.0f", g_actSpeedBoost, g_cockpitFov, g_replayMinFov);
         g_actImpact = readFloat("ActionImpact", "1.0", 0.0f, 3.0f);
-        Log("Kamera: Roll %.1f, Overshoot %.2f, BuildUp %.2f, Impact %.2f", g_actRoll, g_actOvershoot, g_actBuildUp, g_actImpact);
+        g_actWallCheck = GetPrivateProfileIntA("Camera", "ActionWallCheck", 1, ini);
+        Log("Kamera: Roll %.1f, Overshoot %.2f, BuildUp %.2f, Impact %.2f, WallCheck %d", g_actRoll, g_actOvershoot,
+            g_actBuildUp, g_actImpact, g_actWallCheck);
         Log("Kamera: CinematicInCycle %d, CinematicKey 0x%02X, Action %d, ActionKey 0x%02X, ActionCams 0x%X, "
             "Side %.2f Look %.1f Height %.2f Brake %.2f Bounce %.2f Fov %.2f Shake %.2f",
             g_cineInCycle, g_cineKey, g_action, g_actionKey, g_actionCams, g_actSide, g_actLook, g_actHeight, g_actBrake,
@@ -835,7 +835,6 @@ namespace
         Log("Verkehr: Measure %d, RandomModels %d, Models %u Namen (leer = alle), TrackOnly %u Namen", g_trafficMeasure,
             g_trafficRandom, static_cast<unsigned>(g_trafficPoolNames.size()),
             static_cast<unsigned>(g_trafficTrackOnly.size()));
-        g_lodMeasure = GetPrivateProfileIntA("Cars", "LodMeasure", 0, ini);
         g_simTrace = GetPrivateProfileIntA("SimTrace", "Enabled", 0, ini);
         if (g_simTrace)
         {
@@ -875,7 +874,6 @@ namespace
             }
         }
         g_forceCops = GetPrivateProfileIntA("Debug", "ForceCops", 0, ini);
-        g_weatherLog = GetPrivateProfileIntA("Debug", "WeatherLog", 0, ini);
         g_stateLog = GetPrivateProfileIntA("Debug", "StateLog", 0, ini);
         g_exhaustSmoke = GetPrivateProfileIntA("Damage", "ExhaustSmoke", 1, ini);
         {
@@ -3472,6 +3470,8 @@ namespace
         float springY = 0.0f, springV = 0.0f; // nachschwingende Höhe der Kamera
         float shakeAmpS = 0.0f;   // geglätteter Ausschlag des Wackelns auf unebenem Grund
         float shakeT = 0.0f;
+        float wallCorr[3] = {};   // Verschiebung durch die Wandprüfung (geglättet beim Lösen)
+        bool wallHit = false;
     } g_act;
 
     float Dot(const float * a, const float * b)
@@ -4581,6 +4581,51 @@ namespace
                 const float y = r1[i];
                 r0[i] = x * ca - y * sa;
                 r1[i] = y * ca + x * sa;
+            }
+        }
+
+        // Wände (doc/KAMERA.md §4): Game_CamView prüft nur die Position des Spiels; Seitversatz, Heranrücken und
+        // Wackeln gingen danach durch Streckenwände (👤). Dieselben Prüfungen wie im Original noch einmal mit der neuen
+        // Position: bei Kameraflag 0x10 Game_CamCollideEdges (Randlinien) und Game_CamCollideWorld (Wände; spiegelt die
+        // Höhe, daher die Action-Höhe danach zurück; Game_CamGroundHeight meldet nie einen Treffer und entfällt), bei
+        // Typ > 1 außer 12 Game_CamAvoidObjects (hebt nur an). Die Wand schiebt die Kamera sofort heraus; gibt sie die
+        // Kamera frei, klingt die Verschiebung in 0,15 s ab, damit es an der Wand nicht flackert.
+        if (g_actWallCheck && (At<unsigned char>(CamState(0), 0xC0) & 0x10) != 0)
+        {
+            const float wanted[3] = { out[0], out[1], out[2] };
+            reinterpret_cast<void (__cdecl *)(int, float *)>(0x4649E0)(0, out);
+            reinterpret_cast<char (__cdecl *)(int, float *)>(0x464500)(0, out);
+            out[1] = wanted[1];
+            const short type = CamType(0);
+            if (type > 1 && type != 12)
+            {
+                reinterpret_cast<void (__cdecl *)(int, float *)>(0x464330)(0, out);
+            }
+            float corr[3] = { out[0] - wanted[0], out[1] - wanted[1], out[2] - wanted[2] };
+            const bool wallNow = Dot(corr, corr) > 1e-6f;
+            if (Dot(corr, corr) >= Dot(s.wallCorr, s.wallCorr))
+            {
+                std::memcpy(s.wallCorr, corr, sizeof(corr));
+            }
+            else
+            {
+                for (int i = 0; i < 3; ++i)
+                {
+                    Smooth(s.wallCorr[i], corr[i], 0.15f, dt);
+                }
+            }
+            for (int i = 0; i < 3; ++i)
+            {
+                out[i] = wanted[i] + s.wallCorr[i];
+            }
+            if (wallNow != s.wallHit)
+            {
+                s.wallHit = wallNow;
+                if (g_measure)
+                {
+                    Log("Kamera: Wand %s (Verschiebung %.2f %.2f %.2f)", wallNow ? "beruehrt" : "frei", corr[0], corr[1],
+                        corr[2]);
+                }
             }
         }
 
@@ -5770,46 +5815,6 @@ namespace
         }
     }
 
-    // ---- Messung LOD-Wahl ([Cars] LodMeasure, Lenkrad durch ferne Autos) ----
-    // FUN_00439f90 (thiscall, Objekt in ecx, ein float auf dem Stack, ret 4) wählt je Bild die Detailstufe eines Autos
-    // und legt sie in obj[0xB0] ab; obj[0x3D] ist das Auto. Geloggt wird jeder Wechsel mit Entfernung zum Spielerauto
-    // und Zahl der Stufen. Der Stackparameter muss durchgereicht werden, sonst stimmt der Stack nach ret 4 nicht mehr.
-    using LodSelectFn = unsigned char (__fastcall *)(int *, int, float);
-    LodSelectFn g_origLodSelect = nullptr;
-    std::map< int *, int > g_lodSeen;
-
-    unsigned char __fastcall HookLodSelect(int * obj, int edx, float size)
-    {
-        const unsigned char result = g_origLodSelect(obj, edx, size);
-        const int lod = obj[0xB0];
-        auto it = g_lodSeen.find(obj);
-        if (it != g_lodSeen.end() && it->second == lod)
-        {
-            return result;
-        }
-        g_lodSeen[obj] = lod;
-        const auto * car = reinterpret_cast<const unsigned char *>(obj[0x3D]);
-        const unsigned char * player = PlayerCar();
-        float dist = -1.0f;
-        if (car && player)
-        {
-            const float * a = reinterpret_cast<const float *>(car + kCarPos);
-            const float * b = reinterpret_cast<const float *>(player + kCarPos);
-            dist = std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
-        }
-        const int layers = (obj[0x2D] - obj[0x2C]) / 4;
-        Log("LOD: Objekt %p Auto %p%s Stufe %d von %d, Abstand %.1f m, Rueckgabe %d", obj, car,
-            car == player ? " (Spieler)" : "", lod, layers, dist, result);
-        return result;
-    }
-
-    void InstallLodMeasure()
-    {
-        static const unsigned char kBytes[] = { 0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x10, 0x01, 0x00, 0x00 };
-        InstallHook("LOD-Wahl Messung", 0x439F90, kBytes, sizeof(kBytes), reinterpret_cast<void *>(&HookLodSelect),
-                    reinterpret_cast<void **>(&g_origLodSelect));
-    }
-
     void InstallExhaustSmoke()
     {
         if (!g_exhaustSmoke)
@@ -6242,46 +6247,6 @@ namespace
         }
     }
 
-    // ---- Scheibentropfen messen ([Debug] WeatherLog) ----
-    // Wetterobjekt [0x627E08], Tropfenobjekt dort +0xC (R_WindshieldDrops*, doc/re/13-VIDEO.md). Je Sekunde: Menge +0,
-    // Anzahl +4 / Soll +8, Tempo +0x66F4, Merker schnell +0x66F8 / Schnee +0x66FA, Lage und Tempo von Tropfen 0,
-    // Lage der aktiven Ansicht (RENDER_CONTEXT 0x628130 +0x10, +0x10C/+0x110/+0x114), aus der das Spiel das Tempo schätzt.
-    void WeatherLogOnce()
-    {
-        __try
-        {
-            const auto * w = *reinterpret_cast<unsigned char * const *>(0x627E08);
-            const auto * d = w ? *reinterpret_cast<unsigned char * const *>(w + 0xC) : nullptr;
-            const auto * ctx = *reinterpret_cast<unsigned char * const *>(0x628130);
-            const auto * view = ctx ? *reinterpret_cast<unsigned char * const *>(ctx + 0x10) : nullptr;
-            if (!d || !view)
-            {
-                return;
-            }
-            const auto f = [](const unsigned char * b, int o) { return *reinterpret_cast<const float *>(b + o); };
-            const auto n = [](const unsigned char * b, int o) { return *reinterpret_cast<const int *>(b + o); };
-            Log("WeatherLog: Menge %.2f, Tropfen %d/%d, Tempo %.2f, schnell %d, Schnee %d, Tropfen0 %.3f %.3f %.3f v %.3f, "
-                "Ansicht %.1f %.1f %.1f",
-                f(d, 0), n(d, 4), n(d, 8), f(d, 0x66F4), d[0x66F8], d[0x66FA], f(d, 0xC), f(d, 0x10), f(d, 0x14),
-                f(d, 0x60A0), f(view, 0x10C), f(view, 0x110), f(view, 0x114));
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-        }
-    }
-
-    DWORD WINAPI WeatherLogThread(void *)
-    {
-        for (;;)
-        {
-            Sleep(1000);
-            if (InRace())
-            {
-                WeatherLogOnce();
-            }
-        }
-    }
-
     // ---- Menü- und Modusvariablen mitschreiben ([Debug] StateLog) ----
     // Alle 100 ms lesen, jede Änderung ins Log (doc/re/OFFEN.md Prüfzeilen 10, 11, 14): FEGAME_TYPE, RACE_TYPE,
     // Rückgabe des Menüs, Ergebnis PlayGame, Car Chrome, Car Detail, Modus kFeMode.
@@ -6334,20 +6299,6 @@ namespace
         }
         HANDLE t = CreateThread(nullptr, 0, &StateLogThread, nullptr, 0, nullptr);
         Log("StateLog: Thread %s", t ? "gestartet" : "fehlgeschlagen");
-        if (t)
-        {
-            CloseHandle(t);
-        }
-    }
-
-    void StartWeatherLog()
-    {
-        if (!g_weatherLog)
-        {
-            return;
-        }
-        HANDLE t = CreateThread(nullptr, 0, &WeatherLogThread, nullptr, 0, nullptr);
-        Log("WeatherLog: Thread %s", t ? "gestartet" : "fehlgeschlagen");
         if (t)
         {
             CloseHandle(t);
@@ -6413,7 +6364,6 @@ namespace
         StartSimTrace(base);
         InstallForceCops();
         lfsp_weather::Install((base + ".ini").c_str(), &Log);
-        StartWeatherLog();
         StartStateLog();
         g_soundDir = base.substr(0, base.find_last_of("\\/") + 1);
         lfsp_coverage::Install((base + ".ini").c_str(), g_soundDir.c_str(), &Log);
@@ -6426,10 +6376,6 @@ namespace
         InstallHook("Modell-Update", kModelUpdate, kUpdateBytes, sizeof(kUpdateBytes),
                     reinterpret_cast<void *>(&HookUpdate), reinterpret_cast<void **>(&g_origUpdate));
         InstallExhaustSmoke();
-        if (g_lodMeasure)
-        {
-            InstallLodMeasure();
-        }
         InstallHook("Car.Roof-Menue", kFeSetRoof, kSetRoofBytes, sizeof(kSetRoofBytes),
                     reinterpret_cast<void *>(&HookSetRoof), reinterpret_cast<void **>(&g_origSetRoof));
         static const unsigned char kBuildGeoBytes[] = { 0x83, 0xEC, 0x1C, 0x53, 0x8B, 0xD9 };

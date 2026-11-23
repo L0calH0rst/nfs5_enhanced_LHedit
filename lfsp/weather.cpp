@@ -161,7 +161,7 @@ namespace
     float g_snowSpeed = 0.01f;     // je Sekunde
     float g_meltSpeed = 0.005f;    // je Sekunde ohne Schnee (bei Regen doppelt)
     float g_startSnow = 0.6f;      // beim Rennstart, wenn es schneit
-    bool g_wetLog = false;         // [Debug] WeatherLog oder [Weather] Log: je Sekunde eine Zeile
+    bool g_wetLog = false;         // [Weather] Log: je Sekunde eine Zeile
     float g_wetness = 0.0f;
     float g_snowCover = 0.0f;
     float g_preRain = 0.0f;        // Regen nach Menü/Sturm, vor der Abdeckung
@@ -1255,7 +1255,7 @@ void lfsp_weather::Install(const char * ini, LogFn log)
         g_snowSpeed = wet("SnowSpeed", "0.01", 0.0001f, 10.0f);
         g_meltSpeed = wet("MeltSpeed", "0.005", 0.0001f, 10.0f);
         g_startSnow = wet("StartSnowCover", "0.6", 0.0f, 1.0f);
-        g_wetLog = GetPrivateProfileIntA("Debug", "WeatherLog", 0, ini) != 0 || g_logOn != 0;
+        g_wetLog = g_logOn != 0;
         Log("Wetter: Naesse %d (nass %.3f/s, trocken %.3f/s, Start %.2f), Schneedecke (%.4f/s, Abbau %.4f/s, Start %.2f), Log %d",
             g_wetOn ? 1 : 0, g_wetSpeed, g_drySpeed, g_startWet, g_snowSpeed, g_meltSpeed, g_startSnow, g_wetLog ? 1 : 0);
     }
