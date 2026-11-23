@@ -30,12 +30,13 @@
 #include "subsystems/menu/menu_scroll.h"
 #include "subsystems/movie/movie_upscale.h"
 #include "subsystems/camera/gt1_camera.h"
+#include "subsystems/car_fixes/car_fixes.h"
 
 namespace nfs5
 {
     namespace
     {
-        constexpr std::string_view VERSION = "1.3.0-LH.2";
+        constexpr std::string_view VERSION = "1.4.0-LH.1";
 
         HMODULE s_SelfModule = nullptr;
         hook::IatPatch s_CommandLinePatch;
@@ -247,6 +248,7 @@ namespace nfs5
             MenuScroll::GetInstance().Install( settings.m_Menu );
             MovieUpscale::GetInstance().Install( settings.m_Movie );
             Gt1Camera::GetInstance().Install();
+            CarFixes::GetInstance().Install( settings.m_CarFixes );
 
             LOG_INFO( "Initialization finished" );
         }
@@ -281,6 +283,7 @@ extern "C" BOOL WINAPI DllMain(
     {
         if (reserved == nullptr && nfs5::s_Hooked.load())
         {
+            nfs5::CarFixes::GetInstance().Uninstall();
             nfs5::Gt1Camera::GetInstance().Uninstall();
             nfs5::MovieUpscale::GetInstance().Uninstall();
             nfs5::MenuScroll::GetInstance().Uninstall();
